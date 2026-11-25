@@ -1,0 +1,38 @@
+[project]
+name = "driverkit"
+version = "0.0.0"
+description = "The driverkit relay and MCP server: drive a driverkit-mounted web app from Python."
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "driverkit contributors" }]
+keywords = ["agent", "mcp", "automation", "llm"]
+dependencies = []
+
+# Nothing here is needed to run the relay, the client or the stdio MCP server.
+# Those are stdlib-only on purpose: PROTOCOL.md's argument is that the relay
+# belongs inside a server you already run, and a dependency is a reason it
+# cannot be.
+[project.optional-dependencies]
+# `driverkit.fastmcp_server` only: an MCP server reachable over HTTP, with
+# FastMCP's own authentication in front of it rather than a scheme of ours.
+#
+# UNVERIFIED. `uv` panicked on the machine that module was written on, so it
+# has never been executed. See its docstring for the list of things to check
+# after installing this extra. The stdio server needs none of it and is tested.
+fastmcp = ["fastmcp>=2.3"]
+
+[project.scripts]
+driverkit-mcp = "driverkit.mcp_server:main"
+driverkit-relay = "driverkit.serve_relay:main"
+# Fails with an install hint, not a traceback, when the extra is absent.
+driverkit-fastmcp = "driverkit.fastmcp_server:main"
+
+[project.urls]
+Homepage = "https://github.com/driverkit/driverkit"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/driverkit"]

@@ -1,0 +1,36 @@
+{
+  "name": "@driverkit/widget",
+  "version": "0.0.0",
+  "description": "A chat panel in the corner of your own app, driving it through its own verbs.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@driverkit/agent": "0.0.0",
+    "driverkit": "0.0.0"
+  },
+  "keywords": [
+    "agent",
+    "llm",
+    "automation",
+    "chat",
+    "ui"
+  ],
+  "sideEffects": false
+}

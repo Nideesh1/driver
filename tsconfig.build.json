@@ -1,0 +1,23 @@
+{
+  // `tsc -b tsconfig.build.json` builds every package, in dependency order.
+  //
+  // A solution-style config: no files of its own, only references. `tsc -b`
+  // topologically sorts them, so `driverkit` is built before the five packages
+  // that import its types and `@driverkit/agent` before `@driverkit/widget`,
+  // which is the only cross-package import that survives to runtime.
+  //
+  // Separate from `tsconfig.json` and `tsconfig.src.json` on purpose. Those two
+  // are whole-repo typechecks with `noEmit`, and they see every package as one
+  // program -- useful for "is the repository consistent", useless for "what
+  // does each package publish". This one answers the second question, which is
+  // the one `npm install` asks.
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/agent" },
+    { "path": "./packages/adapters" },
+    { "path": "./packages/browser" },
+    { "path": "./packages/relay" },
+    { "path": "./packages/widget" }
+  ]
+}

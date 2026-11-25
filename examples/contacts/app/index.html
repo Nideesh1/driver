@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Contacts — Northwind CRM</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="rail">
+        <div class="brand">
+          <span class="brand-mark">NW</span>
+          <span class="brand-name">Northwind</span>
+        </div>
+        <nav class="nav">
+          <a class="nav-item" href="#" aria-current="page">Contacts</a>
+          <a class="nav-item" href="#">Companies</a>
+          <a class="nav-item" href="#">Deals</a>
+          <a class="nav-item" href="#">Reports</a>
+          <a class="nav-item" href="#">Settings</a>
+        </nav>
+        <div class="rail-foot">
+          <div class="conn">
+            <span class="conn-dot" id="conn-dot" data-state="connecting"></span>
+            <span id="conn-text">connecting to relay…</span>
+          </div>
+          <p class="rail-note">
+            This screen is drivable two ways: the panel in the corner, and any
+            agent that can reach the relay mounted at <code>/dk</code>.
+          </p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="head">
+          <div>
+            <h1>Contacts</h1>
+            <p class="sub" id="sub">—</p>
+          </div>
+          <div class="head-actions">
+            <label class="search" for="q">
+              <span class="search-icon" aria-hidden="true">⌕</span>
+              <input
+                id="q"
+                type="search"
+                autocomplete="off"
+                placeholder="Search name, company, status or id"
+                aria-label="Search contacts"
+              />
+            </label>
+          </div>
+        </header>
+
+        <div class="selbar" id="selbar" data-empty="true">
+          <span class="selcount" id="selcount">No contacts selected</span>
+          <div class="selbar-actions">
+            <button type="button" id="clear-sel" class="btn btn-quiet">Clear</button>
+            <button type="button" id="accept-sel" class="btn btn-primary">
+              Accept selected
+            </button>
+          </div>
+        </div>
+
+        <div class="tablewrap">
+          <table class="table">
+            <thead>
+              <tr>
+                <th class="col-check" scope="col"><span class="vh">Selected</span></th>
+                <th class="col-id" scope="col">ID</th>
+                <th scope="col">Name</th>
+                <th scope="col">Company</th>
+                <th class="col-status" scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+          <p class="empty" id="empty" hidden>Nothing matches that search.</p>
+        </div>
+
+        <footer class="pager">
+          <span id="range" class="range">—</span>
+          <div class="pager-buttons">
+            <button type="button" id="prev" class="btn btn-quiet">Previous</button>
+            <button type="button" id="next" class="btn btn-quiet">Next</button>
+          </div>
+        </footer>
+      </main>
+
+      <section class="detail" id="detail" hidden aria-label="Contact detail">
+        <div class="detail-head">
+          <h2 id="detail-name">—</h2>
+          <button type="button" id="detail-close" class="btn btn-quiet">Close</button>
+        </div>
+        <dl class="detail-list">
+          <dt>ID</dt><dd id="detail-id">—</dd>
+          <dt>Company</dt><dd id="detail-company">—</dd>
+          <dt>Status</dt><dd id="detail-status">—</dd>
+          <dt>Owner</dt><dd id="detail-owner">—</dd>
+        </dl>
+      </section>
+    </div>
+
+    <!-- The built @driverkit/widget carries one bare specifier (it imports
+         drive() and commas() from @driverkit/agent at runtime). A
+         <script type="module"> resolves relative URLs only -- there is no
+         node_modules walk in a browser -- so it needs naming here. This is
+         the ONLY such entry, and the packaging test pins that it stays so. -->
+    <script type="importmap">
+    { "imports": { "@driverkit/agent": "../../../packages/agent/dist/index.js" } }
+    </script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

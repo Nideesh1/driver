@@ -1,0 +1,270 @@
+/**
+ * driverkit/agent — the contract with the model, and nothing else.
+ *
+ * This package contains **no model client and no API key handling**, and that
+ * is the load-bearing decision rather than a scoping convenience. Three
+ * reasons, in order of how much they cost to get wrong:
+ *
+ * 1. **A browser cannot hold an API key.** Anything shipped to a page is
+ *    readable by whoever has the page, so a widget that takes an `apiKey`
+ *    option is a widget that leaks one. The realistic deployment is that
+ *    `think` does `fetch("/api/chat")` against the app's own backend, which
+ *    already authenticates the person and already holds the key. That is the
+ *    documented default story — see `backendThink` — and nothing in these
+ *    types assumes a model is reachable from the page at all.
+ *
+ * 2. **Vendor neutrality has to be structural.** A `provider: "anthropic" |
+ *    "openai"` option means this package grows a translation layer per vendor
+ *    and a release per API change. A function pointer means it grows neither,
+ *    and a local model, a proxy, a queue or a scripted fake all satisfy it.
+ *
+ * 3. **It is how the loop gets tested.** Every test in this package drives a
+ *    real `mount()`ed driver with a scripted `think`. If the model were inside,
+ *    the loop's hard parts — the refusal path, the commit gate, the bounds —
+ *    would be verified by paying a vendor and hoping.
+ *
+ * The shapes below are deliberately the *intersection* of the tool-use APIs,
+ * not the union: a system string, a flat message list, a tool list, and either
+ * prose or calls coming back. Mapping that onto a vendor's wire format is
+ * twenty lines in the caller and does not belong here.
+ */
+
+import type { Manifest, Result, Scalar, Snapshot, VerbKind } from "driverkit";
+
+/**
+ * One tool, as the model sees it.
+ *
+ * This is the MCP `tools/list` shape, down to the field names, because the
+ * Python MCP server in this same repository emits exactly that and the two
+ * halves of one library must not describe the same verbs differently. A model
+ * driving an app from outside through MCP and a model driving it from inside
+ * through this loop read the same sentences about the same verbs. See
+ * `tools.ts`, and `python/src/driverkit/mcp_server.py` for the other end.
+ */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: "object";
+    properties: Record<string, JsonSchema>;
+    required: string[];
+    additionalProperties: false;
+  };
+}
+
+/** The sliver of JSON Schema a driverkit `ArgSpec` can produce. Hand-rolled to
+ *  keep the zero-dependency promise the core makes. */
+export interface JsonSchema {
+  type: "string" | "number" | "boolean" | "integer";
+  description: string;
+  /** From `ArgSpec.oneOf`, which is JSON Schema's `enum` and emphatically not
+   *  JSON Schema's `oneOf`: the names look alike and the meanings diverge, and
+   *  emitting the latter produces a schema that validates anything. */
+  enum?: Scalar[];
+}
+
+/** A verb the model wants run. `id` is the vendor's correlation id, passed
+ *  straight back on the tool turn; this package never interprets it. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  args: Record<string, Scalar>;
+}
+
+/**
+ * One message. A flat list of these, in order, is the uncached half.
+ *
+ * Three roles rather than a vendor's content-block union: it is the least that
+ * can express a tool-use loop, and widening it would mean this package taking
+ * a position on image blocks, thinking blocks and citations, each of which is
+ * spelled differently by every vendor and needed by none of this.
+ */
+export type Turn =
+  | { role: "user"; text: string }
+  | { role: "assistant"; text?: string; calls?: ToolCall[] }
+  | { role: "tool"; callId: string; name: string; text: string };
+
+/**
+ * What `think` is handed.
+ *
+ * The split in here is the whole cost argument, restated as a function
+ * signature: `system` and `tools` are the static half and are **byte-identical
+ * on every call within a run**, so a caller can hand them to a provider with
+ * caching turned on and pay for them once. `messages` is the growing tail.
+ *
+ * A caller that folds anything per-turn into `system` — a timestamp, the
+ * current screen, a step counter — busts the prefix cache on every turn and
+ * the loop stops being cheap. `drive` computes `system` once, before the loop,
+ * from the manifest alone, which is the only way to make that structural
+ * rather than a rule in a comment. There is a test that asserts it.
+ */
+export interface ThinkInput {
+  /** Static for the whole run. Cache it. */
+  system: string;
+  /** Static for the whole run. Cache it. */
+  tools: ToolSpec[];
+  /** The tail: the person's message, the model's own turns, and one tool turn
+   *  per verb that ran, each carrying the screen as it was after it ran. */
+  messages: Turn[];
+  /** The run's cancellation, forwarded so a `fetch` can be torn down mid
+   *  flight. A `think` that ignores it still works; `drive` checks it again on
+   *  the way out and will not run a verb for an aborted run. */
+  signal?: AbortSignal;
+}
+
+/**
+ * What `think` returns.
+ *
+ * No `calls` (or an empty list) means the model answered, and the run ends
+ * with `text` as the answer. That is the only stop condition the model
+ * controls, and it is the same convention every tool-use API already uses, so
+ * an adapter is a field rename rather than a state machine.
+ */
+export interface ThinkResult {
+  text?: string;
+  calls?: ToolCall[];
+}
+
+export type Think = (input: ThinkInput) => Promise<ThinkResult>;
+
+/** Why the run ended. Returned rather than thrown: `max-steps` and `stuck` are
+ *  ordinary outcomes a UI has to render, and an exception would push every
+ *  caller into a try/catch that treats a bounded run as a failure. */
+export type StopReason =
+  /** The model answered in prose. The only ending the model chooses. */
+  | "answered"
+  /** `maxSteps` was reached with the model still calling verbs. */
+  | "max-steps"
+  /** The `AbortSignal` fired. */
+  | "aborted"
+  /** The same verb was refused the same way `refusalLimit` times. */
+  | "stuck"
+  /** `think` returned neither prose nor calls. A broken adapter, usually. */
+  | "silent";
+
+/** Handed to `onBeforeCommit`. Carries the manifest's `kind` and `refuses` so
+ *  a host app can word its own confirmation using the app's own vocabulary
+ *  rather than re-deriving it from the verb name. */
+export interface CommitRequest {
+  name: string;
+  args: Record<string, Scalar>;
+  verb: Manifest["verbs"][number];
+  /** The screen as it is right now, so a confirmation can show the selection
+   *  the commit is about to act on. */
+  snapshot: Snapshot;
+}
+
+/**
+ * `true` (or nothing) lets the commit run. `false` vetoes it. A string vetoes
+ * it and becomes the hint the model is told.
+ *
+ * The veto reaches the model as an ordinary refusal — the `declined-by-user`
+ * slug — and never as an exception. A thrown veto would abort the run and the
+ * model would never learn why, so the next thing the person saw would be a
+ * dead panel instead of "you declined that; want me to narrow it first?".
+ */
+export type CommitDecision = boolean | string | void;
+
+export interface DriveEvents {
+  /** About to spend a model round trip. `step` is 1-based. */
+  onStep?: (e: { step: number }) => void;
+  /** The model said something in prose, mid-run or as its answer. */
+  onSay?: (e: { step: number; text: string }) => void;
+  /** A verb is about to run. `kind` comes from the manifest and is undefined
+   *  when the app declared none — this package does not manufacture a safety
+   *  claim the app did not make, in either direction. */
+  onCall?: (e: { step: number; call: ToolCall; kind?: VerbKind }) => void;
+  /** A verb ran. `result` is null for the two tools that are not verbs
+   *  (`read_screen`) and for a call to a name the manifest does not have. */
+  onResult?: (e: {
+    step: number;
+    call: ToolCall;
+    kind?: VerbKind;
+    result: Result | null;
+    /** What the model was told, verbatim. A UI showing this shows exactly
+     *  what the model is reasoning from, which is the honest thing to show. */
+    text: string;
+  }) => void;
+  /** The run ended, for any reason including abort. Always fires once. */
+  onStop?: (e: { stop: StopReason; steps: number; text?: string }) => void;
+}
+
+export interface DriveOptions extends DriveEvents {
+  think: Think;
+  /** What the person asked for. Appended as the newest user turn, together
+   *  with the current screen. Omit it to continue a `history` that already
+   *  ends in a user turn. */
+  task?: string;
+  /** Earlier turns, as returned by a previous `drive`. The loop keeps no state
+   *  between runs: a conversation is the caller's array, which is what lets a
+   *  widget hold one and a server hold another without this package owning a
+   *  session concept. */
+  history?: Turn[];
+  /**
+   * Extra app-specific guidance, folded into the system prompt.
+   *
+   * Static, like everything else in there. A per-user or per-screen string
+   * here is the one mistake that makes the whole prefix uncacheable **across
+   * users**, which is where most of the saving actually lives.
+   */
+  instructions?: string;
+  /**
+   * Hard cap on model round trips. Default 12.
+   *
+   * There is a cap at all because an agent that loops forever inside somebody
+   * else's web page is the thing that gets the library uninstalled. 12 is
+   * enough for read → describe → check the count → commit → answer with room
+   * to recover from two refusals, and small enough that a confused model costs
+   * cents rather than a tab that is still spending at lunchtime.
+   */
+  maxSteps?: number;
+  /**
+   * Stop after this many identical refusals. Default 3.
+   *
+   * Identical means the same verb refused with the same slug. Counted across
+   * the run and not merely consecutively: a model that alternates a refused
+   * commit with a free read has not learned anything, it has just put a cheap
+   * call between two expensive mistakes.
+   */
+  refusalLimit?: number;
+  /** Cancel the run. Checked before every model call and before every verb. */
+  signal?: AbortSignal;
+  /**
+   * Opt-in gate in front of every `commit` verb.
+   *
+   * Off by default **here, and only here**. `drive` is a library primitive: it
+   * is driven by a widget, a backend job, a test, a CLI, and a caller that has
+   * its own approval policy should not have to disable one it never asked for.
+   *
+   * It is a different judgement one level up. `mountWidget` defaults this ON,
+   * because a person watching a chatbot move their own screen should not learn
+   * about a thousand accepted rows afterwards — and the gate is cheap there
+   * for a reason worth stating: a `commit` verb takes no predicate and acts on
+   * the whole current selection, so accepting a thousand rows is ONE call and
+   * therefore one question, not a thousand. That makes it the cheapest
+   * possible place to put a human in front of the expensive failure.
+   *
+   * A veto reaches the model as a `declined-by-user` refusal — see `DECLINED`
+   * and PROTOCOL.md's reserved list — so the model adapts instead of retrying.
+   */
+  onBeforeCommit?: (req: CommitRequest) => CommitDecision | Promise<CommitDecision>;
+}
+
+export interface DriveOutcome {
+  stop: StopReason;
+  /** The model's last prose. The thing to show the person.
+   *
+   *  Present for `answered`; also present for the other endings when the model
+   *  happened to narrate before it was cut off, because half an explanation is
+   *  better than a bare "stopped". */
+  text?: string;
+  /** Model round trips spent. */
+  steps: number;
+  /** `history` plus everything this run added. Pass it back as the next run's
+   *  `history` to continue the conversation.
+   *
+   *  Not a verbatim transcript: older user turns have had their screen blocks
+   *  replaced, so that a model is never shown two screens and left to work out
+   *  which one is now true. See `pruneScreens`. */
+  messages: Turn[];
+}

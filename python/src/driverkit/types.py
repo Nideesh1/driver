@@ -1,0 +1,514 @@
+"""
+driverkit — the types, mirroring ``packages/core/src/types.ts``.
+
+These dataclasses are not a convenience layer over dicts; they are the Python
+end of a wire contract. Every field name here matches the TypeScript interface
+it mirrors, and ``to_dict``/``from_dict`` are the only places a name is spelled
+twice. The reason to be strict about it: the manifest an agent caches was
+serialised by the TS core, and a Python client that quietly renames a field
+produces a tool list that no longer describes the app it is driving.
+
+Two shapes read differently in Python than in TypeScript and are called out
+where they are defined:
+
+* ``Row`` is ``{ id, ...columns }`` in TS — an index signature. Python has no
+  such thing, so the extra columns live in a dict and are flattened back out on
+  the way to JSON.
+* ``Result`` is a discriminated union in TS. Python gets one dataclass with an
+  ``ok`` flag, because a union of two dataclasses would make every caller
+  ``isinstance``-check before reading ``snapshot``, which both arms carry.
+
+Unknown fields are ignored on the way in. PROTOCOL.md promises a field may be
+added without a version bump, so a strict parser here would turn an additive
+change on the relay into a broken client.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Sequence
+
+__all__ = [
+    "Scalar",
+    "VerbKind",
+    "VERB_KINDS",
+    "RELAY_REFUSALS",
+    "UNKNOWN_OUTCOME",
+    "ArgSpec",
+    "VerbSpec",
+    "Manifest",
+    "Row",
+    "Page",
+    "Snapshot",
+    "Result",
+    "Tab",
+]
+
+#: A value an agent can pass to a verb. The TS type is the same four: anything
+#: that cannot survive JSON cannot cross the relay.
+Scalar = str | int | float | bool | None
+
+#: What a verb does to the world, declared in the cached half so an agent knows
+#: before it calls: ``read`` changes nothing, ``describe`` changes what is
+#: selected or filtered and reports a ``count``, ``commit`` changes data and
+#: may be irreversible. Mirrors ``VerbKind``.
+VerbKind = str
+VERB_KINDS = ("read", "describe", "commit")
+
+#: Refusals that come from the relay rather than from an app's verb, as a
+#: closed set. A client has to be able to tell "your app said no", which means
+#: rephrase and retry, from "your call never landed", which means reconnect or
+#: pick another tab. These three are reserved, along with the core's own
+#: ``stale``, ``unknown-verb``, ``bad-argument``, ``unmounted`` and ``threw``:
+#: an app that names one of its verb refusals the same thing takes that
+#: distinction away, and if ``timeout`` can mean either then it means neither.
+#: See ``RelayRefusal`` and PROTOCOL.md, "When a call never reaches a tab".
+RELAY_REFUSALS = ("no-such-tab", "tab-went-away", "timeout")
+
+#: The relay refusals that leave the outcome **unknown** rather than failed.
+#:
+#: Only ``no-such-tab`` proves the call did not happen: it was never forwarded,
+#: because there was nowhere to forward it. The other two are both "the call
+#: was accepted and no answer came back" — the tab went quiet past the
+#: deadline, or its stream closed and the answer died with it. In either case
+#: the verb may well have run.
+#:
+#: The reflex this exists to block is treating a non-answer as a failed step
+#: and retrying it, which is the one move that turns one bulk accept into two.
+UNKNOWN_OUTCOME = ("timeout", "tab-went-away")
+
+
+def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
+    """Omit absent optional fields rather than sending ``null``.
+
+    ``{"optional": null}`` and an absent ``optional`` mean the same thing to a
+    tolerant reader, but they hash differently — and the manifest version in
+    the TS core is a fingerprint of the serialised verb surface. Emitting
+    explicit nulls would make a round-tripped manifest stop matching itself.
+    """
+    return {k: v for k, v in d.items() if v is not None}
+
+
+@dataclass(frozen=True)
+class ArgSpec:
+    """What a verb accepts. Mirrors ``ArgSpec``."""
+
+    type: str  # "string" | "number" | "boolean"
+    describe: str
+    one_of: tuple[Scalar, ...] | None = None  # wire name: oneOf
+    optional: bool | None = None  # absent means required
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "ArgSpec":
+        one_of = d.get("oneOf")
+        return cls(
+            type=d["type"],
+            describe=d.get("describe", ""),
+            one_of=tuple(one_of) if one_of is not None else None,
+            optional=d.get("optional"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return _drop_none(
+            {
+                "type": self.type,
+                "describe": self.describe,
+                "oneOf": list(self.one_of) if self.one_of is not None else None,
+                "optional": self.optional,
+            }
+        )
+
+    @property
+    def required(self) -> bool:
+        """Absent ``optional`` means required — stated once, here, so no caller
+        has to remember that the default is the strict one."""
+        return not self.optional
+
+
+@dataclass(frozen=True)
+class VerbSpec:
+    """One entry of ``Manifest.verbs``.
+
+    Note what this is *not*: it has no ``run``. The TS ``Verb`` carries a body
+    and this does not, because the body never crosses the wire — only the
+    surface an agent can observe does.
+    """
+
+    name: str
+    describe: str
+    args: dict[str, ArgSpec] = field(default_factory=dict)
+    refuses: tuple[str, ...] = ()
+    #: ``read`` | ``describe`` | ``commit``, or None when the app did not say.
+    #:
+    #: None is kept distinct from every kind rather than defaulted to one,
+    #: because both defaults are wrong in a way that costs something. Reading
+    #: it as ``read`` tells an agent an irreversible verb is free to try.
+    #: Reading it as ``commit`` marks every verb of an app that predates the
+    #: field as dangerous, and a warning on everything is a warning on nothing.
+    #: Absent means absent: make no claim.
+    kind: VerbKind | None = None
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "VerbSpec":
+        args = d.get("args") or {}
+        kind = d.get("kind")
+        return cls(
+            name=d["name"],
+            describe=d.get("describe", ""),
+            args={k: ArgSpec.from_dict(v) for k, v in args.items()},
+            refuses=tuple(d.get("refuses") or ()),
+            # An unrecognised kind is dropped rather than passed through. A
+            # future fourth kind means this code is out of date, and inventing
+            # a safety claim from a word it does not know is the one thing it
+            # must not do.
+            kind=kind if kind in VERB_KINDS else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"name": self.name, "describe": self.describe}
+        if self.kind is not None:
+            out["kind"] = self.kind
+        if self.args:
+            out["args"] = {k: v.to_dict() for k, v in self.args.items()}
+        if self.refuses:
+            out["refuses"] = list(self.refuses)
+        return out
+
+
+@dataclass(frozen=True)
+class Manifest:
+    """The static half. Cache this; its ``version`` is how you learn you may
+    not."""
+
+    version: str
+    app: str
+    verbs: tuple[VerbSpec, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "Manifest":
+        return cls(
+            version=d.get("version", ""),
+            app=d.get("app", ""),
+            verbs=tuple(VerbSpec.from_dict(v) for v in d.get("verbs") or ()),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "app": self.app,
+            "verbs": [v.to_dict() for v in self.verbs],
+        }
+
+    def verb(self, name: str) -> VerbSpec | None:
+        for v in self.verbs:
+            if v.name == name:
+                return v
+        return None
+
+
+@dataclass(frozen=True)
+class Row:
+    """One row of whatever the screen is showing.
+
+    TS writes this as ``{ id: string; [column: string]: Scalar | undefined }``.
+    Python cannot express an index signature on a dataclass, so the other
+    columns live in ``columns`` and ``to_dict`` flattens them back beside
+    ``id``. The flat form is what goes over the wire; the nested one exists
+    only inside this process.
+    """
+
+    id: str
+    columns: dict[str, Scalar] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "Row":
+        return cls(id=str(d.get("id", "")), columns={k: v for k, v in d.items() if k != "id"})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, **self.columns}
+
+    def __getitem__(self, column: str) -> Scalar:
+        return self.id if column == "id" else self.columns.get(column)
+
+    def get(self, column: str, default: Scalar = None) -> Scalar:
+        if column == "id":
+            return self.id
+        return self.columns.get(column, default)
+
+
+@dataclass(frozen=True)
+class Page:
+    """``Snapshot.page``: the window these rows are a view of.
+
+    ``total`` is OPTIONAL, and the three states it makes are the ones the TS
+    ``Snapshot.page`` comment pins:
+
+        page absent          these are all the rows there are
+        page, total given    a window, and you know how big the whole is
+        page, total absent   a window, and you do NOT know how big the whole is
+
+    The third is not an edge case, it is the normal output of
+    ``@driverkit/adapters`` reading a rendered table: the DOM cannot tell a
+    virtualised grid from a short list, so an adapter that had to supply a
+    total could only omit ``page`` — asserting completeness it cannot know — or
+    invent one. Requiring it here made the field unrepresentable from the wire
+    anyway: ``int(d["total"])`` raised ``KeyError`` on the commonest snapshot a
+    DOM-adapted app produces, before the renderer was ever reached.
+    """
+
+    index: int
+    size: int
+    total: int | None = None
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "Page":
+        total = d.get("total")
+        return cls(
+            index=int(d["index"]),
+            size=int(d["size"]),
+            # `is None` rather than falsy: a total of 0 is a real answer — an
+            # empty window onto an empty whole — and distinct from "I do not
+            # count", which is what absence means.
+            total=int(total) if total is not None else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"index": self.index, "size": self.size}
+        # Omitted rather than sent as null, so a round trip through this class
+        # cannot turn "unknown" into a field a stricter parser rejects.
+        if self.total is not None:
+            out["total"] = self.total
+        return out
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """What a human could see right now. Mirrors ``Snapshot``.
+
+    ``page`` stays ``None`` when the relay did not send one, and that absence
+    is meaningful rather than missing data: per the TS comment it is a claim
+    that the agent is seeing everything. Defaulting it to a synthetic
+    ``{0, len(rows), len(rows)}`` would manufacture that claim, so we don't.
+    """
+
+    where: str
+    rev: int
+    rows: tuple[Row, ...] | None = None
+    page: Page | None = None
+    selected: tuple[str, ...] | None = None
+    #: ``selectedCount`` on the wire: how many rows are selected in all.
+    #:
+    #: ``selected`` carries only the ids ON SCREEN, exactly like ``rows``, so
+    #: that ``select-where`` can select thousands without putting tens of
+    #: kilobytes of ids into the uncached half of every later result — which on
+    #: a big table goes straight through the relay's 1 MiB body limit. This is
+    #: the honest size that ``selected`` therefore cannot be.
+    #:
+    #: ``None`` means "I do not count" and is distinct from ``0``, which is a
+    #: real answer. Dropping it here was not a cosmetic loss: an agent handed
+    #: three ids and a bulk commit, with no count, believes three rows are
+    #: about to change.
+    selected_count: int | None = None
+    note: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "Snapshot":
+        rows = d.get("rows")
+        selected = d.get("selected")
+        page = d.get("page")
+        count = d.get("selectedCount")
+        return cls(
+            where=d.get("where", ""),
+            rev=int(d.get("rev", 0)),
+            rows=tuple(Row.from_dict(r) for r in rows) if rows is not None else None,
+            page=Page.from_dict(page) if page else None,
+            selected=tuple(str(s) for s in selected) if selected is not None else None,
+            selected_count=int(count) if count is not None else None,
+            note=d.get("note"),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"where": self.where, "rev": self.rev}
+        if self.rows is not None:
+            out["rows"] = [r.to_dict() for r in self.rows]
+        if self.page is not None:
+            out["page"] = self.page.to_dict()
+        if self.selected is not None:
+            out["selected"] = list(self.selected)
+        if self.selected_count is not None:
+            # Spelled `selectedCount` going out, because the wire name is the
+            # contract and `selected_count` is only how Python spells it.
+            out["selectedCount"] = self.selected_count
+        if self.note is not None:
+            out["note"] = self.note
+        return out
+
+    def columns(self) -> list[str]:
+        """The column order for rendering: ``id`` first, then every other key
+        in the order it was first seen. Rows are not required to agree on their
+        keys, so this is a union and not ``rows[0].keys()``."""
+        seen: list[str] = ["id"]
+        for row in self.rows or ():
+            for key in row.columns:
+                if key not in seen:
+                    seen.append(key)
+        return seen
+
+
+@dataclass(frozen=True)
+class Result:
+    """What the agent gets back. Mirrors ``Result``, widened to ``WireResult``.
+
+    ``snapshot`` is the screen AFTER the call — on purpose, so acting and
+    observing are one round trip. Anything that renders a Result for a model
+    and drops this has thrown away the reason the shape is like that.
+
+    ``count`` is how a ``describe`` verb reports what it matched. It is the
+    number a human would have to see before pressing a bulk button, and the
+    whole reason ``describe`` and ``commit`` are separate verbs, so a renderer
+    that buries it has removed the safety the split was bought with.
+
+    ``snapshot`` is typed optional, where the TS ``Result`` has it required.
+    That is not a weakening of the contract: a driver mounted in a page always
+    fills it, and this type is the ``WireResult`` an agent receives, where a
+    relay refusal about a call that never reached a tab has no screen to
+    report. Its absence means "nothing ran and nobody looked", never "the
+    screen is empty" — see :meth:`relay_refusal`.
+    """
+
+    ok: bool
+    snapshot: Snapshot | None = None
+    note: str | None = None  # ok=True only
+    count: int | None = None  # ok=True only, and only from a `describe` verb
+    refused: str | None = None  # ok=False only
+    hint: str | None = None  # ok=False only
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "Result":
+        snapshot = d.get("snapshot")
+        ok = bool(d.get("ok"))
+        count = d.get("count")
+        return cls(
+            ok=ok,
+            snapshot=Snapshot.from_dict(snapshot) if isinstance(snapshot, Mapping) else None,
+            note=d.get("note") if ok else None,
+            count=int(count) if ok and isinstance(count, (int, float)) and not isinstance(count, bool) else None,
+            refused=None if ok else str(d.get("refused", "unknown")),
+            hint=d.get("hint") if not ok else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"ok": self.ok}
+        if self.ok:
+            if self.note is not None:
+                out["note"] = self.note
+            if self.count is not None:
+                out["count"] = self.count
+        else:
+            out["refused"] = self.refused
+            if self.hint is not None:
+                out["hint"] = self.hint
+        if self.snapshot is not None:
+            out["snapshot"] = self.snapshot.to_dict()
+        return out
+
+    @property
+    def relay_refusal(self) -> str | None:
+        """The relay refusal slug, when this is one, else None.
+
+        Both documented signals are accepted: a slug from the closed set, and a
+        missing snapshot. A conforming relay sends them together. Requiring
+        both would mean one sloppy relay turns "your call never landed" into
+        "your app said no", which is the single most expensive confusion this
+        client can make — it is the difference between retrying and not knowing
+        whether a commit already happened.
+        """
+        if self.ok:
+            return None
+        if self.refused in RELAY_REFUSALS:
+            return self.refused
+        if self.snapshot is None:
+            return self.refused
+        return None
+
+    @property
+    def landed(self) -> bool:
+        """False only when the call provably never reached a tab.
+
+        That is ``no-such-tab`` alone. ``timeout`` and ``tab-went-away`` are
+        both deliberately absent: each means the call was accepted and no
+        answer came back, and the verb may well have run — the tab went quiet,
+        or its stream closed and the answer died with it. Collapsing unknown
+        into failed is how a bulk accept gets made twice.
+        """
+        return self.relay_refusal not in RELAY_REFUSALS or self.relay_refusal in UNKNOWN_OUTCOME
+
+    @property
+    def outcome_unknown(self) -> bool:
+        """True when nobody can say whether the verb ran."""
+        return self.relay_refusal in UNKNOWN_OUTCOME
+
+
+@dataclass(frozen=True)
+class Tab:
+    """One row of ``GET /dk/tabs``.
+
+    The listing is now spelled out in PROTOCOL.md: the ``{"tabs": [...]}``
+    envelope, the id field named ``tab`` — the same name the ``hello`` frame
+    uses, one name for one thing — and ``manifestVersion`` lifted to the top
+    level so a client can tell whether its cached manifest is current without
+    fetching the whole thing.
+
+    ``from_dict`` still reads the spellings a relay author might plausibly have
+    picked before that was written. Tolerance here costs a few lines and buys
+    compatibility with relays built against the earlier prose; it is not a
+    licence to emit them, and ``to_dict`` writes only the specified shape.
+    """
+
+    id: str
+    app: str = ""
+    title: str = ""
+    url: str = ""
+    manifest_version: str = ""  # wire name: manifestVersion
+    #: The tab's current ``rev``, so a client can see the screen moved without
+    #: reading the snapshot.
+    rev: int | None = None
+    #: When the tab connected, ISO-8601, as the relay reported it. Kept as a
+    #: string rather than parsed: nothing here needs it as a datetime, and
+    #: parsing would invent a failure mode for a field only ever shown to a
+    #: human choosing between two tabs.
+    since: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "Tab":
+        version = d.get("manifestVersion") or d.get("manifest_version")
+        if version is None:
+            nested = d.get("manifest")
+            if isinstance(nested, Mapping):
+                version = nested.get("version")
+        rev = d.get("rev")
+        return cls(
+            id=str(d.get("tab") or d.get("id") or ""),
+            app=str(d.get("app") or ""),
+            title=str(d.get("title") or ""),
+            url=str(d.get("url") or ""),
+            manifest_version=str(version or ""),
+            rev=int(rev) if isinstance(rev, (int, float)) and not isinstance(rev, bool) else None,
+            since=d.get("since"),
+            raw=dict(d),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "tab": self.id,
+            "app": self.app,
+            "title": self.title,
+            "url": self.url,
+            "manifestVersion": self.manifest_version,
+        }
+        if self.rev is not None:
+            out["rev"] = self.rev
+        if self.since is not None:
+            out["since"] = self.since
+        return out

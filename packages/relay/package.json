@@ -1,0 +1,47 @@
+{
+  "name": "@driverkit/relay",
+  "version": "0.0.0",
+  "description": "The driverkit relay: the one place an agent and a browser tab can both reach.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./serve": {
+      "types": "./dist/serve.d.ts",
+      "default": "./dist/serve.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@types/node": "^22.0.0",
+    "driverkit": "0.0.0"
+  },
+  "keywords": [
+    "agent",
+    "mcp",
+    "automation",
+    "llm",
+    "sse"
+  ],
+  "sideEffects": false,
+  "//dependencies": [
+    "`@types/node` is a real dependency and not a dev one: dist/relay.d.ts and",
+    "dist/serve.d.ts both re-export `node:http` types in their PUBLIC surface, so a",
+    "consumer that installs @driverkit/relay without it gets TS2307 on the package's",
+    "own declarations. A types package in `dependencies` is the documented answer to",
+    "exactly that case."
+  ]
+}
