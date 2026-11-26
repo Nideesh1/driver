@@ -167,34 +167,60 @@ export function defaultStorage(): StorageLike | undefined {
   }
 }
 
-/** A remembered position, or null for every way that can fail: no storage, a
- *  throwing read, an empty slot, malformed JSON, or numbers that are not
- *  numbers. All of them mean the same thing to the caller — use the default —
- *  so none of them is worth distinguishing, and none of them is worth
- *  breaking a chat panel over. */
-export function read(storage: StorageLike | undefined, app: string): Fraction | null {
+/**
+ * Read one JSON value out of storage, or null for every way that can fail: no
+ * storage, a throwing read, an empty slot, malformed JSON, or a shape `parse`
+ * does not recognise.
+ *
+ * All of them mean the same thing to the caller — use the default — so none is
+ * worth distinguishing, and none is worth breaking a chat panel over. A
+ * private window and a person who blocked site data both throw on the way IN,
+ * before any value has been looked at, which is why the `getItem` call and the
+ * parsing are inside one try and not two.
+ *
+ * This is the only place in the package that reads persisted state. The
+ * settings view keeps its own key and its own shape and goes through here, so
+ * there is one mechanism to get the try/catch right in rather than two.
+ */
+export function loadJson<T>(
+  storage: StorageLike | undefined,
+  key: string,
+  parse: (value: unknown) => T | null,
+): T | null {
   try {
-    const raw = storage?.getItem(storageKey(app));
+    const raw = storage?.getItem(key);
     if (!raw) return null;
-    const value = JSON.parse(raw) as { fx?: unknown; fy?: unknown };
-    const fx = finite(value?.fx);
-    const fy = finite(value?.fy);
-    if (fx === null || fy === null) return null;
-    return { fx: unit(fx), fy: unit(fy) };
+    return parse(JSON.parse(raw));
   } catch {
     return null;
   }
 }
 
-export function write(storage: StorageLike | undefined, app: string, at: Fraction): void {
+/** Write one JSON value, and swallow every reason it can fail. */
+export function saveJson(storage: StorageLike | undefined, key: string, value: unknown): void {
   try {
-    storage?.setItem(storageKey(app), JSON.stringify(at));
+    storage?.setItem(key, JSON.stringify(value));
   } catch {
     // A full quota, a private window, a user who blocked site data. The
     // position is still correct for this session; it just will not be
     // remembered, and that is not worth a thrown error inside a pointerup
     // handler that would leave the drag state wedged.
   }
+}
+
+/** A remembered position, or null if there is not one to be had. */
+export function read(storage: StorageLike | undefined, app: string): Fraction | null {
+  return loadJson(storage, storageKey(app), (value) => {
+    const at = value as { fx?: unknown; fy?: unknown } | null;
+    const fx = finite(at?.fx);
+    const fy = finite(at?.fy);
+    if (fx === null || fy === null) return null;
+    return { fx: unit(fx), fy: unit(fy) };
+  });
+}
+
+export function write(storage: StorageLike | undefined, app: string, at: Fraction): void {
+  saveJson(storage, storageKey(app), at);
 }
 
 /** The corner nearest `at`, and how far away it is in pixels. */

@@ -24,6 +24,7 @@
  * could not check it. See `FakeWindow`.
  */
 
+import type { Clock } from "../../agent/src/types.ts";
 import type {
   DocumentLike,
   ElementLike,
@@ -198,6 +199,7 @@ export class FakeNode implements ElementLike {
    *  the left edge, and a fake that quietly corrected that would hide the one
    *  case the widget has to handle in JavaScript. */
   getBoundingClientRect(): RectLike {
+    if (this.rect) return this.rect;
     const vw = this.win?.innerWidth ?? 0;
     const vh = this.win?.innerHeight ?? 0;
     const fx = this.style.number("--dk-x", 1);
@@ -213,6 +215,12 @@ export class FakeNode implements ElementLike {
   setAttribute(name: string, value: string): void {
     this.attrs.set(name, value);
   }
+
+  /** A box this node reports instead of the computed one. For an element in
+   *  the HOST app, which the widget outlines: it is not positioned by the
+   *  arithmetic in `css.ts` and its rectangle is whatever the app's own layout
+   *  made it. */
+  rect: RectLike | null = null;
 
   removeAttribute(name: string): void {
     this.attrs.delete(name);
@@ -302,6 +310,37 @@ export class FakeDocument implements DocumentLike {
     this.box = box;
   }
 
+  /**
+   * The elements the host app "has", by selector.
+   *
+   * A map and not a CSS engine, because the widget resolves exactly one
+   * selector per step — a verb's presentational `at` — and does nothing with
+   * what comes back but draw on top of it. So matching is the only behaviour
+   * worth modelling, along with the two ways it fails in a browser: nothing
+   * matched, and the string was not valid CSS.
+   */
+  elements = new Map<string, FakeNode>();
+  /** Selectors `querySelector` throws on, as a browser does for a string that
+   *  is not valid CSS. An `at` comes from an app author and may be anything. */
+  invalid = new Set<string>();
+
+  querySelector(selectors: string): ElementLike | null {
+    if (this.invalid.has(selectors)) {
+      throw new SyntaxError(`'${selectors}' is not a valid selector`);
+    }
+    return this.elements.get(selectors) ?? null;
+  }
+
+  /** Put an element on the "page" at a known box, so an outline over it can be
+   *  checked against the numbers rather than against a class. */
+  at(selector: string, box: RectLike): FakeNode {
+    const node = new FakeNode("div");
+    node.win = this.win;
+    node.rect = box;
+    this.elements.set(selector, node);
+    return node;
+  }
+
   createElement(tag: string): ElementLike {
     const node = new FakeNode(tag);
     node.win = this.win;
@@ -318,3 +357,46 @@ export class FakeDocument implements DocumentLike {
     return host;
   }
 }
+
+/**
+ * The pace timer, as a clock that fires at once and remembers what it was
+ * asked to wait.
+ *
+ * Every test mounts with this. Not an optimisation: the widget paces by
+ * default — a person in front of a panel is the whole premise — so a suite on
+ * the real `setTimeout` would spend about six tenths of a second per verb
+ * waiting to assert something that is pure logic, and a slow suite is a suite
+ * that gets run less. `waits` is what lets a test assert the pace the person
+ * chose was actually the pace that was waited, which a mocked-out wait would
+ * otherwise quietly stop checking.
+ */
+export class FakeClock implements Clock {
+  /** Every delay asked for, in order, which is what lets a test assert that
+   *  the pace the person chose was the pace that was actually waited. A wait
+   *  that was mocked out entirely would quietly stop checking that. */
+  waits: number[] = [];
+  /** Virtual time, and the reason this models a clock at all rather than just
+   *  calling the callback. A pace wait can be re-armed while it is running —
+   *  the person moved the slider — so it asks how much of the wait has already
+   *  elapsed. A fake whose clock never moved would answer "none of it" every
+   *  time and the wait would re-arm for ever. */
+  #now = 0;
+
+  now(): number {
+    return this.#now;
+  }
+
+  set(fn: () => void, ms: number): unknown {
+    this.waits.push(ms);
+    // Time passes, then the timer fires: the whole wait, at once, which is
+    // what makes a suite with a 600ms default pace run in milliseconds.
+    this.#now += ms > 0 ? ms : 0;
+    fn();
+    return this.waits.length;
+  }
+
+  clear(): void {}
+}
+
+/** A clock for the tests that are not about pacing. */
+export const instant: Clock = new FakeClock();

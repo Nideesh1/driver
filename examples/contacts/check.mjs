@@ -23,7 +23,8 @@
 import assert from "node:assert/strict";
 import http from "node:http";
 
-import { createApp, COMPANIES, TOTAL } from "./app/store.js";
+import { createApp, COMPANIES, OWNERS, TOTAL } from "./app/store.js";
+import { LANDINGS, href, parse } from "./app/router.js";
 import { drive } from "../../packages/agent/src/loop.ts";
 import { renderSnapshot } from "../../packages/agent/src/render.ts";
 import { systemPrompt, toolsFor, READ_SCREEN } from "../../packages/agent/src/tools.ts";
@@ -105,24 +106,55 @@ const notes = [];
 const app = createApp();
 const { driver, store, visible } = app;
 
-await check("the manifest lists seven verbs with a kind on every one", () => {
+await check("the manifest lists eighteen verbs with a kind on every one", () => {
   const m = driver.manifest();
-  assert.equal(m.app, "Contacts");
-  assert.equal(m.verbs.length, 7);
+  assert.equal(m.app, "Northwind CRM");
+  assert.equal(m.verbs.length, 18);
   for (const v of m.verbs) assert.ok(v.kind, `${v.name} has no kind`);
   assert.deepEqual(
     m.verbs.map((v) => v.name).sort(),
     [
       "accept-selected",
+      "assign-owner",
+      "back",
       "clear-selection",
+      "decline-selected",
+      "go",
       "next-page",
-      "open",
+      "open-company",
+      "open-contact",
       "prev-page",
       "search",
+      "select-contact",
+      "select-pending-here",
       "select-where",
+      "set-setting",
+      "set-status",
+      "show-status",
+      "sort-companies",
     ],
   );
-  notes.push(`manifest version ${m.version}`);
+  const kinds = {};
+  for (const v of m.verbs) kinds[v.kind] = (kinds[v.kind] ?? 0) + 1;
+  // The shape of the surface, asserted rather than described: most of a
+  // six-screen app is getting about, and five verbs can change data.
+  assert.deepEqual(kinds, { read: 9, describe: 4, commit: 5 });
+  notes.push(
+    `manifest version ${m.version}, ${m.verbs.length} verbs ` +
+      `(${kinds.read} read, ${kinds.describe} describe, ${kinds.commit} commit)`,
+  );
+});
+
+await check("every verb in the flat manifest is offered on every screen", () => {
+  // Not a feature: a fact worth pinning, because it is the gap the report
+  // leads with. `Manifest.verbs` has no screen on it, so `sort-companies` is
+  // in the cached tool list while the person is on the settings form, and the
+  // only way an agent finds out is the `wrong-screen` refusal below.
+  const m = driver.manifest();
+  for (const v of m.verbs) assert.equal("screen" in v, false, `${v.name} carries a screen`);
+  const scoped = m.verbs.filter((v) => (v.refuses || []).includes("wrong-screen"));
+  assert.equal(scoped.length, 6);
+  notes.push(`screen-scoped verbs that must refuse wrong-screen: ${scoped.map((v) => v.name).join(" ")}`);
 });
 
 await check("select-where takes named fields with oneOf, not a predicate string", () => {
@@ -152,16 +184,51 @@ await check("the table is 3,412 rows and the same 3,412 rows every time", () => 
   assert.equal(store.rows[TOTAL - 1].id, `c-${TOTAL}`);
 });
 
-await check("visible() is a twenty-row window with a real page block", () => {
+await check("the app opens on the dashboard, which is not a table", () => {
+  const s = visible();
+  assert.equal(s.where, "dashboard");
+  assert.equal(s.page, undefined, "a dashboard must not claim to be a window onto more");
+  // The compromise, pinned so it cannot be quietly forgotten: seven metric
+  // tiles leave as `rows`, because `Snapshot` has no other shape to put them
+  // in. `id` here names a tile, not a record.
+  assert.ok(s.rows.length >= 7);
+  assert.deepEqual(Object.keys(s.rows[0]).sort(), ["id", "metric", "value"]);
+  assert.match(renderSnapshot(s), /rows 8 \(all of them\)/);
+  assert.match(s.note, /not a table/);
+});
+
+await check("every screen's visible() names where it is and carries a rev", () => {
+  // Driven through the store's own screen table rather than by navigating, so
+  // one missing field in one screen cannot hide behind another.
+  const names = Object.keys(app.screens);
+  assert.deepEqual(names.sort(), ["companies", "company", "contact", "contacts", "dashboard", "settings"]);
+  for (const name of names) {
+    const s = app.screens[name]();
+    assert.equal(typeof s.where, "string", `${name} has no where`);
+    assert.ok(s.where.length > 0, `${name} has an empty where`);
+    assert.equal(typeof s.rev, "number", `${name} has no rev`);
+    // The screen has to be identifiable from the sentence alone: it is the
+    // only thing in a snapshot that says which of the six you are looking at.
+    assert.ok(
+      renderSnapshot(s).startsWith(`where: ${s.where}`),
+      `${name} does not render its own where first`,
+    );
+  }
+});
+
+await check("the contacts list is a twenty-row window with a real page block", async () => {
+  const out = await driver.call("go", { screen: "contacts" });
+  assert.equal(out.ok, true);
   const s = visible();
   assert.equal(s.rows.length, 20);
   assert.deepEqual(s.page, { index: 0, size: 20, total: TOTAL });
-  assert.equal(s.where, "contacts");
+  assert.match(s.where, /^contacts list/);
   assert.equal(typeof s.rev, "number");
   assert.match(renderSnapshot(s), /more rows exist off screen/);
 });
 
 await check("read verbs page and search, and rev moves on every one", async () => {
+  await driver.call("go", { screen: "contacts" });
   const before = visible().rev;
   const next = await driver.call("next-page");
   assert.equal(next.ok, true);
@@ -182,13 +249,280 @@ await check("read verbs page and search, and rev moves on every one", async () =
   await driver.call("search", { q: "" });
 });
 
-await check("open refuses an id that is not there, with the slug it declared", async () => {
-  const bad = await driver.call("open", { id: "c-9999" });
+await check("open-contact refuses an id that is not there, with the slug it declared", async () => {
+  const bad = await driver.call("open-contact", { id: "c-9999" });
   assert.equal(bad.ok, false);
   assert.equal(bad.refused, "no-such-contact");
-  const good = await driver.call("open", { id: "c-0184" });
-  assert.equal(good.ok, true);
-  assert.match(good.snapshot.note, /c-0184 is open/);
+  assert.match(bad.hint, /c-0001/);
+});
+
+await check("a drill-down carries the record in `where` and its history in `rows`", async () => {
+  const out = await driver.call("open-contact", { id: "c-0184" });
+  assert.equal(out.ok, true);
+  const s = out.snapshot;
+  // The second compromise, pinned: there is no field for "the record I am on",
+  // so the fields ride in the sentence documented as a location.
+  assert.match(s.where, /^contact c-0184 — /);
+  assert.match(s.where, /status \w+/);
+  assert.match(s.where, /@fairmont-dental\.example/);
+  assert.equal(s.page, undefined, "a record's history is complete, so there is no page block");
+  assert.ok(s.rows.length >= 3);
+  assert.deepEqual(Object.keys(s.rows[0]).sort(), ["id", "what", "when", "who"]);
+  // The rows are NOT contacts, and only the note says so.
+  assert.match(s.note, /activity history/);
+  notes.push(`contact c-0184 history: ${s.rows.length} events`);
+});
+
+await check("a record-scoped commit takes no id and refuses off its own screen", async () => {
+  // `set-status` acts on the record you drilled into. Nothing in the manifest
+  // can say that: it has no arguments identifying a contact, so an agent that
+  // has not read the description will call it from anywhere.
+  const verb = driver.manifest().verbs.find((v) => v.name === "set-status");
+  assert.deepEqual(Object.keys(verb.args), ["status"]);
+  assert.equal(verb.kind, "commit");
+
+  const on = await driver.call("set-status", { status: "pending" });
+  assert.equal(on.ok, true);
+  assert.equal(on.count, 1);
+  assert.match(on.snapshot.where, /status pending/);
+
+  const again = await driver.call("set-status", { status: "pending" });
+  assert.equal(again.refused, "already-that-status");
+
+  const owner = await driver.call("assign-owner", { owner: OWNERS[3] });
+  assert.equal(owner.ok, true);
+  assert.match(owner.snapshot.where, new RegExp(`owner ${OWNERS[3].replace(".", "\\.")}`));
+
+  await driver.call("go", { screen: "dashboard" });
+  const nowhere = await driver.call("set-status", { status: "accepted" });
+  assert.equal(nowhere.ok, false);
+  assert.equal(nowhere.refused, "no-contact-open");
+  assert.match(nowhere.hint, /open-contact/);
+});
+
+await check("select-contact picks exactly one row — the failure this demo was built on", async () => {
+  // The live bug: with only `select-where(company, status?)` on the surface,
+  // asked for one named person at Grayson Robotics a model's only tool would
+  // have selected all 410, and it correctly refused instead.
+  const bulk = await driver.call("select-where", { company: "Grayson Robotics" });
+  assert.equal(bulk.count, 410);
+
+  const one = await driver.call("select-contact", { id: "c-0010" });
+  assert.equal(one.ok, true);
+  assert.equal(one.count, 1, "select-contact must replace the selection, not add to it");
+  assert.equal(one.snapshot.selectedCount, 1);
+
+  const two = await driver.call("select-contact", { id: "c-0031", add: true });
+  assert.equal(two.count, 2);
+  assert.equal(two.snapshot.selectedCount, 2);
+
+  const missing = await driver.call("select-contact", { id: "c-9999" });
+  assert.equal(missing.refused, "no-such-contact");
+  await driver.call("clear-selection");
+  notes.push("select-where(Grayson Robotics) = 410, select-contact = 1");
+});
+
+await check("navigation moves `where`, bumps `rev`, and `back` walks the trail", async () => {
+  await driver.call("go", { screen: "dashboard" });
+  const start = visible().rev;
+
+  const opening = {
+    dashboard: "dashboard",
+    contacts: "contacts list",
+    companies: "companies list",
+    settings: "settings",
+  };
+  for (const screen of LANDINGS) {
+    const out = await driver.call("go", { screen });
+    assert.equal(out.ok, true, `go ${screen} refused`);
+    assert.ok(
+      out.snapshot.where.startsWith(opening[screen]),
+      `go ${screen} landed on ${JSON.stringify(out.snapshot.where)}`,
+    );
+  }
+  assert.ok(visible().rev > start, "navigating did not move rev");
+
+  // `go` with a screen that needs an id is not offered at all: the core
+  // refuses it as bad-argument and lists the four it accepts.
+  const record = await driver.call("go", { screen: "contact" });
+  assert.equal(record.refused, "bad-argument");
+  assert.match(record.hint, /"dashboard", "contacts", "companies", "settings"/);
+
+  const where = visible().where;
+  await driver.call("open-company", { company: "Halloway Foods" });
+  const back = await driver.call("back");
+  assert.equal(back.ok, true);
+  assert.equal(back.snapshot.where, where, "back did not return to the previous screen");
+
+  // The trail is finite and runs out, which is a refusal and not a crash.
+  let last;
+  for (let i = 0; i < 40; i++) {
+    last = await driver.call("back");
+    if (!last.ok) break;
+  }
+  assert.equal(last.refused, "nothing-to-go-back-to");
+});
+
+await check("a screen-scoped verb refuses wrong-screen with the fix in the hint", async () => {
+  await driver.call("go", { screen: "settings" });
+  for (const [name, args] of [
+    ["search", { q: "Ada" }],
+    ["next-page", {}],
+    ["prev-page", {}],
+    ["sort-companies", { by: "pending" }],
+    ["show-status", { status: "all" }],
+    ["select-pending-here", {}],
+  ]) {
+    const out = await driver.call(name, args);
+    assert.equal(out.ok, false, `${name} worked on the settings screen`);
+    assert.equal(out.refused, "wrong-screen", `${name} refused ${out.refused}`);
+    assert.match(out.hint, /settings screen/);
+    assert.ok(out.hint.includes("`"), `${name}'s hint names no verb to call instead`);
+  }
+});
+
+await check("the companies list rolls up from the same rows the contacts list shows", async () => {
+  await driver.call("go", { screen: "companies" });
+  const s = visible();
+  assert.equal(s.rows.length, 8);
+  assert.equal(s.page, undefined, "eight rows is all of them, so there is no window");
+  const total = s.rows.reduce((sum, row) => sum + row.contacts, 0);
+  assert.equal(total, TOTAL, "the companies screen disagrees with the contacts table");
+
+  const sorted = await driver.call("sort-companies", { by: "pending" });
+  assert.match(sorted.snapshot.where, /sorted by pending/);
+  const pending = sorted.snapshot.rows.map((r) => r.pending);
+  assert.deepEqual(pending, [...pending].sort((a, b) => b - a));
+});
+
+await check("the cross-screen job: find a company, open it, accept its pending", async () => {
+  // The whole point of the exercise, driven end to end through the verbs an
+  // agent would use and nothing else.
+  await driver.call("go", { screen: "companies" });
+  const listed = visible().rows.find((r) => r.name === "Berenson Health");
+  assert.ok(listed, "Berenson Health is not on the companies list");
+  const expected = listed.pending;
+  assert.ok(expected > 0);
+
+  const opened = await driver.call("open-company", { company: "Berenson Health" });
+  assert.equal(opened.ok, true);
+  assert.match(opened.snapshot.where, /^company Berenson Health — /);
+  // The drill-down lands on the pending tab, so the rows in front of the
+  // person are the ones the job is about.
+  assert.match(opened.snapshot.where, /showing the pending ones/);
+  assert.equal(opened.snapshot.page.total, expected);
+
+  const picked = await driver.call("select-pending-here");
+  assert.equal(picked.ok, true);
+  assert.equal(picked.count, expected, "select-pending-here matched a different number");
+  assert.equal(picked.snapshot.selectedCount, expected);
+  // The honest window: the ids are the page, the count is the selection.
+  assert.equal(picked.snapshot.selected.length, 20);
+  assert.match(renderSnapshot(picked.snapshot), /only the ones on screen/);
+
+  const done = await driver.call("accept-selected");
+  assert.equal(done.ok, true);
+  assert.equal(done.count, expected);
+
+  // And the roll-up moved with it, on this screen and on the companies list.
+  assert.match(done.snapshot.where, /0 pending/);
+  await driver.call("go", { screen: "companies" });
+  const after = visible().rows.find((r) => r.name === "Berenson Health");
+  assert.equal(after.pending, 0);
+  assert.equal(
+    store.rows.filter((r) => r.company === "Berenson Health" && r.status === "pending").length,
+    0,
+  );
+  await driver.call("clear-selection");
+  notes.push(`cross-screen accept at Berenson Health: ${expected} pending contacts`);
+});
+
+await check("a selection made on one screen is still live, and committable, on another", async () => {
+  // Not a feature either. The selection is global and survives navigation, so
+  // a commit verb reached from the dashboard acts on rows nobody on that
+  // screen can see. `selectedCount` is the only thing standing between an
+  // agent and that, which is why it is a field and not prose.
+  const picked = await driver.call("select-where", { company: "Acme Industrial", status: "new" });
+  const count = picked.count;
+  assert.ok(count > 100);
+
+  await driver.call("go", { screen: "dashboard" });
+  const s = visible();
+  assert.equal(s.selected, undefined, "no contact rows are on the dashboard");
+  assert.equal(s.selectedCount, count, "the dashboard forgot how much is selected");
+  assert.match(renderSnapshot(s), /none of them are on screen/);
+  assert.match(s.note, new RegExp(`${count} contacts are still selected`));
+
+  const settings = app.screens.settings();
+  assert.equal(settings.selectedCount, count);
+  await driver.call("clear-selection");
+});
+
+await check("the settings form is rows with values, and reaches into the tables", async () => {
+  await driver.call("go", { screen: "settings" });
+  const s = visible();
+  assert.equal(s.page, undefined);
+  assert.deepEqual(s.rows.map((r) => r.id), [
+    "rows-per-page",
+    "default-owner",
+    "confirm-bulk",
+    "dense-rows",
+  ]);
+  // The form compromise: `value` is in a row because `ControlSummary` can say
+  // an input exists and not what is in it.
+  assert.deepEqual(Object.keys(s.rows[0]).sort(), ["accepts", "id", "setting", "value"]);
+  assert.match(s.note, /a form, not a table/);
+
+  const bad = await driver.call("set-setting", { name: "rows-per-page", value: "7" });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.refused, "bad-setting-value");
+  assert.match(bad.hint, /10, 20, 50, 100/);
+
+  const set = await driver.call("set-setting", { name: "rows-per-page", value: "50" });
+  assert.equal(set.ok, true);
+  await driver.call("go", { screen: "contacts" });
+  const after = visible();
+  assert.equal(after.rows.length, 50, "the settings screen did not reach the contacts table");
+  assert.equal(after.page.size, 50);
+  await driver.call("go", { screen: "settings" });
+  await driver.call("set-setting", { name: "rows-per-page", value: "20" });
+  await driver.call("go", { screen: "contacts" });
+});
+
+await check("the router round-trips every screen, and a bad URL lands somewhere real", () => {
+  // No DOM in here: the router is data, which is the only reason a deep link
+  // can be checked without a browser.
+  for (const route of [
+    { screen: "dashboard", id: null },
+    { screen: "contacts", id: null },
+    { screen: "contact", id: "c-0184" },
+    { screen: "companies", id: null },
+    { screen: "company", id: "acme-industrial" },
+    { screen: "settings", id: null },
+  ]) {
+    assert.deepEqual(parse(href(route)), route, `${href(route)} did not round-trip`);
+  }
+  assert.deepEqual(parse(""), { screen: "dashboard", id: null });
+  assert.deepEqual(parse("#/nonsense/deeper"), { screen: "dashboard", id: null });
+  // A deep link to a record that does not exist is a screen, not a throw.
+  assert.deepEqual(parse("#/contacts/c-9999"), { screen: "contact", id: "c-9999" });
+});
+
+await check("a deep link straight to a record renders that record", async () => {
+  const deep = createApp();
+  deep.navigate(parse("#/contacts/c-0184"), { record: false });
+  const s = deep.visible();
+  assert.match(s.where, /^contact c-0184 — /);
+  assert.ok(s.rows.length >= 3);
+  // Seeded from the id alone, so a cold deep link shows the same history as
+  // clicking through to it.
+  assert.deepEqual(s.rows, deep.historyFor("c-0184").map((e) => ({ id: e.id, when: e.when, what: e.what, who: e.who })));
+
+  const missing = createApp();
+  missing.navigate(parse("#/contacts/c-9999"), { record: false });
+  assert.match(missing.visible().where, /no such contact/);
+  assert.equal(missing.visible().rows, undefined);
+  assert.match(renderSnapshot(missing.visible()), /this screen reports no rows/);
 });
 
 await check("a bad `company` is bad-argument and the refusal lists the accepted set", async () => {
@@ -230,11 +564,44 @@ await check("select-where reports a count, and the commit acts on it", async () 
 });
 
 await check("a stale rev is refused rather than applied", async () => {
+  await driver.call("go", { screen: "contacts" });
   const rev = visible().rev;
   await driver.call("next-page");
   const stale = await driver.call("prev-page", {}, { rev });
   assert.equal(stale.ok, false);
   assert.equal(stale.refused, "stale");
+  await driver.call("search", { q: "" });
+});
+
+await check("a call aimed at one screen lands on another unless it quotes rev", async () => {
+  // What happens to a pending call when the user navigates mid-run, which is
+  // the question the report asks and this is the whole answer: `rev` or
+  // nothing. There is no screen identity in a call, so a verb that is valid on
+  // both screens simply runs on whichever one is there when it arrives.
+  await driver.call("go", { screen: "contacts" });
+  await driver.call("next-page");
+  const read = visible();
+  assert.match(read.where, /^contacts list/);
+
+  // The person clicks away while the agent is thinking.
+  await driver.call("open-company", { company: "Cordova Logistics" });
+
+  // Quoting the rev it read is the only defence, and it works.
+  const guarded = await driver.call("next-page", {}, { rev: read.rev });
+  assert.equal(guarded.ok, false);
+  assert.equal(guarded.refused, "stale");
+
+  // Without it, the same call pages a list the agent has never seen — a
+  // different company's contacts — and reports success. Nothing in the
+  // library can tell these two apart, because the call never said which
+  // screen it was for.
+  const unguarded = await driver.call("next-page");
+  assert.equal(unguarded.ok, true, "the call was refused for some other reason");
+  assert.match(unguarded.snapshot.where, /^company Cordova Logistics/);
+  assert.equal(unguarded.snapshot.page.index, 1);
+  notes.push("next-page with no rev, after a navigation, paged the screen it arrived at");
+
+  await driver.call("go", { screen: "contacts" });
   await driver.call("search", { q: "" });
 });
 
@@ -303,7 +670,7 @@ await check("a declined commit reaches the model as declined-by-user, not a cras
 
 await check("the tool list carries the commit banner and read_screen", () => {
   const tools = toolsFor(driver.manifest());
-  assert.equal(tools.length, 8);
+  assert.equal(tools.length, 19);
   assert.ok(tools.some((t) => t.name === READ_SCREEN));
   const commit = tools.find((t) => t.name === "accept-selected");
   assert.match(commit.description, /COMMIT: THIS CHANGES DATA/);
@@ -312,7 +679,22 @@ await check("the tool list carries the commit banner and read_screen", () => {
   assert.equal(describe.inputSchema.properties.company.enum.length, 8);
   // `rev` is hoisted onto every verb so the model has somewhere to put it.
   assert.equal(describe.inputSchema.properties.rev.type, "integer");
-  assert.ok(systemPrompt(driver.manifest()).includes("Contacts"));
+  assert.ok(systemPrompt(driver.manifest()).includes("Northwind CRM"));
+
+  // The gap the per-snapshot screen map exists to paper over: the static half
+  // has no field for the app's own briefing, so there is nowhere in the
+  // manifest to say that this app HAS six screens or how they relate. A
+  // relay-driven agent never sees the widget's `instructions` either, which is
+  // why `visible()` repeats the screen list in every note. See the report.
+  const manifest = driver.manifest();
+  assert.deepEqual(Object.keys(manifest).sort(), ["app", "verbs", "version"]);
+  for (const verb of manifest.verbs) {
+    assert.deepEqual(
+      Object.keys(verb).filter((k) => !["name", "describe", "kind", "at", "args", "refuses"].includes(k)),
+      [],
+      `${verb.name} carries a field the manifest type does not have`,
+    );
+  }
 });
 
 // =========================================================================
@@ -337,13 +719,18 @@ await check("the widget confirms a commit with the count the describe reported",
   const panel = mountWidget(wApp.driver, {
     document: fake,
     think: async () => script[step++],
+    // Zero, because the widget paces its steps for a person watching — 600ms
+    // each by default — and a harness that polled against that would be
+    // asserting on a stopwatch. The pace is the widget's, and it is checked in
+    // the widget's own tests; what this check is about is the gate.
+    pace: 0,
   });
 
   const run = panel.ask("accept everyone at Cordova Logistics");
 
   // The gate is a promise the loop is waiting on, so let the microtasks drain
   // until the question has been drawn.
-  for (let i = 0; i < 50 && fake.body.find("dk-ask").length === 0; i++) {
+  for (let i = 0; i < 400 && fake.body.find("dk-ask").length === 0; i++) {
     await new Promise((r) => setTimeout(r, 10));
   }
 
@@ -387,9 +774,13 @@ await check("saying no to the widget's gate leaves the data alone", async () => 
     { text: "You said no, so I stopped." },
   ];
   let step = 0;
-  const panel = mountWidget(wApp.driver, { document: fake, think: async () => script[step++] });
+  const panel = mountWidget(wApp.driver, {
+    document: fake,
+    think: async () => script[step++],
+    pace: 0,
+  });
   const run = panel.ask("accept everyone at Everline Capital");
-  for (let i = 0; i < 50 && fake.body.find("dk-no").length === 0; i++) {
+  for (let i = 0; i < 400 && fake.body.find("dk-no").length === 0; i++) {
     await new Promise((r) => setTimeout(r, 10));
   }
   fake.body.one("dk-no").dispatch("click");
@@ -406,6 +797,7 @@ await check("backendThink posts to the real /api/chat and the widget says so", a
   const panel = mountWidget(wApp.driver, {
     document: fake,
     think: backendThink(`${BASE}/api/chat`),
+    pace: 0,
     onError: (err) => (caught = err),
   });
   await panel.ask("how many contacts are at Acme Industrial?");
@@ -432,9 +824,9 @@ let tabId = "";
 await check("a tab connects to /dk and the relay lists it with a manifest", async () => {
   connection = connect(connected.driver, {
     relay: BASE,
-    app: "Contacts",
-    title: "Contacts — check.mjs",
-    url: "/examples/contacts/app/",
+    app: "Northwind CRM",
+    title: "Northwind CRM — check.mjs",
+    url: "/examples/contacts/app/#/contacts",
     EventSource: HttpEventSource,
     storage: null,
     onError: (err) => {
@@ -453,12 +845,79 @@ await check("a tab connects to /dk and the relay lists it with a manifest", asyn
     await new Promise((r) => setTimeout(r, 50));
   }
   assert.ok(listed, "the tab never appeared in /dk/tabs");
-  assert.equal(listed.app, "Contacts");
+  assert.equal(listed.app, "Northwind CRM");
   assert.ok(listed.manifestVersion, "/dk/tabs never carried a manifestVersion");
 
   const manifest = await getJson(`${BASE}/dk/tabs/${tabId}/manifest`);
   assert.equal(manifest.status, 200);
-  assert.equal(manifest.body.verbs.length, 7);
+  assert.equal(manifest.body.verbs.length, 18);
+
+  // The URL the relay is listing is the one `hello` carried, and `hello` is
+  // sent on connect and on reconnect only. Navigating does not resend it, so
+  // this is already wrong the moment the tab moves; see the report.
+  assert.equal(listed.url, "/examples/contacts/app/#/contacts");
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "settings" } });
+  const again = await getJson(`${BASE}/dk/tabs`);
+  const moved = (again.body.tabs || []).find((t) => t.tab === tabId);
+  assert.equal(
+    moved.url,
+    "/examples/contacts/app/#/contacts",
+    "if this ever changes, the relay grew a way to hear about navigation",
+  );
+  notes.push("/dk/tabs still lists the URL from `hello` after the tab navigated away");
+});
+
+await check("an outside agent can walk screens and read where it is", async () => {
+  for (const screen of LANDINGS) {
+    const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+      name: "go",
+      args: { screen },
+    });
+    assert.equal(out.status, 200);
+    assert.equal(out.body.ok, true, `go ${screen} refused over the relay`);
+    assert.ok(out.body.snapshot.where.length > 0);
+  }
+  const snap = await getJson(`${BASE}/dk/tabs/${tabId}/snapshot`);
+  assert.equal(snap.status, 200);
+  assert.equal(snap.body.where, "settings");
+});
+
+await check("the cross-screen job runs over the relay too", async () => {
+  const opened = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "open-company",
+    args: { company: "Fairmont Dental" },
+  });
+  assert.equal(opened.body.ok, true);
+  const expected = opened.body.snapshot.page.total;
+  assert.ok(expected > 0);
+
+  const picked = await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "select-pending-here" });
+  assert.equal(picked.body.count, expected);
+  assert.equal(picked.body.snapshot.selectedCount, expected);
+
+  const done = await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "accept-selected" });
+  assert.equal(done.body.ok, true);
+  assert.equal(done.body.count, expected);
+  assert.equal(
+    connected.store.rows.filter((r) => r.company === "Fairmont Dental" && r.status === "pending")
+      .length,
+    0,
+  );
+  notes.push(`relay cross-screen accept at Fairmont Dental = ${expected}`);
+});
+
+await check("a verb called from the wrong screen refuses, over the relay, with a snapshot", async () => {
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "dashboard" } });
+  const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "search",
+    args: { q: "Ada" },
+  });
+  assert.equal(out.status, 200, "a wrong-screen refusal is still a 200");
+  assert.equal(out.body.ok, false);
+  assert.equal(out.body.refused, "wrong-screen");
+  assert.match(out.body.hint, /dashboard screen/);
+  assert.ok(out.body.snapshot, "a refusal must still carry the screen");
+  assert.equal(out.body.snapshot.where, "dashboard");
 });
 
 await check("an outside call runs the verb and comes back with the count", async () => {
@@ -481,6 +940,7 @@ await check("an outside call runs the verb and comes back with the count", async
 });
 
 await check("a refusal from the app is 200 with ok:false, not a 4xx", async () => {
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "contacts" } });
   const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "prev-page" });
   assert.equal(out.status, 200);
   assert.equal(out.body.ok, false);
@@ -489,6 +949,7 @@ await check("a refusal from the app is 200 with ok:false, not a 4xx", async () =
 });
 
 await check("a stale rev through the relay is refused as stale", async () => {
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "contacts" } });
   const snap = await getJson(`${BASE}/dk/tabs/${tabId}/snapshot`);
   assert.equal(snap.status, 200);
   const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
@@ -538,7 +999,11 @@ await check("an unknown /dk route is a 404 with no-route, and a bad method a 405
 await check("the page's own routes answer, with the right content types", async () => {
   const page = await getJson(`${BASE}/examples/contacts/app/`);
   assert.equal(page.status, 200);
-  assert.match(String(page.body), /<title>Contacts — Northwind CRM<\/title>/);
+  assert.match(String(page.body), /<title>Northwind CRM<\/title>/);
+  for (const module of ["app.js", "store.js", "screens.js", "router.js", "data.js", "styles.css"]) {
+    const got = await getJson(`${BASE}/examples/contacts/app/${module}`);
+    assert.equal(got.status, 200, `${module} did not serve`);
+  }
   const refused = await getJson(`${BASE}/examples/contacts/server.py`);
   assert.equal(refused.status, 403, "the server must not serve its own source");
   const traversal = await getJson(`${BASE}/../../etc/passwd`);
@@ -566,6 +1031,7 @@ await check("a human-driven change is pushed to /watch", async () => {
   watch.addEventListener("snapshot", (e) => seen.push(JSON.parse(String(e.data))));
   await new Promise((r) => setTimeout(r, 250));
   // The human types in the search box: the store moves and `changed()` fires.
+  connected.navigate({ screen: "contacts", id: null });
   connected.store.query = "Everline";
   connected.store.page = 0;
   connected.bump();

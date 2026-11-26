@@ -14,9 +14,12 @@ import assert from "node:assert/strict";
 import { mount } from "../../core/src/registry.ts";
 import type { Driver, Snapshot } from "../../core/src/types.ts";
 import type { Think, ThinkInput } from "../../agent/src/types.ts";
-import { mountWidget, storageKey } from "../src/index.ts";
+import { runControls } from "../../agent/src/control.ts";
+import type { RunControlsOptions } from "../../agent/src/control.ts";
+import type { RunControls } from "../../agent/src/types.ts";
+import { mountWidget, settingsKey, storageKey } from "../src/index.ts";
 import type { Position, WidgetOptions } from "../src/index.ts";
-import { FakeDocument, FakeNode, FakeStorage, FakeWindow, GAP, hide } from "./fake-dom.ts";
+import { FakeClock, FakeDocument, FakeNode, FakeStorage, FakeWindow, GAP, hide, instant } from "./fake-dom.ts";
 
 /** The same shape as the core's and the agent's fixtures: 3,412 contacts, a
  *  twenty-row window, and a `describe` verb that reports what it selected. The
@@ -98,6 +101,7 @@ function setup(script: unknown[] = [{ text: "ok" }]) {
   const widget = mountWidget(app.driver, {
     think: s.think,
     document: doc,
+    clock: instant,
     open: true,
   });
   const host = doc.host();
@@ -107,7 +111,7 @@ function setup(script: unknown[] = [{ text: "ok" }]) {
 test("mounting puts one host element in the container and nothing else", () => {
   const doc = new FakeDocument();
   const app = contacts();
-  const widget = mountWidget(app.driver, { think: async () => ({ text: "hi" }), document: doc });
+  const widget = mountWidget(app.driver, { think: async () => ({ text: "hi" }), document: doc, clock: instant });
 
   assert.equal(doc.body.children.length, 1);
   const host = doc.host();
@@ -304,6 +308,7 @@ test("confirmCommits false opts out, for an app whose commits are all small", as
   let i = 0;
   const widget = mountWidget(app.driver, {
     document: doc,
+    clock: instant,
     open: true,
     confirmCommits: false,
     think: async () => script[i++] as never,
@@ -387,7 +392,7 @@ test("other keys are left alone, including inside the input", () => {
 test("the launcher opens the panel and moves focus into it", () => {
   const doc = new FakeDocument();
   const app = contacts();
-  const widget = mountWidget(app.driver, { think: async () => ({ text: "x" }), document: doc });
+  const widget = mountWidget(app.driver, { think: async () => ({ text: "x" }), document: doc, clock: instant });
   const host = doc.host();
 
   host.one("dk-launcher").dispatch("click");
@@ -441,6 +446,7 @@ test("a second message while a run is in flight is dropped rather than interleav
   let calls = 0;
   const widget = mountWidget(app.driver, {
     document: doc,
+    clock: instant,
     open: true,
     think: async () => {
       calls++;
@@ -471,6 +477,7 @@ test("a think that throws is said in the transcript, not only in the console", a
   const app = contacts();
   const widget = mountWidget(app.driver, {
     document: doc,
+    clock: instant,
     open: true,
     think: async () => {
       throw new Error("502 from /api/chat");
@@ -510,6 +517,7 @@ test("a host onBeforeCommit replaces the built-in question instead of stacking w
   const asked: string[] = [];
   const widget = mountWidget(app.driver, {
     document: doc,
+    clock: instant,
     open: true,
     onBeforeCommit: ({ name }) => {
       asked.push(name);
@@ -575,7 +583,7 @@ test("the panel degrades rather than refusing to mount without shadow DOM", () =
   // not worth failing an app's boot over.
   const doc = new FakeDocument(false);
   const app = contacts();
-  const widget = mountWidget(app.driver, { think: async () => ({}), document: doc });
+  const widget = mountWidget(app.driver, { think: async () => ({}), document: doc, clock: instant });
 
   const host = doc.host();
   assert.equal(host.shadow, null);
@@ -641,7 +649,7 @@ test("a selection the person made themselves is counted in the question, from se
     { calls: [{ id: "a", name: "accept-selected", args: {} }] },
     { text: "accepted" },
   ]);
-  const widget = mountWidget(driver, { think: s.think, document: doc, open: true });
+  const widget = mountWidget(driver, { think: s.think, document: doc, clock: instant, open: true });
   const host = doc.host();
 
   await ask(host, "accept what I picked");
@@ -692,6 +700,7 @@ function place(o: PlaceOptions = {}) {
   const options: WidgetOptions = {
     think: async () => ({ text: "ok" }),
     document: doc,
+    clock: instant,
     window: win,
     storage,
     open: o.open !== false,
@@ -1222,6 +1231,7 @@ test("positioning survives an element with no style, rect or pointer capture", (
   const widget = mountWidget(app.driver, {
     think: async () => ({ text: "ok" }),
     document: doc,
+    clock: instant,
     window: win,
     open: true,
     position: "top-left",
@@ -1241,5 +1251,732 @@ test("a drag of the header does not swallow the next click somewhere else", () =
   dragBy(host.one("dk-head"), -300, -100);
   host.one("dk-x").dispatch("click");
   assert.equal(host.one("dk-wrap").className, "dk-wrap", "a stale drag flag ate the Close click");
+  widget.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// The step list, the run controls, and the settings view.
+//
+// All three exist for one sentence of requirement: the agent drives the screen
+// the person is looking at, so it should walk the UI slowly enough to watch,
+// and the person should be able to see each step, slow it down, pause it, or
+// stop it.
+// ---------------------------------------------------------------------------
+
+/** A recording wrapper around the real control surface, so a test can assert
+ *  that a button reached it AND that the run actually held. A stub that only
+ *  recorded would pass against a panel whose buttons were wired to nothing
+ *  that `drive` consults. */
+function watcher(): {
+  seen: string[];
+  controls: (options: RunControlsOptions) => RunControls;
+} {
+  const seen: string[] = [];
+  return {
+    seen,
+    controls: (options) => {
+      seen.push(options.stepMode ? "new(stepMode)" : "new");
+      const base = runControls(options);
+      return {
+        get state() {
+          return base.state;
+        },
+        get permits() {
+          return base.permits;
+        },
+        get paceMs() {
+          return base.paceMs;
+        },
+        pause: () => (seen.push("pause"), base.pause()),
+        resume: () => (seen.push("resume"), base.resume()),
+        step: () => (seen.push("step"), base.step()),
+        pace: (ms) => (seen.push(`pace(${ms})`), base.pace(ms)),
+        subscribe: (listener) => base.subscribe(listener),
+        gate: (what, signal) => base.gate(what, signal),
+      };
+    },
+  };
+}
+
+interface WatchedOptions {
+  storage?: FakeStorage;
+  clock?: FakeClock;
+  doc?: FakeDocument;
+  pace?: number;
+  confirmCommits?: boolean;
+}
+
+/** A panel with a watched control surface and a clock that does not sleep. */
+function watched(script: unknown[], o: WatchedOptions = {}) {
+  const doc = o.doc ?? new FakeDocument();
+  const app = contacts();
+  const s = scripted(script);
+  const w = watcher();
+  const clock = o.clock ?? new FakeClock();
+  const widget = mountWidget(app.driver, {
+    think: s.think,
+    document: doc,
+    clock,
+    controls: w.controls,
+    open: true,
+    ...(o.storage === undefined ? {} : { storage: o.storage }),
+    ...(o.pace === undefined ? {} : { pace: o.pace }),
+    ...(o.confirmCommits === undefined ? {} : { confirmCommits: o.confirmCommits }),
+  });
+  const host = doc.host();
+  return { doc, app, s, w, clock, widget, host, step: () => host.one("dk-step") };
+}
+
+test("a step is on screen as pending before its verb runs, and only then becomes done", async () => {
+  // The whole point. `onBeforeCall` fires before the pace wait and before any
+  // hold, so the row describing a call is on screen while the person still has
+  // time to stop it; a panel built on `onCall` alone could only ever report
+  // what was already happening.
+  const { widget, host } = watched([
+    () => {
+      // Pressed while the model is still thinking, so the run holds at the
+      // gate with the row already rendered.
+      host.one("dk-pause").dispatch("click");
+      return { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme" } }] };
+    },
+    { text: "done" },
+  ]);
+
+  await ask(host, "select the Acme contacts");
+
+  const row = host.one("dk-step");
+  assert.match(row.className, /dk-step-pending/, "the row was not rendered before the call");
+  // Pending means pending: no outcome yet, and nothing has touched the app.
+  assert.equal(row.textContent, "select-where (describe) where=company=Acme");
+  assert.equal(host.one("dk-run-note").textContent, "Paused");
+
+  host.one("dk-pause").dispatch("click");
+  await settle();
+
+  assert.match(host.one("dk-step").className, /dk-step-done/);
+  assert.equal(
+    host.one("dk-step").textContent,
+    "select-where (describe) where=company=Acme · ok · 3,412 matched",
+  );
+  widget.unmount();
+});
+
+test("a refusal finishes a step as an outcome, not as an error", async () => {
+  // The app said no, on purpose, in its own vocabulary, and the model is about
+  // to adapt to it. Rendering that as a failure would teach a person to read a
+  // working app as a broken one -- so it is a step state like any other, and
+  // nothing is said in the transcript about anything going wrong.
+  const { widget, host } = watched([
+    { calls: [{ id: "a", name: "accept-selected", args: {} }] },
+    { text: "Nothing was selected." },
+  ]);
+
+  await ask(host, "accept them");
+  await allow(host);
+
+  const row = host.one("dk-step");
+  assert.match(row.className, /dk-step-refused/);
+  assert.doesNotMatch(row.className, /dk-step-running|dk-step-pending/);
+  assert.match(row.textContent!, /refused: nothing-selected$/);
+  assert.doesNotMatch(host.one("dk-log").text(), /went wrong/);
+  widget.unmount();
+});
+
+test("a commit step is marked as one at every stage, not only once it has run", async () => {
+  // This is the row somebody scrolls back to when they want to know what
+  // changed their data, and it is also the row they are deciding about while
+  // it is still pending. The mark cannot be something the outcome adds.
+  const { widget, host } = watched([
+    { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme", limit: 5 } }] },
+    { calls: [{ id: "b", name: "accept-selected", args: {} }] },
+    { text: "Accepted." },
+  ]);
+
+  await ask(host, "accept five Acme contacts");
+  // Mid-run: the commit is in flight at the confirmation, and already marked.
+  const commit = host.find("dk-step-commit");
+  assert.equal(commit.length, 1);
+  assert.match(commit[0]!.className, /dk-step-running/);
+  assert.equal(commit[0]!.attrs.get("title"), "Changes data, and may be irreversible.");
+
+  await allow(host);
+  // And still marked once it is done, because the class is not rewritten by
+  // the outcome.
+  assert.equal(host.find("dk-step-commit").length, 1);
+  assert.match(host.find("dk-step-commit")[0]!.className, /dk-step-done/);
+  widget.unmount();
+});
+
+test("twenty steps are twenty rows, each one line, in the order they happened", async () => {
+  // Legibility at length is the difference between a step list and a wall. The
+  // arguments are truncated and the CSS keeps each row to one line; what this
+  // pins is that nothing is dropped, nothing is merged, and the order is the
+  // order of the run.
+  const calls = Array.from({ length: 20 }, (_, i) => ({
+    id: `c-${i}`,
+    name: "select-where",
+    args: { where: `company=Acme-${i}` },
+  }));
+  const { widget, host } = watched([{ calls }, { text: "done" }]);
+
+  await ask(host, "do twenty things");
+
+  const rows = host.find("dk-step");
+  assert.equal(rows.length, 20);
+  assert.equal(rows.filter((r) => r.className.includes("dk-step-done")).length, 20);
+  assert.match(rows[0]!.textContent!, /company=Acme-0 /);
+  assert.match(rows[19]!.textContent!, /company=Acme-19 /);
+  widget.unmount();
+});
+
+test("pause holds the run, resume lets it go, and both reach the control surface", async () => {
+  const { w, widget, host, app } = watched([
+    () => {
+      host.one("dk-pause").dispatch("click");
+      return { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme" } }] };
+    },
+    { calls: [{ id: "b", name: "accept-selected", args: {} }] },
+    { text: "done" },
+  ]);
+
+  await ask(host, "select and accept");
+  // Held: the verb has not run, so nothing is selected and nothing is
+  // accepted. The `pace` in the middle is `drive` reconciling the run's pace
+  // with the controls at the top of the run, not the panel.
+  assert.deepEqual(w.seen, ["new", "pace(600)", "pause"]);
+  assert.equal(host.one("dk-pause").textContent, "Resume");
+
+  host.one("dk-pause").dispatch("click");
+  await settle();
+  await allow(host);
+
+  assert.deepEqual(w.seen, ["new", "pace(600)", "pause", "resume"]);
+  assert.equal(app.accepted(), 3412);
+  assert.equal(host.one("dk-pause").textContent, "Pause");
+  widget.unmount();
+});
+
+test("a single step runs exactly one more call and then holds again", async () => {
+  // Step is how somebody walks a run by hand. One press, one call -- and the
+  // panel says "Paused" afterwards because the loop says so, not because the
+  // panel assumed it.
+  const { w, widget, host } = watched([
+    () => {
+      host.one("dk-pause").dispatch("click");
+      return {
+        calls: [
+          { id: "a", name: "select-where", args: { where: "company=Acme" } },
+          { id: "b", name: "select-where", args: { where: "company=None" } },
+        ],
+      };
+    },
+    { text: "done" },
+  ]);
+
+  await ask(host, "two selections");
+  // One row ahead, not one turn ahead: the loop announces each call as it
+  // reaches it, so the row for the second call appears once the first is done.
+  assert.equal(host.find("dk-step-pending").length, 1);
+
+  host.one("dk-once").dispatch("click");
+  await settle();
+
+  assert.deepEqual(w.seen, ["new", "pace(600)", "pause", "step"]);
+  assert.equal(host.find("dk-step-done").length, 1, "a step ran more than one call");
+  assert.equal(host.find("dk-step-pending").length, 1, "the next call was not announced");
+  assert.equal(host.one("dk-run-note").textContent, "Paused");
+  widget.unmount();
+});
+
+test("stop ends a held run, and the steps that never ran say so", async () => {
+  // Abort outranks a pause -- a held run is stoppable and never wedged -- and
+  // a call abandoned at the gate gets no result, so a panel that left its row
+  // pending would be claiming something is about to happen after the run is
+  // over.
+  const { widget, host, app } = watched([
+    () => {
+      host.one("dk-pause").dispatch("click");
+      return { calls: [{ id: "a", name: "accept-selected", args: {} }] };
+    },
+  ]);
+
+  await ask(host, "accept them");
+  assert.match(host.one("dk-step").className, /dk-step-pending/);
+
+  host.one("dk-stop").dispatch("click");
+  await settle();
+
+  assert.match(host.one("dk-step").className, /dk-step-skipped/);
+  assert.match(host.one("dk-step").textContent!, /· not run$/);
+  assert.equal(app.accepted(), 0);
+  assert.equal(host.one("dk-wrap").className.includes("dk-busy"), false);
+  widget.unmount();
+});
+
+test("the panel says it is waiting for the person while a commit question is open", async () => {
+  // A run parked in front of a confirmation is not running and is not paused.
+  // Saying "running" there would be telling the person to wait for the thing
+  // that is waiting for them.
+  const { widget, host } = watched([
+    { calls: [{ id: "a", name: "accept-selected", args: {} }] },
+    { text: "ok" },
+  ]);
+
+  await ask(host, "accept them");
+  assert.equal(host.one("dk-run-note").textContent, "Waiting for you");
+
+  host.one("dk-no").dispatch("click");
+  await settle();
+  widget.unmount();
+});
+
+test("step mode starts the run held, so every call needs a press", async () => {
+  const storage = new FakeStorage();
+  const first = watched([{ text: "ok" }], { storage });
+  first.host.one("dk-gear").dispatch("click");
+  first.host.one("dk-t-stepmode").dispatch("click");
+  first.widget.unmount();
+
+  // A fresh panel, the remembered setting, and therefore controls built with
+  // `stepMode` -- which is all step mode is: paused, and stepped one call at a
+  // time. There is deliberately no second flag that could disagree.
+  const { w, widget, host } = watched(
+    [{ calls: [{ id: "a", name: "select-where", args: { where: "company=Acme" } }] }, { text: "ok" }],
+    { storage },
+  );
+  await ask(host, "select them");
+
+  assert.deepEqual(w.seen, ["new(stepMode)", "pace(600)"]);
+  // Held before the first model turn, so not even a round trip has been
+  // spent, let alone a verb. Nothing has been announced because nothing has
+  // been asked for yet.
+  assert.equal(host.find("dk-step").length, 0);
+  assert.equal(host.one("dk-run-note").textContent, "Paused");
+
+  host.one("dk-once").dispatch("click");
+  await settle();
+  assert.equal(host.find("dk-step-done").length, 1);
+  widget.unmount();
+});
+
+test("the pace the person chose is the pace that is waited, and it is live mid-run", async () => {
+  // Pacing is what makes the UI watchable, so this asserts the number and not
+  // merely that a wait happened. Live, because somebody reaching for a speed
+  // control while watching a run is asking about THIS run.
+  const clock = new FakeClock();
+  const { widget, host } = watched(
+    [
+      { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme" } }] },
+      () => {
+        host.one("dk-gear").dispatch("click");
+        host.find("dk-speed")[0]!.dispatch("click");
+        return { calls: [{ id: "b", name: "select-where", args: { where: "company=None" } }] };
+      },
+      { text: "done" },
+    ],
+    { clock },
+  );
+
+  await ask(host, "two selections");
+
+  // 600ms for the first call -- the default, which is the agent package's own
+  // WATCHABLE_PACE -- then 250 for the second, because the person moved the
+  // slider to Fast in between.
+  assert.deepEqual(clock.waits, [600, 250]);
+  widget.unmount();
+});
+
+test("the settings view opens from the header, closes again, and leaves the panel open", async () => {
+  const { widget, host } = watched([{ text: "ok" }]);
+  const gear = host.one("dk-gear");
+
+  gear.dispatch("click");
+  assert.equal(host.one("dk-wrap").className, "dk-wrap dk-open dk-set-open");
+  assert.equal(gear.attrs.get("aria-expanded"), "true");
+  // Focus lands on the first thing worth changing rather than on a container.
+  assert.equal(host.find("dk-speed")[0]!.focused, true);
+
+  gear.dispatch("click");
+  assert.equal(host.one("dk-wrap").className, "dk-wrap dk-open");
+  assert.equal(gear.attrs.get("aria-expanded"), "false");
+
+  // And Done, which is the other way out of it.
+  gear.dispatch("click");
+  host.one("dk-done").dispatch("click");
+  assert.equal(host.one("dk-wrap").className, "dk-wrap dk-open");
+  widget.unmount();
+});
+
+test("Escape closes the whole panel from inside the settings view", async () => {
+  // The panel's one escape hatch keeps working wherever focus is. It also
+  // leaves the settings view closed, so reopening the panel lands somebody
+  // back in the conversation they were having rather than in a preferences
+  // screen they had finished with.
+  const { widget, host } = watched([{ text: "ok" }]);
+  host.one("dk-gear").dispatch("click");
+
+  host.one("dk-t-highlight").dispatch("keydown", { key: "Escape" });
+  assert.equal(host.one("dk-wrap").className, "dk-wrap");
+
+  host.one("dk-launcher").dispatch("click");
+  assert.equal(host.one("dk-wrap").className, "dk-wrap dk-open");
+  widget.unmount();
+});
+
+test("closing the panel while a settings change is unsaved is not a thing: each change is saved at once", () => {
+  // There is no Save button, so there is no half-finished state to lose. Every
+  // switch writes on the press.
+  const storage = new FakeStorage();
+  const { widget, host } = watched([{ text: "ok" }], { storage });
+  host.one("dk-gear").dispatch("click");
+  host.one("dk-t-stepmode").dispatch("click");
+  assert.ok(storage.items.get(settingsKey("Contacts")), "nothing was written");
+  widget.unmount();
+});
+
+test("every setting is remembered per viewer and read back on the next mount", () => {
+  // Per viewer and not per app: a pace is a statement about how fast this
+  // particular person reads. Remembered the same way, in the same storage,
+  // through the same wrapped read as the panel's position.
+  const storage = new FakeStorage();
+  const first = watched([{ text: "ok" }], { storage });
+  first.host.one("dk-gear").dispatch("click");
+  first.host.find("dk-speed")[2]!.dispatch("click");
+  first.host.one("dk-t-highlight").dispatch("click");
+  first.host.one("dk-t-stepmode").dispatch("click");
+  first.host.one("dk-t-commits").dispatch("click");
+  first.widget.unmount();
+
+  const { widget, host } = watched([{ text: "ok" }], { storage });
+  host.one("dk-gear").dispatch("click");
+  assert.equal(host.find("dk-speed")[2]!.attrs.get("aria-checked"), "true");
+  assert.equal(host.find("dk-speed")[1]!.attrs.get("aria-checked"), "false");
+  assert.equal(host.one("dk-t-highlight").attrs.get("aria-checked"), "false");
+  assert.equal(host.one("dk-t-stepmode").attrs.get("aria-checked"), "true");
+  assert.equal(host.one("dk-t-commits").attrs.get("aria-checked"), "false");
+  // And the remembered confirmCommits is the one that is obeyed, not the
+  // option's default.
+  assert.equal(host.one("dk-run-note").textContent, "Slow · 1500 ms a step");
+  widget.unmount();
+});
+
+test("a remembered confirmCommits of false really does skip the question", async () => {
+  const storage = new FakeStorage();
+  const first = watched([{ text: "ok" }], { storage });
+  first.host.one("dk-gear").dispatch("click");
+  first.host.one("dk-t-commits").dispatch("click");
+  first.widget.unmount();
+
+  const { widget, host, app } = watched(
+    [{ calls: [{ id: "a", name: "select-where", args: { where: "company=Acme", limit: 7 } }] },
+     { calls: [{ id: "b", name: "accept-selected", args: {} }] },
+     { text: "done" }],
+    { storage },
+  );
+  await ask(host, "accept seven");
+  assert.equal(host.find("dk-ask").length, 0, "a question was asked anyway");
+  assert.equal(app.accepted(), 7);
+  widget.unmount();
+});
+
+test("turning confirmations back on mid-run takes effect on the next commit", async () => {
+  // Somebody who has just watched a commit go past unasked reaches for this
+  // switch about the run in front of them, not about the next one.
+  const { widget, host, app } = watched(
+    [
+      { calls: [{ id: "a", name: "accept-selected", args: {} }] },
+      () => {
+        host.one("dk-gear").dispatch("click");
+        host.one("dk-t-commits").dispatch("click");
+        host.one("dk-done").dispatch("click");
+        return { calls: [{ id: "b", name: "accept-selected", args: {} }] };
+      },
+      { text: "done" },
+    ],
+    { confirmCommits: false },
+  );
+
+  await ask(host, "accept, twice");
+  // The first went through unasked; the second is waiting for an answer.
+  assert.equal(host.find("dk-ask").length, 1);
+  host.one("dk-no").dispatch("click");
+  await settle();
+  assert.equal(app.accepted(), 0, "nothing was selected, so nothing should have been accepted");
+  widget.unmount();
+});
+
+test("storage that throws on read leaves the panel rendering at its defaults", () => {
+  // A private window, or a person who blocked site data. A chat panel that
+  // failed to render because it could not remember a slider position would be
+  // a much worse bug than one that opens at the default speed.
+  const storage = new FakeStorage();
+  storage.throwOnRead = true;
+  const { widget, host } = watched([{ text: "ok" }], { storage });
+
+  host.one("dk-gear").dispatch("click");
+  assert.equal(host.find("dk-speed")[1]!.attrs.get("aria-checked"), "true");
+  assert.equal(host.one("dk-t-highlight").attrs.get("aria-checked"), "true");
+  assert.equal(host.one("dk-run-note").textContent, "Steady · 600 ms a step");
+  widget.unmount();
+});
+
+test("storage that throws on write still changes the setting for this session", () => {
+  // A full quota is not a reason to refuse a preference. It is a reason not to
+  // remember it.
+  const storage = new FakeStorage();
+  storage.throwOnWrite = true;
+  const { widget, host } = watched([{ text: "ok" }], { storage });
+
+  host.one("dk-gear").dispatch("click");
+  host.one("dk-t-stepmode").dispatch("click");
+  assert.equal(host.one("dk-t-stepmode").attrs.get("aria-checked"), "true");
+  assert.equal(storage.items.size, 0, "it should not have been remembered");
+  widget.unmount();
+});
+
+test("the settings button does not start a drag, because the header is also the handle", () => {
+  // `controls: "ignore"` is what makes this true, and it is why the gear can
+  // live in the header beside Move and Close at all. A press that starts on a
+  // button belongs to the button, even if the hand moves before it lifts.
+  const { widget, host } = place();
+  const before = host.getBoundingClientRect();
+  const gear = host.one("dk-gear");
+
+  gear.dispatch("pointerdown", { pointerId: 7, button: 0, clientX: 500, clientY: 500 });
+  host.one("dk-head").dispatch("pointermove", { pointerId: 7, clientX: 200, clientY: 200 });
+  host.one("dk-head").dispatch("pointerup", { pointerId: 7, clientX: 200, clientY: 200 });
+
+  assert.equal(host.getBoundingClientRect().left, before.left, "the gear dragged the panel");
+  assert.doesNotMatch(host.className, /dk-dragging/);
+  // And the click that follows still opens the settings view.
+  gear.dispatch("click");
+  assert.match(host.one("dk-wrap").className, /dk-set-open/);
+  widget.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// The highlight.
+//
+// `Verb.at` is PRESENTATIONAL. The widget may outline what it names and may do
+// nothing else with it: never resolve it to decide what to call, never click
+// it, never let its absence change what runs. A selector in the execution path
+// is the failure mode this library exists to avoid, so most of what follows is
+// about the ways `at` is allowed to be useless.
+// ---------------------------------------------------------------------------
+
+/** An app whose verbs point at things on screen -- and one that does not,
+ *  which is the common case. */
+function pointed(): Driver {
+  return mount({
+    app: "Rows",
+    visible: () => ({ where: "rows", rev: 1, rows: [{ id: "r-7" }] }),
+    verbs: [
+      { name: "focus", kind: "read", describe: "look at row seven", at: "#row-7", run: () => ({}) },
+      { name: "plain", kind: "read", describe: "no element in particular", run: () => ({}) },
+      { name: "missing", kind: "read", describe: "points at nothing", at: "#gone", run: () => ({}) },
+      { name: "nonsense", kind: "read", describe: "points at rubbish", at: ":::", run: () => ({}) },
+    ],
+  });
+}
+
+function pointing(script: unknown[]) {
+  const doc = new FakeDocument();
+  const s = scripted(script);
+  const widget = mountWidget(pointed(), {
+    think: s.think,
+    document: doc,
+    clock: instant,
+    open: true,
+  });
+  const host = doc.host();
+  const outline = (): FakeNode | null => {
+    const hits = doc.body.all().filter((n) => n.className.split(" ").includes("dk-spot"));
+    return hits[0] ?? null;
+  };
+  return { doc, s, widget, host, outline };
+}
+
+const AT_RUN = [
+  { calls: [{ id: "a", name: "focus", args: {} }] },
+  { text: "looked" },
+];
+
+test("the element a step is about to touch is outlined, as an overlay at its own box", async () => {
+  const { doc, widget, host, outline } = pointing(AT_RUN);
+  doc.at("#row-7", { left: 120, top: 240, width: 300, height: 48 });
+
+  await ask(host, "look at row seven");
+
+  const box = outline()!;
+  assert.ok(box, "nothing was outlined");
+  // The numbers are the element's own rectangle, written as custom properties
+  // on an overlay in a shadow root of its own.
+  assert.equal(box.style.props.get("--dk-spot-x"), "120px");
+  assert.equal(box.style.props.get("--dk-spot-y"), "240px");
+  assert.equal(box.style.props.get("--dk-spot-w"), "300px");
+  assert.equal(box.style.props.get("--dk-spot-h"), "48px");
+  // And nothing at all was written to the host app's element. A border on
+  // somebody's row reflows their layout; an agent that nudges the page
+  // sideways every time it names an element is not a passive observer of it.
+  const target = doc.elements.get("#row-7")!;
+  assert.equal(target.className, "");
+  assert.equal(target.style.props.size, 0);
+  assert.equal(target.attrs.size, 0);
+  widget.unmount();
+});
+
+test("the outline is gone the moment the step finishes", async () => {
+  // An outline left behind is an outline about nothing.
+  const { doc, widget, host, outline } = pointing(AT_RUN);
+  doc.at("#row-7", { left: 10, top: 10, width: 100, height: 20 });
+
+  await ask(host, "look at row seven");
+  assert.doesNotMatch(outline()!.className, /dk-spot-on/);
+  widget.unmount();
+});
+
+test("a verb with no `at` is not outlined, and nothing is added to the page for it", async () => {
+  // The common case by a long way. An app whose verbs name nothing should not
+  // pay an element and two listeners for a feature it never reaches.
+  const { doc, widget, host, outline } = pointing([
+    { calls: [{ id: "a", name: "plain", args: {} }] },
+    { text: "looked" },
+  ]);
+
+  await ask(host, "do the plain thing");
+
+  assert.equal(outline(), null, "an overlay was created for a verb with no at");
+  assert.equal(doc.body.children.length, 1, "something else was added to the page");
+  widget.unmount();
+});
+
+test("an `at` that matches nothing, or is not valid CSS, draws nothing and changes nothing", async () => {
+  // Both are ordinary: an app's markup moved, or somebody typed a selector
+  // wrong. A wrong or stale `at` must cost nothing but an outline that is not
+  // drawn -- never a verb that stops working.
+  const { widget, host, outline } = pointing([
+    { calls: [{ id: "a", name: "missing", args: {} }] },
+    { calls: [{ id: "b", name: "nonsense", args: {} }] },
+    { text: "both ran" },
+  ]);
+
+  await ask(host, "try both");
+
+  assert.equal(outline(), null);
+  const rows = host.find("dk-step");
+  assert.equal(rows.length, 2);
+  // The point: the calls ran anyway, and ran normally.
+  assert.ok(rows.every((r) => r.className.includes("dk-step-done")), "a bad at broke a call");
+  widget.unmount();
+});
+
+test("a document with no querySelector gets no outlines and no errors", async () => {
+  // `DocumentLike.querySelector` is optional, and this is why: a host that
+  // hands in a minimal document, like a fake, simply gets no outlines. It is
+  // the same no-op path every verb without an `at` already takes.
+  const doc = new FakeDocument();
+  hide(doc as unknown as FakeNode, "querySelector");
+  const s = scripted(AT_RUN);
+  const widget = mountWidget(pointed(), { think: s.think, document: doc, clock: instant, open: true });
+  const host = doc.host();
+
+  await ask(host, "look at row seven");
+
+  assert.match(host.one("dk-step").className, /dk-step-done/);
+  assert.equal(doc.body.children.length, 1);
+  widget.unmount();
+});
+
+test("an element with no measurable box is not outlined", async () => {
+  // A hidden row, a display:none cell, an element the layout has not reached
+  // yet. Outlining a zero-sized box draws a dot in the corner of the screen,
+  // which reads as a bug in the panel rather than as nothing.
+  const { doc, widget, host, outline } = pointing(AT_RUN);
+  doc.at("#row-7", { left: 0, top: 0, width: 0, height: 0 });
+
+  await ask(host, "look at row seven");
+  assert.equal(outline(), null);
+  widget.unmount();
+});
+
+test("highlighting off means no outline at all, and switching it off clears the one on screen", async () => {
+  const { doc, widget, host, outline } = pointing([
+    () => {
+      host.one("dk-gear").dispatch("click");
+      host.one("dk-t-highlight").dispatch("click");
+      host.one("dk-done").dispatch("click");
+      return { calls: [{ id: "a", name: "focus", args: {} }] };
+    },
+    { text: "looked" },
+  ]);
+  doc.at("#row-7", { left: 10, top: 10, width: 100, height: 20 });
+
+  await ask(host, "look at row seven");
+  assert.equal(outline(), null, "the setting was ignored");
+  widget.unmount();
+});
+
+test("unmount takes the outline, its host element and its listeners with it", async () => {
+  const win = new FakeWindow(VIEW.width, VIEW.height);
+  const doc = new FakeDocument(true, win, BOX);
+  doc.at("#row-7", { left: 10, top: 10, width: 100, height: 20 });
+  const s = scripted(AT_RUN);
+  const widget = mountWidget(pointed(), {
+    think: s.think,
+    document: doc,
+    clock: instant,
+    window: win,
+    open: true,
+  });
+  const host = doc.host();
+
+  await ask(host, "look at row seven");
+  assert.equal(doc.body.children.length, 2, "the overlay host should be in the page by now");
+  // One for the panel's clamp, one for the outline's reflow.
+  assert.equal(win.listeners("resize"), 2);
+
+  widget.unmount();
+
+  assert.equal(doc.body.children.length, 0);
+  assert.equal(win.listeners("resize"), 0);
+  assert.equal(win.listeners("scroll"), 0);
+});
+
+test("an outline follows the element when the page scrolls under it", async () => {
+  // The verb being announced is quite often the one that scrolls the row into
+  // view, so a box measured once and left there would be an outline around the
+  // wrong row for the rest of the step.
+  const win = new FakeWindow(VIEW.width, VIEW.height);
+  const doc = new FakeDocument(true, win, BOX);
+  const s = scripted([
+    () => {
+      // Paused so the outline is still up while the test scrolls.
+      doc.host().one("dk-pause").dispatch("click");
+      return { calls: [{ id: "a", name: "focus", args: {} }] };
+    },
+    { text: "looked" },
+  ]);
+  const w = watcher();
+  const widget = mountWidget(pointed(), {
+    think: s.think,
+    document: doc,
+    clock: instant,
+    window: win,
+    controls: w.controls,
+    open: true,
+  });
+  const host = doc.host();
+  const target = doc.at("#row-7", { left: 10, top: 400, width: 100, height: 20 });
+
+  await ask(host, "look at row seven");
+  const box = doc.body.all().find((n) => n.className.split(" ").includes("dk-spot"))!;
+  assert.equal(box.style.props.get("--dk-spot-y"), "400px");
+
+  target.rect = { left: 10, top: 120, width: 100, height: 20 };
+  win.resize(VIEW.width, VIEW.height);
+  assert.equal(box.style.props.get("--dk-spot-y"), "120px");
+
+  host.one("dk-stop").dispatch("click");
+  await settle();
   widget.unmount();
 });

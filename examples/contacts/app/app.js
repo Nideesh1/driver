@@ -1,29 +1,38 @@
 /**
- * The Contacts demo: one screen, one driver, two ways in.
+ * Northwind CRM: six screens, one driver, two ways in.
  *
- * `store.js` holds the store and the verb table. This file is the part that
- * touches the DOM: it draws the table, wires the human's controls, and then
- * opens BOTH of driverkit's paths over the one driver —
+ * `store.js` holds the store, the per-screen `visible()` reads and the verb
+ * table. `screens.js` holds the DOM. This file is the part that joins them to
+ * the browser: it syncs the route to the address bar, redraws on every change,
+ * and opens BOTH of driverkit's paths over the one driver —
  *
  *   `mountWidget(driver, …)` — a chat panel in the corner of this page, which
  *       drives the app in-process with no transport at all.
  *   `connect(driver, { relay: "" })` — an SSE stream held open to the relay
  *       that this page's own server mounted at `/dk`, so an agent in another
- *       process drives the same screen through the same verbs.
+ *       process drives the same screens through the same verbs.
  *
  * One page, both cases, and the point of the exercise: they are not two
  * integrations. Everything arrives at `driver.call()`, which is the only place
  * arguments are validated and `rev` is checked.
  *
- * Plain `.js` with JSDoc, importing the library's BUILT output from `dist/`.
- * The demo deliberately has no build step of its own, so the first thing that
- * had to work in a browser was the library rather than this file.
+ * THE ROUTE SYNC IS ONE-WAY BY DESIGN. The store's `route` is the truth and
+ * the address bar follows it. The other direction — a verb calls
+ * `history.pushState`, a `hashchange` eventually updates the store — would
+ * mean `open-contact` returning a snapshot of the screen it just left, because
+ * the core reads `visible()` the instant `run` returns and `hashchange` is a
+ * later task. A navigation verb that reports the previous screen is a
+ * navigation verb an agent cannot chain, so the store moves first and the URL
+ * catches up. The browser's own Back still works, because `hashchange` from a
+ * real history move is the one case that writes INTO the store.
  */
 
 import { mountWidget } from "../../../packages/widget/dist/widget.js";
 import { connect } from "../../../packages/browser/dist/connect.js";
 import { backendThink } from "../../../packages/agent/dist/backend.js";
-import { createApp, PAGE_SIZE, TOTAL } from "./store.js";
+import { createApp } from "./store.js";
+import { renderScreen } from "./screens.js";
+import { href, parse, same } from "./router.js";
 
 /**
  * The relay connection. Declared before `createApp` because the change
@@ -33,173 +42,117 @@ import { createApp, PAGE_SIZE, TOTAL } from "./store.js";
  */
 let connection;
 
+/** True while we are writing `location.hash` ourselves, so the `hashchange`
+ *  our own write fires is ignored rather than treated as the person pressing
+ *  Back. Without it every verb-driven navigation would be applied twice: once
+ *  by the store and once by the listener reading the URL we just set. */
+let writingHash = false;
+
 const app = createApp(() => {
-  render();
+  syncHash();
+  renderScreen(app, host);
+  markNav();
   connection?.changed();
 });
 
-const { driver, store, filtered, windowRows, pageCount, bump, acceptSelected } = app;
+const { driver, store } = app;
 
-const $ = (/** @type {string} */ id) => /** @type {HTMLElement} */ (document.getElementById(id));
-const n = (/** @type {number} */ x) => x.toLocaleString("en-US");
+const host = /** @type {HTMLElement} */ (document.getElementById("screen"));
+const nav = /** @type {HTMLElement} */ (document.getElementById("nav"));
+const connDot = /** @type {HTMLElement} */ (document.getElementById("conn-dot"));
+const connText = /** @type {HTMLElement} */ (document.getElementById("conn-text"));
 
-const els = {
-  q: /** @type {HTMLInputElement} */ ($("q")),
-  rows: $("rows"),
-  empty: $("empty"),
-  range: $("range"),
-  sub: $("sub"),
-  prev: /** @type {HTMLButtonElement} */ ($("prev")),
-  next: /** @type {HTMLButtonElement} */ ($("next")),
-  selbar: $("selbar"),
-  selcount: $("selcount"),
-  clearSel: /** @type {HTMLButtonElement} */ ($("clear-sel")),
-  acceptSel: /** @type {HTMLButtonElement} */ ($("accept-sel")),
-  detail: $("detail"),
-  connDot: $("conn-dot"),
-  connText: $("conn-text"),
-};
+// ---- the URL ------------------------------------------------------------
 
-// ---- rendering ----------------------------------------------------------
-
-function render() {
-  const all = filtered();
-  const rows = windowRows();
-
-  els.rows.replaceChildren(
-    ...rows.map((row) => {
-      const tr = document.createElement("tr");
-      tr.dataset.selected = store.selected.has(row.id) ? "true" : "false";
-
-      const check = document.createElement("td");
-      const box = document.createElement("input");
-      box.type = "checkbox";
-      box.checked = store.selected.has(row.id);
-      box.setAttribute("aria-label", `Select ${row.name}`);
-      box.addEventListener("change", () => {
-        if (box.checked) store.selected.add(row.id);
-        else store.selected.delete(row.id);
-        bump();
-      });
-      check.appendChild(box);
-
-      const id = document.createElement("td");
-      id.className = "cell-id";
-      id.textContent = row.id;
-
-      const name = document.createElement("td");
-      name.className = "cell-name";
-      const link = document.createElement("button");
-      link.type = "button";
-      link.className = "name-link";
-      link.textContent = row.name;
-      link.addEventListener("click", () => {
-        store.openId = row.id;
-        bump();
-      });
-      name.appendChild(link);
-
-      const company = document.createElement("td");
-      company.textContent = row.company;
-
-      const status = document.createElement("td");
-      const pill = document.createElement("span");
-      pill.className = "pill";
-      pill.dataset.status = row.status;
-      pill.textContent = row.status;
-      status.appendChild(pill);
-
-      tr.append(check, id, name, company, status);
-      return tr;
-    }),
-  );
-
-  els.empty.hidden = rows.length > 0;
-
-  const first = rows.length ? store.page * PAGE_SIZE + 1 : 0;
-  els.range.textContent = rows.length
-    ? `${n(first)}–${n(first + rows.length - 1)} of ${n(all.length)}`
-    : `0 of ${n(all.length)}`;
-
-  const q = store.query.trim();
-  els.sub.textContent = q
-    ? `${n(all.length)} of ${n(TOTAL)} contacts match “${q}”`
-    : `${n(TOTAL)} contacts`;
-
-  els.prev.disabled = store.page === 0;
-  els.next.disabled = store.page >= pageCount() - 1;
-
-  const picked = store.selected.size;
-  els.selbar.dataset.empty = picked === 0 ? "true" : "false";
-  els.selcount.textContent =
-    picked === 0
-      ? "No contacts selected"
-      : `${n(picked)} contact${picked === 1 ? "" : "s"} selected`;
-  els.clearSel.disabled = picked === 0;
-  els.acceptSel.disabled = picked === 0;
-
-  const open = store.openId ? store.rows.find((r) => r.id === store.openId) : undefined;
-  els.detail.hidden = !open;
-  if (open) {
-    $("detail-name").textContent = open.name;
-    $("detail-id").textContent = open.id;
-    $("detail-company").textContent = open.company;
-    $("detail-status").textContent = open.status;
-    $("detail-owner").textContent = open.owner;
+/**
+ * Push the store's route into the address bar, if it is not already there.
+ *
+ * `pushState` rather than assigning `location.hash`, so the entry is added
+ * without a second `hashchange` round trip, and `writingHash` covers the
+ * browsers that fire one anyway. The comparison is on the formatted string,
+ * which is why `href()` is total and always absolute: two routes that mean the
+ * same screen must produce the same bytes or this pushes an entry per redraw.
+ */
+function syncHash() {
+  const want = href(store.route);
+  if (location.hash === want) return;
+  writingHash = true;
+  try {
+    history.pushState(null, "", want);
+  } catch {
+    // A `file://` page has no session history to push onto. Falling back keeps
+    // the demo usable when it is opened by double-click rather than served,
+    // which is how most people's first look at it happens.
+    location.hash = want;
   }
-
-  if (els.q.value !== store.query) els.q.value = store.query;
+  // Cleared on a later task, not here: the `hashchange` this write may fire is
+  // queued, so clearing synchronously would let it through.
+  setTimeout(() => {
+    writingHash = false;
+  }, 0);
 }
 
-// ---- the human's controls -----------------------------------------------
+/**
+ * The browser moved: Back, Forward, a pasted link, or a nav anchor clicked.
+ *
+ * `record: false`, because this move IS the browser's history — pushing the
+ * screen we are leaving onto the app's own trail as well would make the `back`
+ * verb bounce between two screens instead of walking back.
+ */
+function hashMoved() {
+  if (writingHash) return;
+  const route = parse(location.hash);
+  if (same(store.route, route)) return;
+  app.navigate(route, { record: false });
+}
 
-els.q.addEventListener("input", () => {
-  store.query = els.q.value;
-  store.page = 0;
-  bump();
-});
+window.addEventListener("hashchange", hashMoved);
+window.addEventListener("popstate", hashMoved);
 
-els.prev.addEventListener("click", () => {
-  if (store.page > 0) {
-    store.page -= 1;
-    bump();
+/** Mark the nav item for the screen we are on, including for the two record
+ *  screens, which have no nav item of their own and light up their list. */
+function markNav() {
+  const screen = store.route.screen;
+  const owner =
+    screen === "contact" ? "contacts" : screen === "company" ? "companies" : screen;
+  for (const item of nav.querySelectorAll(".nav-item")) {
+    if (item.dataset.screen === owner) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
   }
-});
+}
 
-els.next.addEventListener("click", () => {
-  if (store.page < pageCount() - 1) {
-    store.page += 1;
-    bump();
-  }
-});
+// ---- first paint --------------------------------------------------------
 
-els.clearSel.addEventListener("click", () => {
-  store.selected.clear();
-  bump();
-});
-
-els.acceptSel.addEventListener("click", () => {
-  acceptSelected();
-  bump();
-});
-
-$("detail-close").addEventListener("click", () => {
-  store.openId = null;
-  bump();
-});
-
-render();
+// The URL wins on load, which is what makes a deep link a deep link:
+// `#/contacts/c-0184` pasted cold opens that record rather than the dashboard
+// and then jumping. `record: false` so Back from a deep link leaves the app
+// rather than walking an invented trail the person never visited.
+const initial = parse(location.hash);
+if (!same(store.route, initial)) app.navigate(initial, { record: false });
+renderScreen(app, host);
+markNav();
 
 // ---- the two ways in ----------------------------------------------------
 
 mountWidget(driver, {
   think: backendThink("/api/chat"),
   greeting:
-    "Ask me to do things in Contacts. Try: “select everyone at Grayson Robotics " +
-    "whose status is new, tell me how many, then accept them”.",
+    "Ask me to do things in Northwind. Try: “open Grayson Robotics, how many of its " +
+    "contacts are pending, then accept them”.",
+  // Static, and cached with the system prompt. The app-shaped briefing that
+  // belongs in the manifest and has nowhere to live there: the screens, how to
+  // move between them, and what a drill-down means. An agent arriving over the
+  // relay never sees a word of this, which is why `visible()` repeats the
+  // screen list in every snapshot's `note`.
   instructions:
-    "This is a CRM contacts table. A contact's status moves new → pending → accepted " +
-    "or declined. `accept-selected` is the only verb that changes data.",
+    "This is a CRM with six screens: a dashboard, a contacts list, one screen per contact, " +
+    "a companies list, one screen per company, and settings. `go` reaches the four main " +
+    "screens; `open-contact` and `open-company` drill into one record and replace the screen " +
+    "you are on. Several verbs only work on one screen and refuse `wrong-screen` elsewhere, " +
+    "with the fix in the hint — read it rather than retrying. A contact's status moves " +
+    "new → pending → accepted or declined. The selection is global: it survives navigation, " +
+    "so a commit verb can act on rows that are not on the screen in front of you, and " +
+    "`selectedCount` is the honest size of it.",
   onError: (err) => console.error("driverkit widget:", err),
 });
 
@@ -211,28 +164,35 @@ mountWidget(driver, {
  * the store's `bump()`, which calls `changed()`, and that is the better shape
  * — polling `visible()` is the escape hatch for a codebase too scattered to
  * instrument.
+ *
+ * `url` is passed explicitly with the fragment on it, because `connect`'s own
+ * `urlFromPage()` reads `location.pathname` and `location.search` and drops
+ * the hash. Even so it is only right once: `hello` is sent on connect and on
+ * reconnect, so after the first navigation `/dk/tabs` is listing a URL this
+ * tab has left. There is no frame that says "I navigated"; see the report.
  */
 try {
   connection = connect(driver, {
     relay: "",
-    app: "Contacts",
+    app: "Northwind CRM",
     title: document.title,
+    url: `${location.pathname}${location.hash}`,
     onError: (err) => {
-      els.connDot.dataset.state = "down";
-      els.connText.textContent = "relay unreachable";
+      connDot.dataset.state = "down";
+      connText.textContent = "relay unreachable";
       console.error("driverkit relay:", err);
     },
   });
-  els.connDot.dataset.state = "live";
+  connDot.dataset.state = "live";
   // Deliberately not the tab id. PROTOCOL.md: a tab id is a capability, so it
   // goes neither on the screen nor in a log.
-  els.connText.textContent = "drivable from outside";
+  connText.textContent = "drivable from outside";
 } catch (err) {
-  els.connDot.dataset.state = "down";
-  els.connText.textContent = "relay not mounted";
+  connDot.dataset.state = "down";
+  connText.textContent = "relay not mounted";
   console.error("driverkit relay:", err);
 }
 
 // For poking at from the console, which is how the first real run of anything
 // like this actually gets debugged.
-Object.assign(globalThis, { driver, store });
+Object.assign(globalThis, { driver, store, app });

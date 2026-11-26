@@ -165,26 +165,199 @@ export interface CommitRequest {
  */
 export type CommitDecision = boolean | string | void;
 
+/**
+ * What the run controls are asking for right now.
+ *
+ * Two states and not three: there is no "stopped". A stop is the `AbortSignal`,
+ * which ends the run rather than changing how it is being driven, and folding
+ * the two together would invite a `state === "stopped"` check that a paused run
+ * could never recover from.
+ */
+export type ControlState = "running" | "paused";
+
+/**
+ * What a UI should say the run is doing.
+ *
+ * The control states plus the one wait the controls do not own: a run sitting
+ * in front of `onBeforeCommit` is not paused and is not running either, it is
+ * waiting for a person to answer, and a panel that showed "running" there would
+ * be telling the person to wait for the thing that is waiting for them.
+ */
+export type RunState = ControlState | "awaiting-approval";
+
+/**
+ * Pause, resume and step, as a plain object. Built by `runControls`.
+ *
+ * Passed into `drive` rather than returned from it, because `drive`'s promise
+ * settles when the run is over and a handle you can only hold afterwards is a
+ * handle you cannot pause with. See `runControls` for the rest of that
+ * argument.
+ */
+export interface RunControls {
+  /** `"paused"` means the run will hold before its next call. The call in
+   *  flight, if any, still finishes: a pause is a gate between calls and never
+   *  an interruption inside one. */
+  readonly state: ControlState;
+  /** Outstanding `step()` permits. For a UI that wants to show that a step has
+   *  been asked for and not yet spent. */
+  readonly permits: number;
+  /** Hold before the next call. The call in flight finishes first. */
+  pause(): void;
+  /** Carry on. Drops any unspent `step()` permit, since running is the stronger
+   *  statement. */
+  resume(): void;
+  /** Run exactly one more call, then hold again. Valid from either state. */
+  step(): void;
+  /**
+   * The delay before each call, in milliseconds, right now.
+   *
+   * Readable so a slider can render the run's real pace rather than its own
+   * last write — which are different numbers the moment anything else sets it,
+   * and the second one is the one a person would call a bug.
+   */
+  readonly paceMs: number;
+  /**
+   * Change the pace of the run **in flight**: from the next wait onwards, and
+   * including the wait already running.
+   *
+   * Live because the moment a person wants the agent slowed down is while it is
+   * going. A slider that quietly applied next run would be worse than no
+   * slider: they move it, nothing happens, and they conclude it is broken.
+   *
+   * 0 means the next wait does not happen at all. Values that are not a claim
+   * about a speed — `NaN`, `Infinity`, anything non-finite — are **ignored**,
+   * and the current pace is kept: reading them as 0 would make the agent faster
+   * than the person asked for, and reading `Infinity` as a delay would park the
+   * run on a timer nobody meant to set. A negative is clamped to 0, since "less
+   * than no wait" has only one sensible meaning.
+   */
+  pace(ms: number): void;
+  /**
+   * Be told when any of the above changes, for a UI that has to stay in step
+   * with controls it is not the only owner of. Returns an unsubscribe.
+   *
+   * Fires on a real change to `state`, `permits` or `paceMs`, and on nothing
+   * else. The listener is handed no arguments and reads whichever getter it
+   * cares about, so this cannot grow a snapshot shape that drifts from the
+   * object it describes.
+   *
+   * `onControl` already reports state during a run; this covers what that
+   * cannot, which is a `step()` or a pace change made **between** runs, when
+   * there is no loop to report anything. `drive` subscribes as well, which is
+   * how a pace change reaches a wait that has already started.
+   */
+  subscribe(listener: () => void): () => void;
+  /**
+   * Block until the run may proceed. **`drive` calls this; a caller does not.**
+   *
+   * On the public interface because the waiting and the state have to live
+   * together — a gate that polled a `state` getter would either spin or add a
+   * latency of its own — and because a host with an exotic control surface (a
+   * queue, a remote operator, a test) can implement this interface itself and
+   * `drive` will drive it.
+   *
+   * `what` distinguishes a model round trip from a verb call: only a call spends
+   * a `step()` permit. Resolves immediately, without holding, if `signal` is
+   * already aborted or fires while parked — an abort outranks a pause, always.
+   */
+  gate(what: "think" | "call", signal?: AbortSignal): Promise<void>;
+}
+
+/**
+ * The timer `pace` uses. Injectable so the suite does not actually sleep.
+ *
+ * Deliberately smaller than `setTimeout`: no arguments forwarded, no return
+ * type promised. `unknown` for the handle because the real one is a `number` in
+ * a browser and a `Timeout` object in Node, and a package that named either
+ * would stop compiling in the other.
+ */
+export interface Clock {
+  set(fn: () => void, ms: number): unknown;
+  clear(handle: unknown): void;
+  /**
+   * Milliseconds since some fixed point. Defaults to `Date.now`.
+   *
+   * Here because a pace that can change mid-wait has to know how much of the
+   * wait has already elapsed, and a suite that could inject the timer but not
+   * the clock would have to sleep to test it.
+   */
+  now?(): number;
+}
+
+/** The common shape of the three per-call events. Shared so a widget can write
+ *  one function that renders a row and call it from all three. */
+export interface CallEvent {
+  step: number;
+  call: ToolCall;
+  /** From the manifest, and undefined when the app declared none — this package
+   *  does not manufacture a safety claim the app did not make, in either
+   *  direction. */
+  kind?: VerbKind;
+  /**
+   * The verb's `at` selector, if the app declared one: a hint about which
+   * element on the page this call is about, so a UI can outline it.
+   *
+   * Passed straight through from the manifest and used by nothing in here.
+   * driverkit does not resolve selectors — see `Verb.at` in the core, which
+   * says why that is a promise and not an omission. A UI is free to query it; a
+   * UI is the only thing that should.
+   */
+  at?: string;
+  /** Position within this turn's calls, 0-based. A model may ask for several
+   *  verbs in one turn, and a step list that showed them without their order
+   *  would be hiding the one thing the person needs: what ran before what. */
+  index: number;
+  /** How many calls this turn asked for. */
+  of: number;
+}
+
 export interface DriveEvents {
   /** About to spend a model round trip. `step` is 1-based. */
   onStep?: (e: { step: number }) => void;
   /** The model said something in prose, mid-run or as its answer. */
   onSay?: (e: { step: number; text: string }) => void;
-  /** A verb is about to run. `kind` comes from the manifest and is undefined
-   *  when the app declared none — this package does not manufacture a safety
-   *  claim the app did not make, in either direction. */
-  onCall?: (e: { step: number; call: ToolCall; kind?: VerbKind }) => void;
-  /** A verb ran. `result` is null for the two tools that are not verbs
+  /**
+   * A call is going to be attempted — fired **before** the pace wait and before
+   * any pause gate, so a row for it can be on screen and glowing while the
+   * person still has time to stop it. This is the event a pending step list is
+   * built from; `onCall` then means "running" and `onResult` means "done".
+   *
+   * It is not a promise that the call will run. A stop pressed during the pace
+   * wait, or while the run is held, abandons it unrun — `onStop` fires with
+   * `aborted` and anything still pending should be settled from there, since no
+   * `onResult` is coming for a call that never happened.
+   */
+  onBeforeCall?: (e: CallEvent) => void;
+  /** A verb is about to run, after any pacing and any hold: the last event
+   *  before the app is touched. Pre-dates `onBeforeCall` and keeps its exact
+   *  meaning and timing — with no pacing and no controls the two fire back to
+   *  back, which is what an existing caller already sees. */
+  onCall?: (e: CallEvent) => void;
+  /** A verb ran. `result` is null for the one tool that is not a verb
    *  (`read_screen`) and for a call to a name the manifest does not have. */
-  onResult?: (e: {
-    step: number;
-    call: ToolCall;
-    kind?: VerbKind;
-    result: Result | null;
-    /** What the model was told, verbatim. A UI showing this shows exactly
-     *  what the model is reasoning from, which is the honest thing to show. */
-    text: string;
-  }) => void;
+  onResult?: (
+    e: CallEvent & {
+      result: Result | null;
+      /** What the model was told, verbatim. A UI showing this shows exactly
+       *  what the model is reasoning from, which is the honest thing to show. */
+      text: string;
+    },
+  ) => void;
+  /**
+   * The run's control state changed. Fires once at the start of the run with
+   * the initial state, then on every transition.
+   *
+   * There at all because the state has more than one owner. The caller moves it
+   * with `pause`/`step`/`resume`, but `drive` moves it too — a step permit
+   * spent leaves the run paused again, and the commit gate parks it in
+   * `awaiting-approval` — and a UI that tracked it by watching its own buttons
+   * would be wrong in exactly the cases that matter. One event, from the thing
+   * that knows.
+   *
+   * `step` is the model turn in flight, and 0 for the opening event, before any
+   * turn has been spent.
+   */
+  onControl?: (e: { step: number; state: RunState }) => void;
   /** The run ended, for any reason including abort. Always fires once. */
   onStop?: (e: { stop: StopReason; steps: number; text?: string }) => void;
 }
@@ -227,8 +400,44 @@ export interface DriveOptions extends DriveEvents {
    * call between two expensive mistakes.
    */
   refusalLimit?: number;
-  /** Cancel the run. Checked before every model call and before every verb. */
+  /** Cancel the run. Checked before every model call and before every verb,
+   *  and it outranks a pause: a held run is still abortable, never wedged. */
   signal?: AbortSignal;
+  /**
+   * Milliseconds to wait before each call the model asked for — a verb or a
+   * `read_screen` — so a person can follow. **0 by default, which means no
+   * waiting at all.**
+   *
+   * Two defaults, on purpose, and the split is the same one `onBeforeCommit`
+   * makes. `drive` is a library primitive: it is driven by backend jobs, tests,
+   * CLIs and servers, where nobody is watching and a delay per call is latency
+   * charged to work with no eyes on it. So the default here is 0. `mountWidget`
+   * defaults it to `WATCHABLE_PACE`, because a panel in a page has a person in
+   * front of it by definition, and the whole reason the widget exists is that
+   * the person should be able to see what is being done to their screen and
+   * stop it. A library that invented 600ms of latency for a cron job to make a
+   * UI it cannot see feel better would have the defaults the wrong way round.
+   *
+   * The wait is before every call including the first, which is the one the
+   * person has had least chance to react to. It is cancellable: a stop during a
+   * pace wait returns at once rather than after the wait.
+   *
+   * It is not a wait per model turn. Those are already slow and already
+   * visible, and pacing them would double the latency of the part that costs
+   * money without making anything more legible.
+   */
+  pace?: number;
+  /**
+   * Pause, resume and step. Build one with `runControls()`.
+   *
+   * Absent means a run that cannot be held, which is the right default for a
+   * caller with no UI: an unattended run with nobody to resume it would park
+   * forever on the first hold.
+   */
+  controls?: RunControls;
+  /** The timer `pace` uses. Defaults to `setTimeout`. Injectable so a suite can
+   *  assert the waits without sleeping through them. */
+  clock?: Clock;
   /**
    * Opt-in gate in front of every `commit` verb.
    *

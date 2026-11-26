@@ -42,6 +42,40 @@ export interface ElementLike extends QueryRootLike {
   readonly dataset?: Record<string, string | undefined>;
 }
 
+/**
+ * An element you can put text into.
+ *
+ * Every member is optional, and that is the honest shape rather than a
+ * convenience: the controls layer finds its elements by an attribute the author
+ * marked, so it cannot know it was handed an `<input>` until it looks. A real
+ * `HTMLInputElement` satisfies this; so does a `<div contenteditable>`, badly,
+ * which is why `controls.ts` checks what it got and refuses rather than
+ * assuming.
+ *
+ * `dispatchEvent` is here because setting `value` is not typing. A framework
+ * learns about a keystroke from an event, so an adapter that assigns `value`
+ * and stops has changed what the screen looks like and told the app nothing —
+ * the user's own re-render then wipes it, and the verb reported success.
+ */
+export interface FieldLike extends ElementLike {
+  value?: string;
+  readonly tagName?: string;
+  focus?(): void;
+  blur?(): void;
+  dispatchEvent?(event: unknown): boolean;
+}
+
+/** `Event`, injectable like every other global here. Only the two-argument
+ *  constructor is used: `new Event("input", { bubbles: true })`. */
+export interface EventCtor {
+  new (type: string, init?: { bubbles?: boolean }): unknown;
+}
+
+/** The default `Event`, or null when there is not one. */
+export function defaultEvent(): EventCtor | null {
+  return (globalThis as { Event?: EventCtor }).Event ?? null;
+}
+
 /** What `revFromMutations` reads off a `MutationRecord`. A real record carries
  *  far more; none of the rest can change the answer to "could this have
  *  changed what an agent reads". */

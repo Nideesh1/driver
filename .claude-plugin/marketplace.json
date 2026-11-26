@@ -1,0 +1,15 @@
+{
+  "name": "driverkit",
+  "description": "driverkit: let an agent drive a web app through verbs the app declares",
+  "owner": {
+    "name": "Nideesh1",
+    "url": "https://github.com/Nideesh1"
+  },
+  "plugins": [
+    {
+      "name": "driverkit",
+      "source": "./plugin",
+      "description": "Draft a driverkit verb list from a codebase, check a running relay, and wire an MCP client to a live browser tab"
+    }
+  ]
+}

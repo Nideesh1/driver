@@ -46,6 +46,8 @@ import type { TableOptions } from "./table.ts";
 import { revFromMutations } from "./rev.ts";
 import type { RevHandle, RevOptions } from "./rev.ts";
 import { findHandle } from "./click.ts";
+import { controlsFromDom } from "./controls.ts";
+import type { ControlsBinding, ControlsConfig } from "./controls.ts";
 
 /** A click verb. The long form exists so `kind` can be declared, and `kind`
  *  should be declared: `click.ts` explains why no adapter can infer it. */
@@ -81,6 +83,20 @@ export interface DomConfig {
 
   /** Verb name to click handle. A bare string is the description. */
   clicks?: Record<string, string | ClickVerbSpec>;
+
+  /**
+   * The controls layer: enumerate every element the app marked
+   * `data-dk-control` and give an agent three generic verbs for using them.
+   *
+   * `true` takes the defaults and points the row scan at `table`, which is
+   * what you want on a screen whose rows are the thing being driven. An object
+   * is `controlsFromDom`'s config, merged over the shared `root`/`document`.
+   *
+   * This is the layer that makes coverage complete: a `clicks` entry is a verb
+   * somebody wrote for one button, and there will always be a button nobody
+   * wrote one for. See CONTROLS.md.
+   */
+  controls?: true | ControlsConfig;
 
   /** Hand-written verbs, beside the clicks. This is how you climb the ladder
    *  one verb at a time instead of all at once: a verb that calls a real
@@ -119,6 +135,7 @@ export function fromDom(config: DomConfig): DomBinding {
   const rev = normaliseRev(config, table);
   const refuseWhen = config.refuseWhen ?? disabledCheck;
   const attribute = config.attribute ?? "data-dk";
+  const controls = normaliseControls(config, table);
 
   const clickOpts = {
     attribute,
@@ -187,10 +204,47 @@ export function fromDom(config: DomConfig): DomBinding {
     const selected = readSelected(config, table);
     if (selected && selected.length) snapshot.selected = selected;
     if (note) snapshot.note = note;
-    return snapshot;
+    // Last, so the control list is folded into whatever note the rows left
+    // behind rather than replacing it. `withControls` is non-destructive for
+    // exactly this reason -- a "rows unavailable" note is the one an agent most
+    // needs and the easiest to clobber.
+    return controls ? controls.withControls(snapshot) : snapshot;
   };
 
-  return { verbs: [...clickVerbs, ...(config.verbs ?? [])], visible, stop: rev.stop };
+  return {
+    verbs: [...clickVerbs, ...(controls ? controls.verbs : []), ...(config.verbs ?? [])],
+    visible,
+    stop: rev.stop,
+  };
+}
+
+/**
+ * Wire the controls layer, defaulting its row scan to the table.
+ *
+ * The default matters more than it looks. A per-row control reported once and
+ * addressed by row id is the only reason a twenty-row screen with six controls
+ * on each row is six snapshot entries and not a hundred and twenty — and that
+ * collapsing needs to know where the rows are. A caller who wired
+ * `controlsFromDom` by hand and forgot `rows` would get a hundred and twenty
+ * entries under twenty names, a duplicate-name warning for each, and a
+ * snapshot that grows with the table. So when `fromDom` already knows the
+ * table, it says so.
+ */
+function normaliseControls(
+  config: DomConfig,
+  table: { selector: string | ElementLike; opts: TableOptions } | null,
+): ControlsBinding | null {
+  if (!config.controls) return null;
+  const given: ControlsConfig = config.controls === true ? {} : config.controls;
+  const rows: ControlsConfig["rows"] =
+    given.rows ??
+    (table ? ({ container: table.selector, ...table.opts } as ControlsConfig["rows"]) : undefined);
+  return controlsFromDom({
+    ...(config.root === undefined ? {} : { root: config.root }),
+    ...(config.document === undefined ? {} : { document: config.document }),
+    ...given,
+    ...(rows === undefined ? {} : { rows }),
+  });
 }
 
 /** `disabled` and `aria-disabled` only. Deliberately not a visibility or

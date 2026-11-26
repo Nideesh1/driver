@@ -145,9 +145,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
 :host(.dk-dragging) .dk-head, :host(.dk-dragging) .dk-title, :host(.dk-dragging) .dk-move {
   cursor: grabbing;
 }
-.dk-x, .dk-move { background: none; border: 0; padding: 4px 8px; border-radius: 6px; color: var(--dk-dim); }
-.dk-x:hover, .dk-move:hover { background: var(--dk-you); }
+.dk-x, .dk-move, .dk-gear { background: none; border: 0; padding: 4px 8px; border-radius: 6px; color: var(--dk-dim); }
+.dk-x:hover, .dk-move:hover, .dk-gear:hover { background: var(--dk-you); }
 .dk-move { cursor: grab; touch-action: none; }
+/* A glyph and not the word "Settings", because the header is also the drag
+   handle and three words plus a title is a strip nobody can grab. The button
+   is a real button with a real label for anybody not reading the glyph. */
+.dk-gear { font-size: 15px; line-height: 1; }
+.dk-gear[aria-expanded="true"] { background: var(--dk-you); color: var(--dk-fg); }
 
 /* Announcements only. Visually hidden rather than display:none, because a
    display:none live region is not announced at all -- and it lives outside the
@@ -171,16 +176,146 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .dk-me { align-self: flex-start; padding-left: 0; }
 .dk-note { color: var(--dk-dim); font-size: 12px; }
 
-/* The trace. A person watching an agent move their own screen needs to see
-   what it did; silent mutation is alarming even when it is correct. */
+/* The step list. A person watching an agent move their own screen needs to
+   see what it did -- silent mutation is alarming even when it is correct --
+   and, since the loop announces a call before it runs, what it is ABOUT to do.
+   Each row is one call and moves pending -> running -> done, refused or
+   skipped.
+
+   The state is a class and a \`::before\` marker rather than text, which is
+   deliberate: the row's text is the record of the call, it is what a person
+   copies out of the panel, and it should read the same whether they looked at
+   it while it was pending or a minute later. */
 .dk-step {
   font: var(--dk-mono);
   color: var(--dk-dim);
   border-left: 2px solid var(--dk-line);
   padding: 2px 0 2px 8px;
+  /* One line each, always. Twenty steps that each wrap to three lines is not a
+     list anybody can skim, and skimming is the only thing it is for. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.dk-step-commit { color: var(--dk-commit); border-left-color: var(--dk-commit); font-weight: 600; }
+/* Consecutive steps close up into one block, so the transcript's 8px gap
+   separates the CONVERSATION and not every line of a twenty-step run. */
+.dk-step + .dk-step { margin-top: -6px; }
+.dk-step::before {
+  /* A fixed-width marker column, so the verb names line up down the list and
+     a change of state does not shift the text sideways. */
+  display: inline-block;
+  width: 1.1em;
+  content: "\\00b7";
+}
+.dk-step-pending { opacity: 0.75; }
+.dk-step-pending::before { content: "\\25cb"; }
+.dk-step-running { color: var(--dk-fg); border-left-color: var(--dk-accent); }
+.dk-step-running::before { content: "\\25b8"; color: var(--dk-accent); }
+.dk-step-done::before { content: "\\2713"; }
+/* Commit steps are marked three ways at once -- the word in the text, the
+   colour, and a tinted band -- because this is the row somebody scrolls back
+   to when they want to know what changed their data, and because the whole
+   confirmation design rests on a person being able to tell a commit from a
+   selection at a glance. */
+.dk-step-commit {
+  color: var(--dk-commit);
+  border-left: 3px solid var(--dk-commit);
+  padding-left: 7px;
+  font-weight: 600;
+  background: color-mix(in srgb, var(--dk-commit) 8%, transparent);
+}
 .dk-step-refused { color: var(--dk-refused); border-left-color: var(--dk-refused); }
+.dk-step-refused::before { content: "\\2715"; }
+/* A call that was announced and then never ran, because the run was stopped
+   during its pace wait or while it was held. Dimmed rather than coloured: it
+   is not an outcome, it is the absence of one. */
+.dk-step-skipped { opacity: 0.6; text-decoration: line-through; }
+.dk-step-skipped::before { content: "\\2013"; text-decoration: none; }
+
+/* The run controls, beside the trace they control. Only while a run is in
+   flight: four dead buttons in the corner of somebody's app the rest of the
+   time is four buttons they learn to ignore. */
+.dk-run {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--dk-line);
+}
+.dk-busy .dk-run { display: flex; }
+.dk-set-open .dk-run { display: none; }
+.dk-run button {
+  border: 1px solid var(--dk-line);
+  background: var(--dk-you);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font: var(--dk-mono);
+}
+/* Disabled rather than hidden when no controller supplied one, because the
+   person should be able to see that pausing is a thing this panel does and
+   that this build cannot do it -- a Pause button that silently does nothing
+   while the agent keeps changing the screen is how somebody ends up closing
+   the tab. */
+.dk-run button[disabled] { opacity: 0.45; cursor: default; }
+.dk-run-note { margin-left: auto; font-size: 12px; color: var(--dk-dim); }
+
+/* Settings. In the panel rather than a window of its own: it is four
+   preferences, and the person is already looking here. */
+.dk-settings {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+  padding: 14px 12px;
+}
+.dk-set-open .dk-settings { display: flex; }
+.dk-set-open .dk-log, .dk-set-open .dk-form { display: none; }
+.dk-set-row { display: flex; flex-direction: column; gap: 5px; }
+.dk-set-label { font-weight: 600; }
+.dk-set-why { font-size: 12px; color: var(--dk-dim); }
+.dk-speeds { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+.dk-speed {
+  border: 1px solid var(--dk-line);
+  background: none;
+  border-radius: 999px;
+  padding: 5px 12px;
+}
+.dk-speed[aria-checked="true"] {
+  border-color: var(--dk-accent);
+  color: var(--dk-accent);
+  background: var(--dk-you);
+  font-weight: 600;
+}
+.dk-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--dk-line);
+  background: none;
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+/* The state in the button, as well as in \`aria-checked\` for anybody who is
+   being read it. A switch whose only difference between on and off is a shade
+   of grey is a switch nobody is sure about. */
+.dk-toggle::after {
+  margin-left: auto;
+  content: "Off";
+  font: var(--dk-mono);
+  color: var(--dk-dim);
+}
+.dk-toggle[aria-checked="true"] { border-color: var(--dk-accent); }
+.dk-toggle[aria-checked="true"]::after { content: "On"; color: var(--dk-accent); }
+.dk-done {
+  align-self: flex-start;
+  border: 1px solid var(--dk-line);
+  background: var(--dk-you);
+  border-radius: 8px;
+  padding: 7px 14px;
+}
 
 /* The confirmation. The one place in this panel where a person is asked to
    decide something, so it is the one place that is allowed to be loud. */
@@ -220,4 +355,61 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .dk-stop { display: none; }
 .dk-busy .dk-stop { display: block; }
 .dk-busy .dk-send { display: none; }
+`;
+
+/**
+ * The outline over the element a verb is about to touch, as its own tiny
+ * stylesheet in its own shadow root.
+ *
+ * Separate from `CSS` because it has to be in a separate host element: the
+ * panel's `:host` carries a `translate`, a transformed ancestor is the
+ * containing block for `position: fixed` descendants, and an outline drawn
+ * inside the panel would therefore be offset by wherever the panel sits. See
+ * `highlight.ts`.
+ *
+ * The host is a zero-sized fixed point at the viewport's origin and the box
+ * inside it is positioned absolutely, so the numbers written in are exactly
+ * the ones `getBoundingClientRect` reported -- no coordinate conversion, which
+ * is the only kind of arithmetic that can be wrong here.
+ *
+ * `pointer-events: none` throughout, and nothing is ever written to the host
+ * app's own element: a border on somebody's button reflows their layout, and a
+ * panel that nudges the page sideways every time it names an element is not
+ * the passive observer it claims to be.
+ */
+export const SPOT_CSS = `
+:host {
+  all: initial;
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  /* One below the panel. If the outline and the panel overlap, the panel is
+     the thing that has words in it. */
+  z-index: 2147482999;
+  --dk-spot-color: #1f6feb;
+}
+@media (prefers-color-scheme: dark) {
+  :host { --dk-spot-color: #5b9dff; }
+}
+.dk-spot {
+  display: none;
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: none;
+  left: var(--dk-spot-x, 0);
+  top: var(--dk-spot-y, 0);
+  width: var(--dk-spot-w, 0);
+  height: var(--dk-spot-h, 0);
+  border: 2px solid var(--dk-spot-color);
+  border-radius: 6px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--dk-spot-color) 25%, transparent);
+}
+.dk-spot-on { display: block; }
+@media (prefers-reduced-motion: no-preference) {
+  .dk-spot-on { animation: dk-spot-in 120ms ease-out; }
+}
+@keyframes dk-spot-in { from { opacity: 0; } }
 `;

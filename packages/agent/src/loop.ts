@@ -38,15 +38,28 @@
  * forever: the same verb refused the same way three times is a model that has
  * stopped learning, and continuing costs the person money to watch nothing
  * happen.
+ *
+ * **5. The run is watchable and interruptible, and that is a property of the
+ * loop rather than of a UI.** The agent is moving the screen a person is
+ * looking at, so going as fast as the model answers is the wrong speed: what
+ * the person needs is to see each step coming and have somewhere to put their
+ * hand. Pacing (`pace`) puts a cancellable wait before each call, run controls
+ * (`controls`) hold the run between calls, and the events are detailed enough
+ * that a step list can show a row before the call it describes has happened.
+ * None of it reaches the model — it is runtime state, and decision 1 is still
+ * the rule: nothing per-turn goes anywhere near `system` or `tools`.
  */
 
 import type { Driver, Manifest, Result, Scalar } from "driverkit";
+import { paceWait, realClock } from "./control.ts";
 import { renderResult, renderSnapshot } from "./render.ts";
 import { READ_SCREEN, systemPrompt, toolsFor } from "./tools.ts";
 import type {
+  CallEvent,
   CommitDecision,
   DriveOptions,
   DriveOutcome,
+  RunState,
   StopReason,
   ToolCall,
   Turn,
@@ -188,6 +201,22 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
   const maxSteps = options.maxSteps ?? 12;
   const refusalLimit = options.refusalLimit ?? 3;
   const signal = options.signal;
+  const controls = options.controls;
+  const clock = options.clock ?? realClock;
+
+  // The run's `pace` option is the initial value and the controls own it from
+  // then on, which is what makes `controls.pace()` live. Seeded only when the
+  // option was actually given, so a caller who set the pace on the controls and
+  // left the option out keeps theirs instead of being reset to 0.
+  if (controls && options.pace !== undefined) controls.pace(options.pace);
+  // Read fresh before every wait when there are controls — the whole point —
+  // and fixed for the run when there are none. 0 by default, so a headless
+  // `drive` is not slowed down by a feature that exists for somebody watching;
+  // `mountWidget` passes `WATCHABLE_PACE`. See `pace`.
+  const pace: number | (() => number) = controls ? () => controls.paceMs : (options.pace ?? 0);
+  // Named once rather than written inline, so the wait and the loop cannot come
+  // to disagree about whether a pace change is being listened for.
+  const watchPace = controls ? (listener: () => void) => controls.subscribe(listener) : undefined;
 
   let messages: Turn[] = [...(options.history ?? [])];
 
@@ -225,6 +254,37 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
   let text: string | undefined;
   let stop: StopReason = "max-steps";
 
+  // Mirrored here rather than read off `controls` when wanted, because the
+  // event is about *transitions* and because `awaiting-approval` is a state
+  // only this loop knows it is in. Reported, never consulted: nothing below
+  // branches on it, so a bug in here can make a UI say the wrong word and
+  // cannot make the run do the wrong thing.
+  let state: RunState = controls?.state ?? "running";
+  const mark = (next: RunState): void => {
+    if (next === state) return;
+    state = next;
+    options.onControl?.({ step: steps, state: next });
+  };
+  // Fired unconditionally, including for a run with no controls, so a UI has a
+  // defined starting state instead of having to assume one. `step: 0` — no
+  // model turn has been spent yet.
+  options.onControl?.({ step: 0, state });
+
+  /** Hold if the controls say to, announcing the hold so a UI can show it.
+   *
+   *  Asking `controls.state` first rather than timing the `gate` call: a UI
+   *  that flashed "paused" for every call of an unpaused run would be noise,
+   *  and the condition for actually holding is knowable up front. */
+  const hold = async (what: "think" | "call"): Promise<void> => {
+    if (!controls) return;
+    if (controls.state === "paused" && controls.permits === 0) mark("paused");
+    await controls.gate(what, signal);
+    // Before `mark("running")`, so a run stopped while held is not reported as
+    // having resumed on its way out. The caller breaks on the abort next.
+    if (signal?.aborted) return;
+    mark("running");
+  };
+
   for (;;) {
     if (signal?.aborted) {
       stop = "aborted";
@@ -232,6 +292,15 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
     }
     if (steps >= maxSteps) {
       stop = "max-steps";
+      break;
+    }
+
+    // Before `steps++` and before `onStep`, which is the honest order: a held
+    // run has not started a step, and a model round trip is the expensive
+    // thing a pause is most worth having in front of.
+    await hold("think");
+    if (signal?.aborted) {
+      stop = "aborted";
       break;
     }
 
@@ -307,15 +376,60 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
 
       const verb = verbs.get(call.name);
       const kind = verb?.kind;
-      const kindField = kind === undefined ? {} : { kind };
-      options.onCall?.({ step: steps, call, ...kindField });
-
-      const outcome = await runOne(driver, call, verb, options);
-
-      options.onResult?.({
+      // `at` rides along with `kind`, from the manifest, untouched. Nothing in
+      // this loop reads it and nothing ever should: it is a hint for whoever is
+      // drawing the run, and driverkit resolving a selector would be the one
+      // thing the library promises not to do. See `Verb.at` in the core.
+      const event: CallEvent = {
         step: steps,
         call,
-        ...kindField,
+        ...(kind === undefined ? {} : { kind }),
+        ...(verb?.at === undefined ? {} : { at: verb.at }),
+        index: i,
+        of: calls.length,
+      };
+
+      // Before the pacing and before any hold, so the row for this call can be
+      // on screen and glowing while the person still has time to stop it. The
+      // ordering is the whole point of the event; see `onBeforeCall`.
+      //
+      // A copy per listener, like `messages.slice()` above: three events
+      // describe one call, and one of them mutating the object would quietly
+      // rewrite what the other two were told.
+      options.onBeforeCall?.({ ...event });
+
+      // Then the pace, then the gate, in that order. Pacing first so that a
+      // person who pauses and then resumes gets the next call immediately
+      // instead of sitting through a wait whose job — giving them time to
+      // react — they have already done by hand.
+      await paceWait({
+        ms: pace,
+        clock,
+        ...(signal ? { signal } : {}),
+        ...(watchPace ? { watch: watchPace } : {}),
+      });
+      if (signal?.aborted) {
+        aborted = true;
+        unrun = calls.slice(i);
+        break;
+      }
+
+      await hold("call");
+      // The abort wins over the hold. A paused run that could not be stopped
+      // would be the worst version of this feature: the person presses stop and
+      // the loop is parked on a promise nobody is going to resolve.
+      if (signal?.aborted) {
+        aborted = true;
+        unrun = calls.slice(i);
+        break;
+      }
+
+      options.onCall?.({ ...event });
+
+      const outcome = await runOne(driver, call, verb, options, mark);
+
+      options.onResult?.({
+        ...event,
         result: outcome.result,
         text: outcome.text,
       });
@@ -410,6 +524,10 @@ async function runOne(
   call: ToolCall,
   verb: Manifest["verbs"][number] | undefined,
   options: DriveOptions,
+  /** Report the run's state. Used for exactly one thing: saying that the run is
+   *  parked in front of a person's confirmation, which is a wait the run
+   *  controls do not own and a panel showing "running" would misdescribe. */
+  mark: (state: RunState) => void,
 ): Promise<{ result: Result | null; text: string }> {
   if (call.name === READ_SCREEN && verb === undefined) {
     // `verb === undefined` so an app that genuinely declares a verb by this
@@ -466,6 +584,7 @@ async function runOne(
   if (verb.kind === "commit" && options.onBeforeCommit) {
     const snapshot = driver.snapshot();
     let decision: CommitDecision;
+    mark("awaiting-approval");
     try {
       decision = await options.onBeforeCommit({ name: verb.name, args, verb, snapshot });
     } catch (err) {
@@ -474,6 +593,11 @@ async function runOne(
       decision = `the confirmation could not be shown (${
         err instanceof Error ? err.message : String(err)
       })`;
+    } finally {
+      // In a `finally` so a confirmation UI that throws cannot leave a panel
+      // claiming forever that it is waiting for an answer nobody is being
+      // asked for. The run carries on either way — a failed ask is a no.
+      mark("running");
     }
 
     if (decision === false || typeof decision === "string") {

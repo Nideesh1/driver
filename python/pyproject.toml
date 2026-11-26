@@ -28,7 +28,7 @@ driverkit-relay = "driverkit.serve_relay:main"
 driverkit-fastmcp = "driverkit.fastmcp_server:main"
 
 [project.urls]
-Homepage = "https://github.com/driverkit/driverkit"
+Homepage = "https://github.com/Nideesh1/driver"
 
 [build-system]
 requires = ["hatchling"]

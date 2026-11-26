@@ -197,6 +197,10 @@ export function mount(options: MountOptions): Driver {
       name: v.name,
       describe: v.describe,
       ...(v.kind ? { kind: v.kind } : {}),
+      // Copied through untouched and never read by anything in here. `at` is a
+      // hint for whoever is drawing the run, not a way to find an element; see
+      // `Verb.at`.
+      ...(v.at ? { at: v.at } : {}),
       ...(v.args ? { args: v.args } : {}),
       ...(v.refuses ? { refuses: v.refuses } : {}),
     })),
@@ -338,10 +342,21 @@ function fingerprint(app: string, verbs: Map<string, Verb<any>>): string {
   // `commit` has not changed its name or its arguments, so without this the
   // fingerprint would not move and every agent holding a cached manifest would
   // go on believing an irreversible verb is free to try.
+  //
+  // So is `at`, for the weaker but real version of the same reason: it is part
+  // of what a cached manifest claims about the surface, and a UI holding the
+  // old copy would outline an element the verb no longer touches.
   const shape = JSON.stringify([
     app,
     [...verbs.values()]
-      .map((v) => [v.name, v.describe, v.kind ?? null, v.args ?? null, v.refuses ?? null])
+      .map((v) => [
+        v.name,
+        v.describe,
+        v.kind ?? null,
+        v.at ?? null,
+        v.args ?? null,
+        v.refuses ?? null,
+      ])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
   ]);
   let h1 = 0x811c9dc5;

@@ -30,6 +30,57 @@ a `rev` from mutations, and binds verbs to buttons the author marked. None of it
 is as good as the real thing — each adapter's source says exactly where it is
 worse and why — but all of it works today, on the app as it is.
 
+## Two layers before the ladder
+
+The ladder below is about **shortcuts**: verbs somebody wrote, one per intent,
+each the best version of itself that the app can support. It is the layer worth
+having and the tiers are about climbing toward the best form of it.
+
+It is also incomplete by construction, and no amount of climbing fixes that. A
+verb list covers what its author thought of, and a person will always ask for
+something nobody listed — which is not a gap you can close by writing more
+verbs, because the set of things people ask for is not a set anybody has.
+
+So there is a second layer, and the two compose in one `mount()`:
+
+| | | |
+|---|---|---|
+| **controls** | one action, total coverage | press a button, tick a row, type in a field |
+| **shortcuts** | one call, many rows | `select-where(company)` — 410 rows, one call, one count |
+
+A shortcut is how bulk work is safe: a predicate resolved inside the app, a
+count before anything moves, one question for a thousand rows. A control is how
+the request nobody anticipated gets done at all. Neither replaces the other, and
+an agent cannot tell which layer a verb came from.
+
+```ts
+import { controlsFromDom } from "@driverkit/adapters";
+
+const dk = controlsFromDom({ root: "#app", rows: "#contacts" });
+
+mount({
+  app: "Contacts",
+  verbs: [...myShortcuts, ...dk.verbs],       // both layers, one mount
+  visible: () => dk.withControls(myVisible()),
+});
+```
+
+```html
+<button data-dk-control="next-page"  data-dk-kind="read">Next</button>
+<button data-dk-control="accept-all" data-dk-kind="commit">Accept all</button>
+```
+
+One attribute per control, plus a `kind` you declare by looking at the handler.
+The agent sees a name you chose and never a selector; a name the screen does
+not offer is a refusal and never a near miss. Controls on each row are listed
+once and addressed by row id, so twenty rows with six controls each is six
+entries in the snapshot and not a hundred and twenty.
+
+The model, the manifest/snapshot split, the argument for how `kind` is
+defaulted when an author does not declare it, and the honest limits are in
+[CONTROLS.md](CONTROLS.md). Read it before marking up a real app — the `kind`
+decision is the part that is expensive to get wrong.
+
 ## The three-tier adoption ladder
 
 **Start at tier 2. Finish at tier 1. Mix tiers per verb, forever if you like.**
@@ -154,6 +205,30 @@ const driver = mount({ app: "Invoices", ...dom });
 That literal plus one attribute per button is the entire integration for an app
 with no store.
 
+Add `controls: true` and the controls layer comes with it, pointed at the table
+`fromDom` already knows about — which is what makes the per-row collapsing work,
+so it is worth letting `fromDom` wire it rather than doing it by hand:
+
+```ts
+const dom = fromDom({ where: "invoices", table: "#invoices", controls: true, clicks: {...} });
+```
+
+### Where controls sit in the ladder
+
+They are not a fourth tier. They are the other axis, and they are available at
+every tier:
+
+| | shortcuts | controls |
+|---|---|---|
+| tier 1, you have functions | verbs that take predicates and count | still useful for the long tail nobody wrote a verb for |
+| tier 2, you have buttons | `clickHandle` per named intent | one attribute per control, the whole screen at once |
+| tier 3, you have markup | `rowsFromTable` + `revFromMutations` | the same markup, enumerated |
+
+A tier-1 app gets controls with little work, because `data-dk-control` on an
+element it already renders is one attribute. A tier-3 app gets them from markup
+alone, which is the same claim tier 2 makes and for the same reason. What no
+tier gets for free is `kind`: see [CONTROLS.md](CONTROLS.md).
+
 ## The two things that will bite you at tier 3
 
 ### `page` — tell it the total, or the agent only learns *that* it is a window
@@ -230,7 +305,9 @@ particular, if your app encodes state in a `class` and reads it back in
 | `revFromMutations(target, opts?)` | `{ rev(), bump(), stop() }`. Debounced, monotonic, starts at 1. |
 | `clickHandle(name, opts?)` | A verb body that clicks `[data-dk="<name>"]`. Throws naming the handle, and lists the handles that are present. |
 | `findHandle(name, opts?)` / `listHandles(opts?)` | Look without clicking; see what the screen offers. |
-| `fromDom(config)` | `{ verbs, visible, stop }` — tiers 2 and 3 composed into the shape `mount()` takes. |
+| `controlsFromDom(config?)` | `{ verbs, controls, note, withControls }` — the controls layer. Three generic verbs plus the enumeration that feeds them. See [CONTROLS.md](CONTROLS.md). |
+| `rowHandles(selector, opts?)` | The row elements paired with the ids `rowsFromTable` would report. What lets a per-row control address a row by the id the agent read. |
+| `fromDom(config)` | `{ verbs, visible, stop }` — tiers 2 and 3 composed into the shape `mount()` takes. `controls: true` adds the controls layer. |
 | `collapse(text)` | The whitespace normalisation everything here applies, exported so your own hooks match it. |
 
 Column keys come from `data-dk-col`, else `<th>` text (lowercased, hyphenated:
@@ -247,9 +324,13 @@ the parts of this package that bite are the ones nobody clicks through by hand.
 
 - **No `kind` inference.** A click's effect on the world is unknowable from
   outside. You declare it; nothing verifies it.
-- **No predicates.** Clicks act on one control at a time, so bulk work stays a
-  tier-1 problem. If an agent has to select a thousand rows through your UI, the
-  answer is a function, not a better adapter.
+- **No predicates.** Clicks and controls act on one thing at a time, so bulk
+  work stays a tier-1 problem. If an agent has to select a thousand rows through
+  your UI, the answer is a function, not a better adapter.
+- **No coverage of what you did not mark.** The controls layer enumerates the
+  marks an author made, and an unmarked button does not exist. That is a
+  deliberate refusal to infer, and it means "total coverage" is total over your
+  markup and not over your UI. CONTROLS.md says so at more length.
 - **No sense of how big the whole is.** A rendered DOM cannot say how many rows
   exist, so a table read through this package reports a window of unknown size.
   An agent is not misled by that — it will not conclude a record is missing —

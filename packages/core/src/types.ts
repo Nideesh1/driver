@@ -87,6 +87,32 @@ export interface Verb<A extends Record<string, Scalar> = Record<string, Scalar>>
    *  every verb of an app written before this field as dangerous, which is a
    *  warning on everything and therefore a warning on nothing. Declare it. */
   kind?: VerbKind;
+  /**
+   * A CSS selector naming the element this verb affects. Optional, purely
+   * presentational, and **never used by driverkit to find anything.**
+   *
+   * It exists for the human watching. An agent driving the screen a person is
+   * looking at has to be legible, and "about to accept the selection" reads
+   * better with the table it means outlined on the page. `at` is how a verb
+   * says which part of the app it is about, so a UI may draw an outline there
+   * before the call and clear it after.
+   *
+   * The library never queries it, never resolves it, never shows it to the
+   * model, and nothing about a verb's behaviour depends on it. That restraint
+   * is the field's whole design rather than an omission waiting to be filled
+   * in: driverkit's claim is that an app is driven through its own verbs and
+   * not by poking at its DOM, and an `at` that driverkit itself clicked would
+   * be a back door straight back to selector automation — brittle, invisible
+   * to the app, and broken by the next CSS refactor. So a wrong or stale `at`
+   * must cost nothing but an outline drawn in the wrong place. If a verb stops
+   * working when `at` is edited, something has started using it, and that is
+   * the bug.
+   *
+   * It is in `fingerprint()` all the same. Re-pointing a verb at a different
+   * element changes what the cached surface claims, and a UI holding the old
+   * copy would go on outlining the thing the verb no longer touches.
+   */
+  at?: string;
   args?: Record<string, ArgSpec>;
   /**
    * The refusals this verb can return, as short stable slugs.
@@ -150,6 +176,59 @@ export interface Refusal {
   readonly __driverkit: "refusal";
   reason: string;
   hint?: string;
+}
+
+/**
+ * One control the screen is offering right now.
+ *
+ * The dynamic half of the controls layer, and the split is the whole reason
+ * this type is so small. *That an app can press a control* is static and lives
+ * in the manifest as a verb. *Which controls are on this screen at this
+ * moment* is as per-screen as a row is, so it belongs here, in the half that is
+ * never cached. Listing the control names in a verb's `ArgSpec.oneOf` is the
+ * tempting mistake: it reads as helpful typing, and it moves a per-screen list
+ * into the cached prefix — busting it for every user on every navigation.
+ *
+ * Every field but `name` is omitted when it would state the common case, which
+ * is why `field` and `disabled` are `true` rather than `boolean`. A screen with
+ * eight controls should cost a line, not a paragraph.
+ *
+ * A per-row control is listed ONCE, with `per: "row"`, and addressed by row id.
+ * Twenty rows with six controls each is six entries here, not a hundred and
+ * twenty: a snapshot that grew with the row count would undo the cost argument
+ * the rest of this file is written to protect.
+ *
+ * Note what is absent. There is no selector, no path, no coordinates and no
+ * handle this library derived by looking at the page. `name` is a word the
+ * app's author typed next to their own button, which is the same claim `Verb`
+ * makes and the reason neither one rots when the CSS does. `Verb.at` is the
+ * one selector in the library and it is presentational — never used to find
+ * anything — so it is deliberately not mirrored here.
+ */
+export interface ScreenControl {
+  /** The name the author marked on the element. What a control verb takes,
+   *  matched exactly. */
+  name: string;
+  /** One short human label — the control's own text, usually. A model matches
+   *  the user's words against this; `name` is only the handle. */
+  label?: string;
+  /** What using it does to the world, as the author declared it.
+   *
+   *  **Absent means the author did not say**, which is not `read` and must
+   *  never be rendered or treated as one. It is an unreviewed button, and the
+   *  only honest thing to do with it is to assume the strongest claim. See
+   *  `packages/adapters/CONTROLS.md`. */
+  kind?: VerbKind;
+  /** `"row"` when the control appears on each row in `rows` and is addressed by
+   *  row id. Omitted for a control that belongs to the screen itself. */
+  per?: "row";
+  /** Present only when the control takes text. */
+  field?: true;
+  /** Present only when the control is on screen and not actionable. Listed
+   *  rather than hidden: the person can see the greyed-out button, so an agent
+   *  shown nothing would conclude the feature does not exist instead of looking
+   *  for the precondition that enables it. */
+  disabled?: true;
 }
 
 /** One row of whatever the screen is showing. `id` is what verbs take. */
@@ -227,6 +306,20 @@ export interface Snapshot {
    * ago still legible.
    */
   selectedCount?: number;
+  /**
+   * The controls the screen is offering right now.
+   *
+   * The second layer: `rows` is what the person can read, this is what they
+   * could press. It is here rather than in the manifest for the same reason
+   * `rows` is — which buttons exist changes with every navigation, and a verb
+   * list that changed with the screen would be a prompt prefix that is never
+   * cached twice. See `ScreenControl` and `packages/adapters/CONTROLS.md`.
+   *
+   * Absent means this screen does not describe its controls, NOT that it has
+   * none. An app driven entirely by hand-written verbs never fills this in and
+   * is no less drivable for it.
+   */
+  controls?: ScreenControl[];
   /** Anything else the agent needs and the rows cannot carry. Keep it short;
    *  this is the uncached half. */
   note?: string;
@@ -286,6 +379,11 @@ export interface Manifest {
     name: string;
     describe: string;
     kind?: VerbKind;
+    /** A CSS selector for the element this verb affects, if the app named one.
+     *  A hint for a UI that wants to outline what is about to be touched, and
+     *  nothing else: driverkit never resolves it and never sends it to a
+     *  model. See `Verb.at`, which this is copied from. */
+    at?: string;
     args?: Record<string, ArgSpec>;
     refuses?: string[];
   }>;

@@ -39,6 +39,11 @@ export class FakeElement implements ElementLike {
   constructor(tag: string, attrs: Record<string, string> = {}) {
     this.tag = tag.toLowerCase();
     this.attrs = new Map(Object.entries(attrs).map(([k, v]) => [k.toLowerCase(), v]));
+    // A `value` attribute seeds the property, as it does in a real DOM. The
+    // two then diverge, which is also real: typing changes the property and
+    // leaves the attribute alone, so a test that asserted on the attribute
+    // would pass on markup and fail on a keystroke.
+    this.value = this.attrs.get("value") ?? "";
   }
 
   get textContent(): string {
@@ -85,9 +90,42 @@ export class FakeElement implements ElementLike {
     this.parent = null;
   }
 
+  /** What is in the field. Present on every element, as in a real DOM, where
+   *  `value` is an `HTMLInputElement` property and `undefined` on a `div` —
+   *  which is why `controls.ts` decides what is typable from the tag and the
+   *  `type` attribute and never from whether this happens to be writable. */
+  value: string;
+  /** Every event this element was given, in order, as `type` strings. The
+   *  assertion that matters for typing: assigning `value` and firing nothing
+   *  looks typed on screen and tells the app nothing. */
+  events: string[] = [];
+  focused = 0;
+  /** Fired on each dispatched event, so a test can stand in for the app's own
+   *  `oninput` handler and assert it saw the text. */
+  oninput: ((value: string) => void) | null = null;
+
+  /** Tag name as a real DOM spells it: upper case. `controls.ts` lower-cases
+   *  it, and the mismatch is worth having in the fake rather than papered
+   *  over, because a fake that returns lower case would hide the bug where
+   *  somebody compares `tagName` to `"input"` and it works here only. */
+  get tagName(): string {
+    return this.tag.toUpperCase();
+  }
+
   click(): void {
     this.clicks += 1;
     this.onclick?.();
+  }
+
+  focus(): void {
+    this.focused += 1;
+  }
+
+  dispatchEvent(event: unknown): boolean {
+    const type = (event as { type?: string }).type ?? "";
+    this.events.push(type);
+    if (type === "input") this.oninput?.(this.value);
+    return true;
   }
 
   querySelector(selectors: string): FakeElement | null {
@@ -282,6 +320,19 @@ export const attributeChange = (name: string): MutationRecordLike => ({
   type: "attributes",
   attributeName: name,
 });
+
+/** `Event`, to the extent anything here reads one. A real `Event` carries
+ *  bubbling, a target, a phase and cancellation; none of that can change the
+ *  answer to "did the adapter tell the app the text changed", which is the only
+ *  question these tests ask of it. */
+export class FakeEvent {
+  readonly type: string;
+  readonly bubbles: boolean;
+  constructor(type: string, init?: { bubbles?: boolean }) {
+    this.type = type;
+    this.bubbles = init?.bubbles ?? false;
+  }
+}
 
 /** Timers the test advances. Real ones would make the debounce tests sleep,
  *  and a test that sleeps 50ms to prove a 50ms debounce proves it on a fast

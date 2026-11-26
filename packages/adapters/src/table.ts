@@ -177,6 +177,51 @@ export function rowsFromTable(
     );
   }
 
+  const rows = readRows(container, opts, warn).map(({ values, id }) => ({ ...values, id }));
+  const page = pageOf(container, rows.length, opts, warn);
+  return page ? { rows, page } : { rows };
+}
+
+/** One rendered row: the element, the id the snapshot will show for it, and the
+ *  cell values. Internal; `rowsFromTable` and `rowHandles` are the two views of
+ *  it, and they share this so an id can never be spelled one way in `rows` and
+ *  another way where a control addresses it. */
+interface RowRead {
+  el: ElementLike;
+  id: string;
+  values: Record<string, Scalar>;
+}
+
+/**
+ * The row elements of a container, paired with the ids `rowsFromTable` would
+ * report for them.
+ *
+ * Exported for `controls.ts`. A per-row control is addressed by row id, and the
+ * id an agent passes back is one it read out of `Snapshot.rows` — so the two
+ * must be computed by the same code, including the positional `row0` fallback
+ * and the `data-dk-id`/`idColumn`/`idFrom` precedence. Two near-identical id
+ * rules in one package would diverge on the first bug report, and the symptom
+ * would be a control that refuses for a row that is plainly on screen.
+ *
+ * Returns `[]` for a container that is not there, rather than throwing the way
+ * `rowsFromTable` does. The asymmetry is deliberate: zero rows is a claim about
+ * the records and must not be made by accident, while zero row-controls is a
+ * claim about the screen's controls, which the page-level ones answer anyway.
+ */
+export function rowHandles(
+  selector: string | ElementLike,
+  opts: TableOptions = {},
+): Array<{ el: ElementLike; id: string }> {
+  const container = find(selector, opts);
+  if (!container) return [];
+  return readRows(container, opts, warner(opts.onWarn)).map(({ el, id }) => ({ el, id }));
+}
+
+function readRows(
+  container: ElementLike,
+  opts: TableOptions,
+  warn: (m: string) => void,
+): RowRead[] {
   const headerSelector = opts.headerSelector ?? "th";
   const colAttribute = opts.colAttribute ?? "data-dk-col";
   const idAttribute = opts.idAttribute ?? "data-dk-id";
@@ -194,7 +239,7 @@ export function rowsFromTable(
   const rowEls = rowsOf(container, opts.rowSelector, headerSelector);
   const cellSelector = opts.cellSelector ?? "td";
 
-  const rows: Row[] = [];
+  const read: RowRead[] = [];
   const seen = new Map<string, number>();
 
   rowEls.forEach((rowEl, rowIndex) => {
@@ -236,11 +281,10 @@ export function rowsFromTable(
       seen.set(id, rowIndex);
     }
 
-    rows.push({ ...values, id });
+    read.push({ el: rowEl, id, values });
   });
 
-  const page = pageOf(container, rows.length, opts, warn);
-  return page ? { rows, page } : { rows };
+  return read;
 }
 
 function find(selector: string | ElementLike, opts: TableOptions): ElementLike | null {

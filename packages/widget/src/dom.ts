@@ -102,6 +102,21 @@ export interface ElementLike extends NodeLike {
 export interface DocumentLike {
   createElement(tag: string): ElementLike;
   body: ElementLike;
+  /**
+   * Optional, and used for ONE thing: resolving a verb's presentational `at`
+   * selector so the widget can draw an outline over the element a verb is
+   * about to touch.
+   *
+   * Optional because it must degrade silently. A host that hands in a minimal
+   * document, or a fake, simply gets no outlines — which is also what every
+   * verb without an `at` gets, so the no-op path is the common one rather than
+   * an edge case.
+   *
+   * **It is never used to find anything to act on.** `at` is presentational;
+   * the widget draws on top of what it names and nothing else. Verbs are
+   * called by name, and that is the whole reason this library exists.
+   */
+  querySelector?: (selectors: string) => ElementLike | null;
 }
 
 /** The viewport, as the four things a clamp needs: how big it is, when it

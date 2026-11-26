@@ -19,21 +19,36 @@
  * accepted two hundred rows". So every verb that runs appears in the
  * transcript, labelled with what it did to the world and what it answered.
  *
+ * **And what it adds over visibility is time.** Seeing a verb after it ran is
+ * not the same as being able to stop it. So the panel renders the run as a
+ * step list — one row per call, appearing while the call is still pending —
+ * paces the run slowly enough to follow, and puts Pause, Step and Stop beside
+ * it. The pace, the step-every-call mode, the outlining of the element a call
+ * is about, and the commit confirmation are all the person's to change in a
+ * settings view under the ⚙, remembered per viewer. Everything about that
+ * surface is one judgement: the person watching their own screen move is the
+ * one who should be deciding how fast it moves.
+ *
  * **What it does not do is hold a key.** `think` is the host app's function,
  * exactly as in `@driverkit/agent`; see that package's `types.ts` for why, and
  * `backendThink` for the thirty lines that make the realistic deployment work.
  */
 
-import type { Driver, VerbKind } from "driverkit";
+import type { Driver } from "driverkit";
 // The only cross-package VALUE import in the repository. Everything else
 // between packages is `import type`, which `verbatimModuleSyntax` erases
 // outright -- so this one line is the whole reason `@driverkit/widget` needs
 // `@driverkit/agent` as a runtime dependency and not a types-only one.
-import { commas, drive } from "@driverkit/agent";
+import { commas, drive, runControls } from "@driverkit/agent";
 import type {
+  CallEvent,
+  Clock,
   CommitDecision,
   CommitRequest,
   DriveOptions,
+  RunControls,
+  RunControlsOptions,
+  RunState,
   StopReason,
   Turn,
 } from "@driverkit/agent";
@@ -46,8 +61,30 @@ import type {
   StorageLike,
   WindowLike,
 } from "./dom.ts";
-import { positioner } from "./position.ts";
+import { spotlight } from "./highlight.ts";
+import { defaultStorage, positioner } from "./position.ts";
 import type { Fraction, Position } from "./position.ts";
+import {
+  SPEEDS,
+  defaults as defaultSettings,
+  load as loadSettings,
+  nearestSpeed,
+  pace as clampPace,
+  save as saveSettings,
+} from "./settings.ts";
+import type { Settings } from "./settings.ts";
+
+/**
+ * How the panel gets a control surface, which is `runControls` by default.
+ *
+ * An option because `RunControls` is an interface and not only a factory: the
+ * agent package says in as many words that a host with its own control surface
+ * — a queue, a remote operator, a test — may implement it and `drive` will
+ * drive it. The panel's buttons then drive that instead, and nothing here
+ * needs to know the difference.
+ */
+export type RunControlsFactory = (options: RunControlsOptions) => RunControls;
+
 
 export interface WidgetOptions
   extends Pick<DriveOptions, "think" | "instructions" | "maxSteps" | "refusalLimit"> {
@@ -78,8 +115,8 @@ export interface WidgetOptions
   /** The viewport, for the clamp and for `prefers-reduced-motion`. Default
    *  `globalThis`. */
   window?: WindowLike;
-  /** Where a remembered position is kept. Default `localStorage`, if reaching
-   *  for it does not throw. */
+  /** Where a remembered position and the settings are kept. Default
+   *  `localStorage`, if reaching for it does not throw. */
   storage?: StorageLike;
   AbortController?: AbortControllerCtor;
   /**
@@ -105,8 +142,8 @@ export interface WidgetOptions
   /** How close to a corner a drop has to be to land in it, in pixels. Default
    *  72. 0 switches snapping off. */
   snapThreshold?: number;
-  /** Remember the position in `localStorage`, per app and per viewer. Default
-   *  true. Every read and write is wrapped: storage throws in a private window
+  /** Remember the position and the settings in `localStorage`, per app and per
+   *  viewer. Default true. Every read and write is wrapped: storage throws in a private window
    *  and with site data blocked, and a chat panel that fails to render because
    *  it could not remember where it was is a much worse bug than one that
    *  opens in the default corner. */
@@ -135,6 +172,35 @@ export interface WidgetOptions
    * click through questions.
    */
   confirmCommits?: boolean;
+  /**
+   * Where Pause, Resume and Step are sent. Default `runControls`.
+   *
+   * Built once per run, because "paused" is a statement about a run: a surface
+   * that remembered a pause from the last one would silently hold the next.
+   * Stop is not on it — stopping is the abort signal, which it always was.
+   */
+  controls?: RunControlsFactory;
+  /** The timer the pace waits on. Default `setTimeout`, via the agent
+   *  package's `realClock`. Injectable for the same reason every other global
+   *  here is: a suite that actually slept its paces would be a slow suite, and
+   *  a slow suite is a suite nobody runs. */
+  clock?: Clock;
+  /**
+   * The starting delay between steps, in milliseconds. Default
+   * `WATCHABLE_PACE`.
+   *
+   * It is a starting value and not a setting: this is the person's to change,
+   * in the settings view, and once they have changed it their choice is
+   * remembered and outranks this. See `SPEEDS` in `settings.ts` for why the
+   * offered range is 250ms to 3s.
+   *
+   * Note which way the default falls. `drive` paces nothing by default,
+   * because it is also driven by backend jobs with nobody watching; the widget
+   * paces by default, because a panel in a page has a person in front of it
+   * and the whole reason it exists is that they should be able to see what is
+   * being done to their screen in time to stop it.
+   */
+  pace?: number;
   /** A failed `think` lands here as well as in the transcript. Default:
    *  ignore it. */
   onError?: (err: unknown) => void;
@@ -184,7 +250,21 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     options.AbortController ??
     (globalThis as { AbortController?: AbortControllerCtor }).AbortController;
 
-  const app = options.title ?? driver.manifest().app;
+  const manifest = driver.manifest();
+  const app = options.title ?? manifest.app;
+
+  // One place, shared with positioning, because two storage mechanisms would
+  // be two places to get the try/catch wrong. `persist: false` means neither
+  // the position nor the settings are remembered.
+  const storage = options.persist === false ? undefined : (options.storage ?? defaultStorage());
+
+  // The person's choices beat the host's options, because the host's options
+  // are an author's default and these are what this particular viewer, looking
+  // at their own screen, decided.
+  const settings: Settings = loadSettings(storage, app, {
+    ...defaultSettings(options.confirmCommits !== false),
+    ...(options.pace === undefined ? {} : { pace: clampPace(options.pace) }),
+  });
 
   const host = doc.createElement("div");
   // A class on the host element, in the light DOM, because the positioning
@@ -243,13 +323,44 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   move.setAttribute("type", "button");
   move.setAttribute("aria-label", "Move panel: arrow keys to nudge, Enter for the next corner");
   move.setAttribute("title", "Drag to move. Arrow keys to nudge, Enter for the next corner, Alt (Option) and an arrow from anywhere.");
+  // A glyph, not the word "Settings". The header is the drag handle as well as
+  // the chrome, and a title plus three labelled buttons is a strip with
+  // nowhere left to grab. It is still a real button with a real label.
+  const gear = el("button", "dk-gear");
+  gear.textContent = "\u2699";
+  gear.setAttribute("type", "button");
+  gear.setAttribute("aria-label", "Settings");
+  gear.setAttribute("title", "Settings: speed, highlighting, step mode, confirmations");
+  // `aria-expanded` and not `aria-pressed`: this discloses a panel section
+  // rather than turning something on, and claiming both would be two
+  // different promises about one button.
+  gear.setAttribute("aria-expanded", "false");
   const close = el("button", "dk-x");
   close.textContent = "Close";
   close.setAttribute("type", "button");
   head.appendChild(title);
+  head.appendChild(gear);
   head.appendChild(move);
   head.appendChild(close);
   panel.appendChild(head);
+
+  // The run controls, directly above the step list they act on, and only while
+  // a run is in flight.
+  const bar = el("div", "dk-run");
+  bar.setAttribute("role", "group");
+  bar.setAttribute("aria-label", "Run controls");
+  const pause = el("button", "dk-pause");
+  pause.textContent = "Pause";
+  pause.setAttribute("type", "button");
+  const once = el("button", "dk-once");
+  once.textContent = "Step";
+  once.setAttribute("type", "button");
+  once.setAttribute("title", "Run one more call, then wait");
+  const note = el("div", "dk-run-note");
+  bar.appendChild(pause);
+  bar.appendChild(once);
+  bar.appendChild(note);
+  panel.appendChild(bar);
 
   // Outside the panel on purpose: a live region inside a `display: none` panel
   // is not announced at all, and moving the COLLAPSED widget is exactly the
@@ -265,6 +376,95 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   log.setAttribute("role", "log");
   log.setAttribute("aria-live", "polite");
   panel.appendChild(log);
+
+  // ---- the settings view -------------------------------------------------
+  //
+  // In the panel and not a window of its own: it is four preferences, and the
+  // person is already looking here. It replaces the transcript rather than
+  // covering it, so nothing is half-readable behind it, and the header stays
+  // put so the panel can still be dragged out of the way while it is open.
+
+  const settingsView = el("div", "dk-settings");
+  settingsView.setAttribute("role", "group");
+  settingsView.setAttribute("aria-label", "Settings");
+  panel.appendChild(settingsView);
+
+  const speedRow = setRow(
+    "Speed",
+    "How long the agent waits between steps, so you can see each one before the next.",
+  );
+  const speeds = el("div", "dk-speeds");
+  speeds.setAttribute("role", "radiogroup");
+  speeds.setAttribute("aria-label", "Speed");
+  const speedButtons = SPEEDS.map((speed) => {
+    const button = el("button", "dk-speed");
+    button.textContent = speed.label;
+    button.setAttribute("type", "button");
+    button.setAttribute("role", "radio");
+    button.setAttribute("title", `${speed.ms} ms between steps`);
+    button.addEventListener("click", () => setPace(speed.ms));
+    speeds.appendChild(button);
+    return { speed, button };
+  });
+  speedRow.appendChild(speeds);
+  settingsView.appendChild(speedRow);
+
+  const highlightRow = setRow(
+    "Highlight",
+    "Outline the thing on screen a step is about to touch, when the app named one. Many verbs name nothing, and those are simply not outlined.",
+  );
+  highlightRow.appendChild(
+    toggle(
+      "dk-t-highlight",
+      "Outline what a step will touch",
+      () => settings.highlight,
+      (on) => {
+        settings.highlight = on;
+        // Immediately, not at the next step: somebody switching this off is
+        // looking at an outline they want gone.
+        if (!on) spot.hide();
+      },
+    ),
+  );
+  settingsView.appendChild(highlightRow);
+
+  const stepRow = setRow(
+    "Step mode",
+    "Wait for you before every single call, not just after a pause. Slow, and the right setting the first time you watch this drive something that matters.",
+  );
+  stepRow.appendChild(
+    toggle("dk-t-stepmode", "Ask before every call", () => settings.stepMode, (on) => {
+      settings.stepMode = on;
+      // Step mode is not a mode the controls have: it IS "paused, and stepped
+      // one call at a time", which is why turning it on mid-run holds the run
+      // and turning it off lets it go. The next run starts in the right state
+      // because `runControls` is built with it.
+      if (on) active?.pause();
+      else active?.resume();
+    }),
+  );
+  settingsView.appendChild(stepRow);
+
+  // Hidden when the host supplied its own confirmation: that option overrides
+  // this one outright, so a switch here would be a switch that does nothing.
+  if (!options.onBeforeCommit) {
+    const commitRow = setRow(
+      "Confirm commits",
+      "Ask before any step that changes data. One question per call, not per row — a commit acts on the whole selection.",
+    );
+    commitRow.appendChild(
+      toggle("dk-t-commits", "Ask before changing data", () => settings.confirmCommits, (on) => {
+        settings.confirmCommits = on;
+      }),
+    );
+    settingsView.appendChild(commitRow);
+  }
+
+  const done = el("button", "dk-done");
+  done.textContent = "Done";
+  done.setAttribute("type", "button");
+  done.addEventListener("click", () => setSettingsOpen(false));
+  settingsView.appendChild(done);
 
   const form = el("form", "dk-form");
   const input = el("input", "dk-input");
@@ -290,6 +490,21 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   let messages: Turn[] = [];
   let running: InstanceType<AbortControllerCtor> | null = null;
   let live = true;
+  /** The control surface for the run in flight, or null between runs.
+   *  "Paused" has no meaning between runs, which is why this is per run. */
+  let active: RunControls | null = null;
+  /** What the loop last said it was doing. Never inferred from the panel's own
+   *  buttons: `drive` moves this too — a spent step permit leaves the run
+   *  paused again, and the commit gate parks it in `awaiting-approval` — and a
+   *  panel that tracked its own presses would be wrong in exactly those
+   *  cases. */
+  let runState: RunState = "running";
+  // The wrapper's classes, as flags. Written in one place and in one order,
+  // because three separate string edits to `className` is three chances for
+  // one of them to drop another's class.
+  let isOpen = false;
+  let isBusy = false;
+  let isSettings = false;
 
   // ---- wiring ------------------------------------------------------------
 
@@ -310,9 +525,19 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     },
   });
 
-  // The header drags the panel, and `"ignore"` is what keeps the two buttons
-  // in it clickable: a press that starts on Close is Close's, even if the hand
-  // moves two pixels before it lifts.
+  // The outline over the element a step is about to touch. Its own host
+  // element, because the panel's is translated and a transformed ancestor
+  // becomes the containing block for `position: fixed` children; see
+  // `highlight.ts`. Nothing is written to the host app's own elements.
+  const spot = spotlight({
+    document: doc,
+    container: options.container ?? doc.body,
+    ...(options.window === undefined ? {} : { window: options.window }),
+  });
+
+  // The header drags the panel, and `"ignore"` is what keeps the buttons in it
+  // clickable: a press that starts on Close — or on the gear — is that
+  // button's, even if the hand moves two pixels before it lifts.
   place.handle(head, "ignore");
   // The move button is its own handle, so the thing that LOOKS like a grip is
   // a grip.
@@ -328,6 +553,15 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     setOpen(true);
   });
   close.addEventListener("click", () => setOpen(false));
+  gear.addEventListener("click", () => setSettingsOpen(!isSettings));
+  pause.addEventListener("click", () => {
+    if (runState === "paused") active?.resume();
+    else active?.pause();
+    // Not painted here. The loop answers through `onControl`, and it is the
+    // only thing that knows — including in the case where a run ended between
+    // the person deciding to press this and pressing it.
+  });
+  once.addEventListener("click", () => active?.step());
   move.addEventListener("click", () => {
     if (movedMove()) return;
     place.cycle();
@@ -347,6 +581,9 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     void ask(text);
   });
 
+  // Stop is the abort signal and nothing else, which is also why it is not on
+  // `RunControls`: an abort outranks a pause, so a held run is still stoppable
+  // and never wedged.
   stop.addEventListener("click", () => running?.abort());
 
   // On the wrapper and not on the input, so Escape closes the panel from
@@ -366,6 +603,8 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     place.key(e);
   });
 
+  paintSpeeds();
+  show("running");
   if (options.open) setOpen(true);
 
   // ---- the run -----------------------------------------------------------
@@ -378,9 +617,19 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     running = controller;
     busy(true);
 
-    // One trace line per call, filled in when the result arrives. Keyed by the
-    // model's call id so a turn with several calls does not cross its wires.
-    const lines = new Map<string, ElementLike>();
+    // One control surface per run, started paused if step mode is on — which
+    // is all step mode is, and deliberately so: a separate flag beside the
+    // state would be a second source of truth able to disagree with it.
+    const control = (options.controls ?? runControls)({
+      pace: settings.pace,
+      stepMode: settings.stepMode,
+    });
+    active = control;
+    show("running");
+
+    // One step per call, keyed by the model's call id so a turn with several
+    // calls does not cross its wires.
+    const steps = new Map<string, Step>();
 
     // The last count a `describe` verb reported in this run, and the reason the
     // confirmation row is worth building at all: "accept the current
@@ -390,15 +639,20 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     // asked about, because that selection has now been spoken for.
     let lastCount: number | undefined;
 
-    const gate =
-      options.onBeforeCommit ??
-      (options.confirmCommits === false ? undefined : confirmCommit);
+    // Always installed when the host has not replaced it, and the SETTING is
+    // read inside — so turning confirmations off, or back on, in the middle of
+    // a run takes effect on the next commit rather than the next run. That is
+    // what somebody who has just watched a commit go past expects of the
+    // switch they reached for.
+    const gate = options.onBeforeCommit ?? confirmCommit;
 
     /** The built-in gate. Renders a question in the transcript and waits. */
     function confirmCommit(req: CommitRequest): Promise<CommitDecision> {
+      if (!settings.confirmCommits) return Promise.resolve(true);
       // A question nobody can see is not a question. The person may have hit
-      // Escape while the model was thinking.
+      // Escape while the model was thinking, or be reading the settings view.
       setOpen(true);
+      setSettingsOpen(false);
 
       // `Snapshot.selectedCount` as the fallback, because a commit verb takes
       // no predicate and acts on the current selection — so the size of that
@@ -471,43 +725,72 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       });
     }
 
-    try {
-      const out = await drive(driver, {
-        think: options.think,
-        task: text,
-        history: messages,
-        ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
-        ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
-        ...(options.refusalLimit === undefined ? {} : { refusalLimit: options.refusalLimit }),
-        ...(gate === undefined ? {} : { onBeforeCommit: gate }),
-        ...(controller ? { signal: controller.signal } : {}),
+    const paced: DriveOptions = {
+      think: options.think,
+      task: text,
+      history: messages,
+      ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
+      ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
+      ...(options.refusalLimit === undefined ? {} : { refusalLimit: options.refusalLimit }),
+      onBeforeCommit: gate,
+      ...(controller ? { signal: controller.signal } : {}),
 
-        onCall: ({ call, kind }) => {
-          lines.set(call.id, trace(call.name, kind, argSummary(call.args)));
-        },
-        onResult: ({ call, kind, result }) => {
-          if (kind === "describe" && result?.ok) lastCount = result.count;
-          const line = lines.get(call.id);
-          if (!line) return;
-          if (result === null) {
-            line.textContent = `${line.textContent} · looked`;
-            return;
-          }
-          if (result.ok) {
-            // The count is repeated here on purpose. It is the number the
-            // commit decision turns on, and the person watching should be able
-            // to see "1,000 matched" without reading the model's summary of
-            // it.
-            line.textContent =
-              `${line.textContent} · ok` +
-              (result.count === undefined ? "" : ` · ${commas(result.count)} matched`);
-          } else {
-            line.className = `${line.className} dk-step-refused`;
-            line.textContent = `${line.textContent} · refused: ${result.refused}`;
-          }
-        },
-        onSay: ({ text: prose }) => say("dk-me", prose),
-      });
+      controls: control,
+      // The person's remembered speed, which `setPace` then changes live on the
+      // controls. Passed here as well because `drive`'s own option is what a run
+      // starts from, and a panel that only set it afterwards would pace its
+      // first call differently from its second.
+      pace: settings.pace,
+      ...(options.clock === undefined ? {} : { clock: options.clock }),
+
+      // A step appears HERE: `onBeforeCall` fires before the pace wait and
+      // before any hold, which is the only way "you can see it coming and stop
+      // it" is true rather than aspirational. `onCall` is then the moment the
+      // app is actually touched, and `onResult` the outcome — the three states
+      // of one row.
+      onBeforeCall: (e) => {
+        mark(step(steps, e), "pending");
+        aim(e);
+      },
+      onCall: (e) => {
+        mark(step(steps, e), "running");
+        aim(e);
+      },
+      onControl: ({ state }) => show(state),
+      onResult: ({ call, kind, result }) => {
+        if (kind === "describe" && result?.ok) lastCount = result.count;
+        // The step stops being highlighted the moment it is over, whatever
+        // the outcome. An outline left behind is an outline about nothing.
+        spot.hide();
+        const entry = steps.get(call.id);
+        if (!entry) return;
+        if (result === null) {
+          outcome(entry, " · looked", "done");
+          return;
+        }
+        if (result.ok) {
+          // The count is repeated here on purpose. It is the number the
+          // commit decision turns on, and the person watching should be able
+          // to see "1,000 matched" without reading the model's summary of
+          // it.
+          outcome(
+            entry,
+            " · ok" + (result.count === undefined ? "" : ` · ${commas(result.count)} matched`),
+            "done",
+          );
+        } else {
+          // A refusal is an OUTCOME and not an error. The app said no, on
+          // purpose, in its own vocabulary, and the model is about to adapt
+          // to it; rendering it as a failure would teach the person to read
+          // a working app as a broken one.
+          outcome(entry, ` · refused: ${result.refused}`, "refused");
+        }
+      },
+      onSay: ({ text: prose }) => say("dk-me", prose),
+    };
+
+    try {
+      const out = await drive(driver, paced);
 
       messages = out.messages;
       const note = STOP_NOTE[out.stop];
@@ -521,6 +804,18 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       say("dk-note", `Something went wrong talking to the model: ${message(err)}`);
     } finally {
       running = null;
+      active = null;
+      show("running");
+      spot.hide();
+      // Pending rows for calls that never ran. A stop during a pace wait or a
+      // hold abandons them unrun and no `onResult` is coming, so leaving them
+      // mid-flight would be a panel saying something is about to happen when
+      // the run is already over.
+      for (const entry of steps.values()) {
+        if (entry.line.className.includes("dk-step-pending")) {
+          outcome(entry, " · not run", "skipped");
+        }
+      }
       busy(false);
       if (live) input.focus?.();
     }
@@ -542,15 +837,151 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     return line;
   }
 
-  function trace(name: string, kind: VerbKind | undefined, args: string): ElementLike {
-    // `commit` is marked in the trace as well as in the prompt. The model being
-    // told is not the same as the person being told, and this is the line
-    // someone scrolls back to when they want to know what changed their data.
-    const line = el("div", `dk-step${kind === "commit" ? " dk-step-commit" : ""}`);
-    line.textContent = `${name}${kind ? ` (${kind})` : ""}${args}`;
-    log.appendChild(line);
+  /** One row of the step list, created the first time a call is mentioned and
+   *  returned every time after, so the plan and the call and the result are
+   *  three states of ONE row rather than three rows about one call. */
+  function step(steps: Map<string, Step>, e: CallEvent): Step {
+    const { call, kind } = e;
+    const found = steps.get(call.id);
+    if (found) return found;
+    const entry: Step = {
+      line: el("div", "dk-step"),
+      // `commit` is marked for the person as well as in the prompt for the
+      // model. Those are not the same thing, and this is the row somebody
+      // scrolls back to when they want to know what changed their data.
+      commit: kind === "commit",
+      text: `${call.name}${kind ? ` (${kind})` : ""}${argSummary(call.args)}`,
+    };
+    entry.line.textContent = entry.text;
+    if (entry.commit) {
+      entry.line.setAttribute("title", "Changes data, and may be irreversible.");
+    }
+    steps.set(call.id, entry);
+    log.appendChild(entry.line);
     scroll();
-    return line;
+    return entry;
+  }
+
+  /** The state, as classes. Never as text: the row's text is the record of the
+   *  call and should read the same whether somebody looked at it while it was
+   *  pending or a minute afterwards. The marker is a `::before` in `css.ts`. */
+  function mark(entry: Step, state: StepState): void {
+    entry.line.className = `dk-step dk-step-${state}${entry.commit ? " dk-step-commit" : ""}`;
+  }
+
+  function outcome(entry: Step, said: string, state: StepState): void {
+    entry.text += said;
+    entry.line.textContent = entry.text;
+    mark(entry, state);
+    scroll();
+  }
+
+  /**
+   * Outline whatever this call's `at` names, if it names anything.
+   *
+   * `at` is PRESENTATIONAL and this is the only thing done with it. It is
+   * never used to find something to call, never clicked, never read for a
+   * value, and its absence never changes what runs — which is most calls,
+   * since most verbs declare no `at` at all. A selector anywhere in the
+   * execution path is the failure mode this library exists to avoid; see
+   * `highlight.ts`.
+   */
+  function aim(e: CallEvent): void {
+    if (!settings.highlight) return;
+    spot.show(e.at);
+  }
+
+  /** A labelled block in the settings view: what it is, and why anybody would
+   *  touch it. A settings view that only names its switches is a settings view
+   *  people change at random. */
+  function setRow(label: string, why: string): ElementLike {
+    const row = el("div", "dk-set-row");
+    const name = el("div", "dk-set-label");
+    name.textContent = label;
+    const reason = el("div", "dk-set-why");
+    reason.textContent = why;
+    row.appendChild(name);
+    row.appendChild(reason);
+    return row;
+  }
+
+  /** A real `<button role="switch">`, so it is reachable by keyboard and
+   *  announced as on or off, rather than a styled div with a click handler. */
+  function toggle(
+    className: string,
+    label: string,
+    get: () => boolean,
+    set: (on: boolean) => void,
+  ): ElementLike {
+    const button = el("button", `dk-toggle ${className}`);
+    button.textContent = label;
+    button.setAttribute("type", "button");
+    button.setAttribute("role", "switch");
+    const paint = (): void => button.setAttribute("aria-checked", get() ? "true" : "false");
+    paint();
+    button.addEventListener("click", () => {
+      set(!get());
+      paint();
+      remember();
+    });
+    return button;
+  }
+
+  function setPace(ms: number): void {
+    settings.pace = clampPace(ms);
+    paintSpeeds();
+    show(runState);
+    remember();
+    // Live, and that is the whole reason the controls have a setter: the
+    // moment somebody wants the agent slowed down is while it is going. A
+    // slider that quietly applied next run would be worse than no slider —
+    // they move it, nothing happens, and they conclude it is broken.
+    active?.pace(settings.pace);
+  }
+
+  function paintSpeeds(): void {
+    const now = nearestSpeed(settings.pace);
+    for (const { speed, button } of speedButtons) {
+      button.setAttribute("aria-checked", speed.id === now.id ? "true" : "false");
+    }
+  }
+
+  /** What the run is doing, in the one place that says it. */
+  function show(state: RunState): void {
+    const was = runState;
+    runState = state;
+    const held = state === "paused";
+    pause.textContent = held ? "Resume" : "Pause";
+    pause.setAttribute("aria-label", held ? "Resume the run" : "Pause the run");
+    const speed = nearestSpeed(settings.pace);
+    note.textContent =
+      state === "paused"
+        ? "Paused"
+        : // Not "running": the run is waiting for the person, and a panel that
+          // said "running" there would be telling them to wait for the thing
+          // that is waiting for them.
+          state === "awaiting-approval"
+          ? "Waiting for you"
+          : `${speed.label} · ${settings.pace} ms a step`;
+    // Announced on a change and only while a run is in flight. A pause is a
+    // change to what the app is about to do next, and the panel is not
+    // necessarily where the person is looking.
+    if (isBusy && state !== was) {
+      status.textContent = held ? "Run paused" : state === "awaiting-approval" ? "Waiting for you" : "Run continuing";
+    }
+  }
+
+  function setSettingsOpen(next: boolean): void {
+    isSettings = next;
+    gear.setAttribute("aria-expanded", next ? "true" : "false");
+    paintWrap();
+    // Focus follows, in both directions, and lands on the first thing worth
+    // changing rather than on the container.
+    (next ? speedButtons[0]?.button ?? done : input).focus?.();
+  }
+
+  function remember(): void {
+    saveSettings(storage, app, settings);
   }
 
   function scroll(): void {
@@ -561,8 +992,22 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     }
   }
 
+  function paintWrap(): void {
+    wrap.className = `dk-wrap${isOpen ? " dk-open" : ""}${isBusy ? " dk-busy" : ""}${
+      isSettings ? " dk-set-open" : ""
+    }`;
+  }
+
   function setOpen(next: boolean): void {
-    wrap.className = next ? "dk-wrap dk-open" : "dk-wrap";
+    isOpen = next;
+    // A closed panel is not a panel with a settings view open inside it. The
+    // alternative is that reopening lands somebody in the settings instead of
+    // the conversation they were having.
+    if (!next) {
+      isSettings = false;
+      gear.setAttribute("aria-expanded", "false");
+    }
+    paintWrap();
     launcher.setAttribute("aria-expanded", next ? "true" : "false");
     // Focus follows the panel in both directions. A keyboard user who opens a
     // panel and is left on the launcher has to tab back through the whole app
@@ -572,8 +1017,8 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   }
 
   function busy(on: boolean): void {
-    const base = wrap.className.replace(/ ?dk-busy/, "");
-    wrap.className = on ? `${base} dk-busy` : base;
+    isBusy = on;
+    paintWrap();
     if (on) send.setAttribute("disabled", "disabled");
     else send.removeAttribute("disabled");
   }
@@ -597,12 +1042,28 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       // Before the element goes, because the resize listener is on the window
       // and would otherwise outlive the panel it was clamping.
       place.dispose();
+      // The outline has its own host element and its own window listeners, and
+      // both would otherwise outlive the panel that drew them.
+      spot.dispose();
       host.remove();
     },
   };
 }
 
-/** A short, safe rendering of a call's arguments for the trace line.
+/** Where a step is in its life. `refused` is a kind of done — the app said no,
+ *  on purpose — and not a kind of error. */
+type StepState = "pending" | "running" | "done" | "refused" | "skipped";
+
+interface Step {
+  line: ElementLike;
+  commit: boolean;
+  /** The row's text so far, kept here rather than read back off the element,
+   *  because appending to `textContent` twice is how an outcome ends up on a
+   *  row twice. */
+  text: string;
+}
+
+/** A short, safe rendering of a call's arguments for a step row.
  *
  *  Truncated, because an argument can be a predicate and a predicate can be
  *  long, and a trace line that wraps to four lines stops being skimmable —

@@ -1,0 +1,20 @@
+{
+  "name": "driverkit",
+  "displayName": "driverkit",
+  "version": "0.0.0",
+  "description": "Make a web app drivable by an agent. Drafts the app's verb list (src/driverkit.ts), checks the relay and the connected tabs, and points this session at a tab over MCP.",
+  "author": {
+    "name": "Nideesh1",
+    "url": "https://github.com/Nideesh1"
+  },
+  "homepage": "https://github.com/Nideesh1/driver#readme",
+  "repository": "https://github.com/Nideesh1/driver",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "mcp",
+    "automation",
+    "llm",
+    "browser"
+  ]
+}

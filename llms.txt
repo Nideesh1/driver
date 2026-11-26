@@ -1,0 +1,101 @@
+# driverkit
+
+> Make a web app drivable by an agent: no pixels, no selectors, no model. The app declares verbs (`name`, `kind`,
+> args, refusals) and what is on screen; an agent calls a verb by name and the app's own function runs. Two ways in:
+> a chat panel in the page (`mountWidget`, no transport at all) and an agent in another process over MCP through a
+> relay (`agent -> MCP -> relay -> your tab`). Packages: npm `driverkit`, `@driverkit/widget`, `@driverkit/agent`,
+> `@driverkit/adapters`, `@driverkit/browser`, `@driverkit/relay`; PyPI `driverkit` (the relay and the MCP server,
+> entry points `driverkit-relay` and `driverkit-mcp`). No runtime dependencies in any of them. MIT.
+> **Pre-release: nothing is published to npm or PyPI yet.** Install from a checkout of
+> <https://github.com/Nideesh1/driver> — `npm install && npm run build` for the TypeScript packages (a workspace
+> link is what makes a bare `driverkit` import resolve), `pip install ./python` (or `PYTHONPATH=python/src`) for the
+> Python half, which is stdlib-only. Treat every API as unstable until there is a tagged release.
+
+## The one file you add
+
+```ts
+import { mount } from "driverkit";
+
+export const driver = mount({
+  app: "Contacts",
+  verbs: [
+    { name: "search", kind: "read", describe: "filter the list",
+      args: { q: { type: "string", describe: "what to search for" } },
+      run: ({ q }) => store.search(q) },
+    { name: "select-where", kind: "describe", describe: "select every contact at a company",
+      args: { company: { type: "string", describe: "company name" } },
+      run: ({ company }) => ({ count: store.select(company) }) },   // the count a commit turns on
+    { name: "accept-selected", kind: "commit", describe: "accept the current selection",
+      refuses: ["nothing-selected"],
+      run: (_, ctx) => store.selected.size ? store.accept() : ctx.refuse("nothing-selected") },
+  ],
+  visible: () => ({ where: "contacts", rev: store.rev, rows: store.onScreen(),
+                    page: { index: store.page, size: 20, total: store.total },
+                    selected: store.visibleSelection(), selectedCount: store.selected.size }),
+});
+```
+
+Verbs are static, so they are sent to a model once and cached; the snapshot is dynamic and never larger than what
+the person at the keyboard can see. A `describe` verb takes a predicate and reports a `count`; the paired `commit`
+verb takes no predicate and acts on the current selection, so a count is always seen before data moves.
+
+## The two ways in
+
+- **In the page** — `mountWidget(driver, { think: backendThink("/api/chat") })` from `@driverkit/widget`. No
+  transport: the loop (`@driverkit/agent`) calls `driver.call()` directly. `think` is the host app's function, so
+  the API key stays on the app's own backend; commits are confirmed by default.
+- **From outside** — the tab dials out (`connect()` from `@driverkit/browser`) and holds one SSE stream open,
+  because nothing can call *into* a browser tab. `driverkit-relay` (or `driverkit.asgi.relay_asgi` mounted in the
+  server you already run, or `@driverkit/relay` in Node) is the one place both parties can reach. `driverkit-mcp
+  --relay http://127.0.0.1:7777 [--tab <id>]` turns that tab's manifest into an MCP tool list, so no tool is
+  hand-written per feature.
+
+## Reference
+
+- [README](README.md): the pitch, why not a screenshot and not a selector, the two ways in, `kind`, the packages
+- [PROTOCOL.md](PROTOCOL.md): **source of truth** for the wire contract: frames, the `/dk/*` HTTP surface, every
+  status code, `/watch` semantics, reserved refusals, body limits, who is allowed to do this
+- [packages/core/src/types.ts](packages/core/src/types.ts): `Verb`, `VerbKind`, `Snapshot`, `Result`,
+  `WireResult`, `Manifest`, `TabInfo` — the long comments are the reasoning, not decoration
+- [packages/core/src/registry.ts](packages/core/src/registry.ts): `mount`, `refusal`, `checkArg`,
+  `RESERVED_REFUSALS`, the manifest fingerprint
+- [packages/agent/src/types.ts](packages/agent/src/types.ts): `Think`, `ToolSpec`, `Turn`, `DriveOptions` — why
+  this package holds no model client and no key
+- [packages/agent/src/backend.ts](packages/agent/src/backend.ts): `backendThink`, the deployment that actually
+  ships, in thirty lines
+- [packages/widget/src/widget.ts](packages/widget/src/widget.ts): the corner panel, plain DOM, commit gate,
+  draggable and persisted position
+- [packages/adapters/README.md](packages/adapters/README.md): the three-tier adoption ladder for an app with no
+  store — `clickHandle`, `rowsFromTable`, `revFromMutations`
+- [python/src/driverkit/\_\_init\_\_.py](python/src/driverkit/__init__.py): the Python half — `Driverkit` client,
+  `Relay`, `TabAuth`, `relay_asgi`, `mcp_server`
+- [python/src/driverkit/auth.py](python/src/driverkit/auth.py): tab tokens (`dkt1.`), why signed tokens and not a
+  callback to the app, and why isolation is not authorisation
+
+## Examples
+
+- [examples/contacts](examples/contacts/): a CRM contacts screen, 3,412 seeded rows, the widget in the corner and
+  the relay mounted at `/dk` on the same port — one page drivable both ways. `python3 examples/contacts/server.py`,
+  stdlib only, no bundler (`tsstrip.py` erases the types as the sources are served),
+  `http://127.0.0.1:8770/examples/contacts/app/`. `ANTHROPIC_API_KEY` is needed only by the widget.
+- [examples/contacts/check.mjs](examples/contacts/check.mjs): the demo driven four ways — `driver.call()`,
+  `drive()`, the widget, and the relay
+- [examples/contacts/verify_app.py](examples/contacts/verify_app.py),
+  [verify_chat.py](examples/contacts/verify_chat.py), [verify_strip.py](examples/contacts/verify_strip.py): the
+  demo over HTTP, the Anthropic translation against a fake endpoint, the type stripper against the library's tests
+
+## Tooling
+
+- [skills/driverkit/SKILL.md](skills/driverkit/SKILL.md): the user-facing skill — when to write a verb, what to
+  refuse, how to wire the widget or the relay
+- [plugin/](plugin/): the Claude Code plugin — `/driverkit:draft-verbs` (scan this repo and draft
+  `src/driverkit.ts`), `/driverkit:check` (relay and tabs), `/driverkit:connect` (point an MCP client at a tab),
+  `/driverkit:demo` (run the contacts example). No hooks, on purpose; see [plugin/README.md](plugin/README.md)
+
+## Status
+
+Early, and honest about it. The protocol, the registry, both relays, the loop, the widget and the adapters are
+covered by tests (`npm test`; `cd python && python3 -m unittest discover -s tests -t tests`), the TypeScript and
+Python relays are tested against each other, and **both ways in have been driven end to end against a live model
+and a real browser** on the contacts example. Not published, never used on a real app, and
+`driverkit.fastmcp_server` (the HTTP MCP server behind the `fastmcp` extra) has never been executed.
