@@ -1,0 +1,97 @@
+# CI on pushes/PRs: everything in this repository that can fail.
+#
+#   the TypeScript suite, the build, the strict typecheck, the Python suite,
+#   the demo driven for real through the relay, and the demo in real Chrome.
+#
+# No secrets are used, and none are needed: the demo serves every screen and
+# the relay without an API key. The one test that needs a model skips itself.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: npm ci
+
+      # The build runs before the tests and has to. Nothing in the suite
+      # imports `dist/` directly, but `test/packaging.test.ts` asks what the
+      # package publishes -- every subpath resolved through the package's own
+      # `exports`, including the `node` condition that keeps the relay off a
+      # page -- and that question needs the built files on disk. It skips
+      # itself when they are absent, and a skipped packaging test is how a
+      # packaging regression gets through.
+      - name: Build
+        run: ./node_modules/.bin/tsc -b tsconfig.build.json
+
+      - name: TypeScript suite
+        run: node --experimental-strip-types --test packages/*/test/*.test.ts
+
+      # Whole-repo, `strict` plus `exactOptionalPropertyTypes`, sources AND
+      # tests. Separate from the build on purpose: the build answers "what does
+      # the package publish", this answers "is the repository consistent".
+      - name: Typecheck
+        run: ./node_modules/.bin/tsc -p tsconfig.json
+
+      # Standard library only, so there is nothing to resolve and no lockfile
+      # to honour: `--no-project` is what keeps uv from trying to install a
+      # package whose `dependencies` are deliberately empty.
+      - name: Python suite
+        working-directory: python
+        run: PYTHONPATH=src uv run --no-project python -m unittest discover -s tests -t tests
+
+      - name: Python package builds
+        run: uv build --project python --out-dir dist
+
+      - name: Browser for the smoke test
+        run: npx playwright install --with-deps chromium
+
+      # One server for both: `check.mjs` drives the demo with no browser at
+      # all (directly, through `drive()`, and from outside through the relay at
+      # `/dk`), and the smoke test drives the same process in real Chrome.
+      #
+      # Started here rather than in a `services:` block because it is this
+      # repository's own code, not an image, and it needs the build above.
+      - name: Demo, driven for real and then in a browser
+        env:
+          DK_PORT: "8791"
+          DK_HOST: 127.0.0.1
+          DK_BASE: http://127.0.0.1:8791
+        run: |
+          python3 examples/contacts/server.py &
+          echo $! > /tmp/dk-demo.pid
+          for i in $(seq 1 60); do
+            curl -fsS -o /dev/null "$DK_BASE/examples/contacts/app/" && break
+            sleep 0.5
+          done
+          curl -fsS -o /dev/null "$DK_BASE/examples/contacts/app/"
+          node --experimental-strip-types examples/contacts/check.mjs "$DK_BASE"
+          node --test e2e/smoke.spec.mjs
+          kill "$(cat /tmp/dk-demo.pid)"
+
+      # The screenshots the browser test took, so a red build can be looked at
+      # rather than guessed about.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-screenshots
+          path: e2e/artifacts/
+          if-no-files-found: ignore

@@ -15,7 +15,7 @@ and verb count of the tab. Then, only if something is wrong:
 - **No relay answered** — the script already listed the three ways to start one. Prefer mounting
   `driverkit.asgi.relay_asgi` in the server the app already runs; a separate process is a separate thing to
   supervise.
-- **Relay up, zero tabs** — the page is not calling `connect()` from `@driverkit/browser`, or it is not open.
+- **Relay up, zero tabs** — the page is not calling `connect()` from `driverkit/browser`, or it is not open.
   A closed tab is not a tab.
 - **A verb with no `kind`** — the script names them. An absent kind makes no safety claim in either direction.
 - **`manifest: 404`** — the stream opened and `hello` has not landed yet (they are separate requests). A second

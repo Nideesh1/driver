@@ -132,9 +132,9 @@ if (tabs.length === 0) {
     [
       ``,
       `The relay is up and no tab has dialled out to it.`,
-      `A page joins by calling connect() from @driverkit/browser:`,
+      `A page joins by calling connect() from driverkit/browser:`,
       ``,
-      `    import { connect } from "@driverkit/browser";`,
+      `    import { connect } from "driverkit/browser";`,
       `    connect(driver, { relay: "${relay}" });   // "" when the relay is on the page's own origin`,
       ``,
       `Then load the page. Check the browser console for the EventSource, and remember the`,

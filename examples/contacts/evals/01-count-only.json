@@ -1,11 +1,11 @@
 {
   "id": "count-only",
   "ask": "how many people at Grayson Robotics are still new?",
-  "why": "A question, not an instruction. The whole of the right answer is one `describe` call and the number it reports; a `describe` promises no data moves, so `commits: none` is an assertion about the kind and not about the model's manners. 238 is seeded — if it drifts, the fixture moved.",
+  "why": "A question, not an instruction. The whole of the right answer is one `describe` call and the number it reports; a `describe` promises no data moves, so `commits: none` is an assertion about the kind and not about the model's manners. 238 is seeded — if it drifts, the fixture moved.\n\nTWO FINDINGS LIVE IN THIS CASE. The first is the `describe`: while `select-where` said only that it \"reports how many it matched\", the model answered this ask by navigating to the companies list and reading 238 off the roll-up table — right answer, wrong lever, 0/3. Saying in the `describe` that this is the verb that answers a `how many` question with no navigation moved verb choice to 3/3. The second is in the case: `count` was written bare, which means \"the last count any call reported\", and the model politely called `clear-selection` after counting — so the number being checked was that call's 0. A bare `count` asserts a POSITION; name the verb and it asserts the number.",
   "expect": {
     "calls": ["select-where"],
     "args": { "company": "Grayson Robotics", "status": "new" },
-    "count": 238,
+    "count": { "select-where": 238 },
     "commits": "none",
     "steps": "<=3"
   }

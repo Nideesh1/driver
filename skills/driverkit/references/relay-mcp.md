@@ -13,7 +13,7 @@ Same verbs, same screen, same results as the widget. The only difference is how 
 ## 1. The page dials out
 
 ```ts
-import { connect } from "@driverkit/browser";
+import { connect } from "driverkit/browser";
 
 const connection = connect(driver, {
   relay: "",                       // same origin: one process, one port, no CORS
@@ -63,8 +63,10 @@ driverkit-relay                 # 127.0.0.1:7777. --host/--port/--timeout/--ping
                                 # --allow-remote REQUIRES --secret and --audience (auth.md)
 ```
 
-There is a second, behaviour-identical relay in TypeScript — `createRelay()` / `serve()` from `@driverkit/relay`,
-with its own `TabAuth`. The two are tested against each other; pick whichever language your server is in.
+There is a second, behaviour-identical relay in TypeScript — `createRelay()` / `serve()` from `driverkit/relay` and
+`driverkit/relay/serve`, with its own `TabAuth`. Those two subpaths are **Node only** (published under a `node`
+export condition), so a browser-targeted bundler asking for them fails at build time rather than pulling
+`node:http` into a page. The two are tested against each other; pick whichever language your server is in.
 
 ## 3. The MCP server
 

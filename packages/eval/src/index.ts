@@ -29,7 +29,7 @@ export {
 } from "./report.ts";
 export { runCase, runSuite, SetupError } from "./run.ts";
 export type { RunCaseOptions } from "./run.ts";
-export { ASK_VERB_GUESSES, askMechanism, expectedArgs, judge } from "./score.ts";
+export { ASK_VERB_GUESSES, askMechanism, expectedArgs, judge, routes } from "./score.ts";
 export type { JudgeOptions } from "./score.ts";
 export { main } from "./cli.ts";
 export type {
@@ -38,6 +38,7 @@ export type {
   DryResult,
   EvalCase,
   Expect,
+  ExpectPath,
   Judgement,
   LoadedCase,
   Mark,

@@ -5,39 +5,51 @@ something else or nothing. So an app consumes this from a checkout until there i
 
 ## The TypeScript side
 
-Seven packages in one workspace (`packages/*`, declared for both npm `workspaces` and `pnpm-workspace.yaml`):
+**One package**, `packages/driverkit`, with a subpath per area. `packages/eval` sits beside it in the workspace
+(`packages/*`, declared for both npm `workspaces` and `pnpm-workspace.yaml`) and is a development tool nobody
+installs: it serves its own `src` rather than a `dist`, and is deliberately absent from `tsconfig.build.json`.
 
-| package | what | runtime deps |
+| import | what | sources |
 |---|---|---|
-| `driverkit` | the core: `mount`, `refusal`, `checkArg`, `RESERVED_REFUSALS`, the types | none |
-| `@driverkit/widget` | the corner panel | `@driverkit/agent`, `driverkit` |
-| `@driverkit/agent` | `drive`, `backendThink`, the tool/prompt rendering | none |
-| `@driverkit/adapters` | reading a rendered DOM | none |
-| `@driverkit/browser` | `connect`: the page side of the relay | none |
-| `@driverkit/relay` | the relay in TypeScript, plus `TabAuth` and `serve` | none |
+| `driverkit` | the registry: `mount`, `refusal`, `checkArg`, `selectionId`, `RESERVED_REFUSALS`, the types | `src/core/*.ts` |
+| `driverkit/widget` | the corner panel | `src/widget/*.ts` |
+| `driverkit/agent` | `drive`, `backendThink`, the tool/prompt rendering | `src/agent/*.ts` |
+| `driverkit/controls` | `controlsFromDom`: three generic verbs over marked elements | `src/controls/*.ts` |
+| `driverkit/browser` | `connect`: the page side of the relay | `src/browser/*.ts` |
+| `driverkit/relay`, `driverkit/relay/serve` | the relay in TypeScript, plus `TabAuth` and `serve` | `src/relay/*.ts` |
 
-`@driverkit/widget` is the only cross-package **value** import in the repository (it imports `drive`); everything
-else between packages is `import type`, which type-stripping erases outright.
+The areas import each other by relative path, so they are one TypeScript program and there is no build order to
+derive. One install and one version for everything: a widget fix bumps the core's version, which pre-1.0 is
+deliberate.
+
+`driverkit/relay` is the one entry that is **not** browser-safe — it imports `node:http`, which is what drove the
+original six-package split. It is published under a `"node"` export condition and nothing else, so a
+browser-targeted bundler asking for the subpath finds no target and fails loudly at build time instead of pulling
+`node:http` into a page. There is no `browser` or `default` fallback on purpose: a shim resolving to an empty
+module would hand somebody a `createRelay` that silently does nothing. `test/packaging.test.ts` resolves every
+subpath under browser conditions and asserts that this one is unreachable. `@types/node` is a real dependency and
+not a dev one, because the relay's `.d.ts` files re-export `node:http` types in their public surface.
 
 ```sh
-npm install              # creates node_modules/driverkit and node_modules/@driverkit/* as links to packages/*
-npm run build            # tsc -b tsconfig.build.json  → each package's dist/
+npm install              # creates node_modules/driverkit as a link to packages/driverkit
+npm run build            # tsc -b tsconfig.build.json  → packages/driverkit/dist/<area>/
 npm test                 # runs the build FIRST, then node --experimental-strip-types --test packages/*/test/*.test.ts
 npm run typecheck
 ```
 
-The build is not optional before the tests: each package's `exports` names `dist/`, and the widget resolves
-`@driverkit/agent` at runtime through the workspace link, so the widget tests need a built agent on disk. There is
-deliberately **no `paths` mapping** — the repository typechecks the way a consumer does, through each package's own
-`exports`.
+Every test is flat in `packages/driverkit/test/` and reaches into `../src/*.ts` by relative path, so the build is
+not strictly needed to run them — except that `test/packaging.test.ts` asks what the package publishes, and that
+question needs the built files on disk. It skips itself when they are absent rather than passing vacuously, and a
+skipped packaging test is how a packaging regression would get through. There is deliberately **no `paths`
+mapping**: the repository typechecks and resolves the way a consumer does, through the package's own `exports`.
 
-Every package publishes only `dist` + `README.md`, is `"type": "module"`, `sideEffects: false`, with
-`exports["."] = { types: "./dist/index.d.ts", default: "./dist/index.js" }` (plus `@driverkit/relay`'s `./serve`).
+The package publishes `dist` + `README.md` + `CONTROLS.md`, is `"type": "module"` and `sideEffects: false` — which
+is what lets a bundler prove a page is free of the subpaths it does not import.
 
 To consume it from another project before release, in rough order of how little will surprise you: a file
-dependency (`"driverkit": "file:../driverkit/packages/core"`) after `npm run build`; `npm pack` in each package you
-need and install the tarballs; or `pnpm link`. Whichever you pick, **build first** — `dist/` is gitignored, and an
-unbuilt package resolves to nothing.
+dependency (`"driverkit": "file:../driverkit/packages/driverkit"`) after `npm run build`; `npm pack` and install
+the tarball; or `pnpm link`. Whichever you pick, **build first** — `dist/` is gitignored, and an unbuilt package
+resolves to nothing.
 
 ## The Python side
 
@@ -67,7 +79,8 @@ python3 examples/contacts/server.py          # DK_PORT=8770 DK_HOST=127.0.0.1 DK
 open http://127.0.0.1:8770/examples/contacts/app/
 ```
 
-No `npm install`, no build step, no bundler: `tsstrip.py` erases the types out of the library's `.ts` sources as the
+No `npm install`, no bundler and no import map: the demo's module URLs are relative paths into
+`../../../packages/driverkit/dist/<area>/`, and `tsstrip.py` erases the types out of the library's `.ts` sources as the
 server serves them, so a browser imports the library unchanged. One server does three jobs — static files,
 `/api/chat` (the `Think` endpoint, where the key lives), and the relay mounted at `/dk` — so one page is drivable
 both ways at once, same origin, no CORS. `DK_LLM_IP` connects to a given address while keeping the `Host` header

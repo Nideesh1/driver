@@ -208,3 +208,101 @@ test("an expectation the case did not state is `n/a` and cannot be failed", () =
   );
   assert.equal(j.pass, true);
 });
+
+test("`anyOf` passes the route the agent actually took, and says which", () => {
+  // The failure this is for: a case that named `select-where → accept` scored
+  // the demo 0/3 while the model used the screen-scoped verb that means the
+  // same thing, three times identically. The better path must not be a red
+  // cross, and the report has to say which of the allowed answers was given —
+  // a case whose second route is the only one ever taken is telling you the
+  // first is not how the app is driven.
+  const c = kase({
+    anyOf: [
+      {
+        calls: ["select-where", "accept-selected"],
+        args: { "select-where": { company: "Acme" } },
+        count: { "select-where": 112 },
+      },
+      {
+        calls: ["open-company", "select-pending-here", "accept-selected"],
+        args: { "open-company": { company: "Acme" } },
+        count: { "select-pending-here": 112 },
+      },
+    ],
+    commits: ["accept-selected"],
+  });
+  const j = judge(
+    c,
+    transcript([
+      { name: "open-company", args: { company: "Acme" }, kind: "read" },
+      { name: "select-pending-here", count: 112, kind: "describe" },
+      { name: "accept-selected", count: 112, kind: "commit" },
+    ]),
+    opts,
+  );
+  assert.equal(j.pass, true);
+  assert.equal(j.verb, "ok");
+  assert.equal(j.args, "ok");
+  assert.equal(j.counts, "ok");
+  assert.match(j.notes.join("\n"), /took route 2 of 2/);
+});
+
+test("`anyOf` keeps the count's teeth: the right route with the wrong number still fails", () => {
+  const c = kase({
+    anyOf: [
+      { calls: ["select-where", "accept-selected"], count: { "select-where": 112 } },
+      { calls: ["select-pending-here", "accept-selected"], count: { "select-pending-here": 112 } },
+    ],
+    commits: ["accept-selected"],
+  });
+  const j = judge(
+    c,
+    transcript([
+      { name: "select-pending-here", count: 9, kind: "describe" },
+      { name: "accept-selected", count: 9, kind: "commit" },
+    ]),
+    opts,
+  );
+  assert.equal(j.counts, "wrong");
+  assert.equal(j.pass, false);
+  assert.match(j.notes.join("\n"), /reported 9 where the case says 112/);
+});
+
+test("when no route was taken, every route's reason is printed", () => {
+  // Not just the first branch's. An author reading a red `anyOf` wants to know
+  // how close each allowed answer came, because the near miss is where the
+  // next `describe` edit goes.
+  const j = judge(
+    kase({
+      anyOf: [{ calls: ["select-where"] }, { calls: ["select-pending-here"] }],
+      commits: "none",
+    }),
+    transcript([{ name: "goto", args: { screen: "companies" }, kind: "read" }]),
+    opts,
+  );
+  assert.equal(j.verb, "wrong");
+  assert.equal(j.pass, false);
+  assert.match(j.notes.join("\n"), /none of the 2 routes/);
+  assert.match(j.notes.join("\n"), /route 1 \(`select-where`\)/);
+  assert.match(j.notes.join("\n"), /route 2 \(`select-pending-here`\)/);
+});
+
+test("a forbidden verb is forbidden whichever route was taken", () => {
+  // `forbid` is a claim about the run, so it is applied after a route has
+  // matched and can turn a matched route red on its own.
+  const j = judge(
+    kase({
+      anyOf: [{ calls: ["select-contact"] }, { calls: ["select-pending-here"] }],
+      forbid: ["select-where"],
+      commits: "none",
+    }),
+    transcript([
+      { name: "select-where", args: { company: "Acme" }, count: 410, kind: "describe" },
+      { name: "select-contact", args: { id: "c-1" }, count: 1, kind: "describe" },
+    ]),
+    opts,
+  );
+  assert.equal(j.verb, "wrong");
+  assert.equal(j.pass, false);
+  assert.match(j.notes.join("\n"), /which this case forbids/);
+});

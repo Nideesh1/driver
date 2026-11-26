@@ -56,8 +56,8 @@ there is no transport at all — a loop asks a model what to do and calls the
 verb. Your API key stays on your backend behind one endpoint.
 
 ```ts
-import { mountWidget } from "@driverkit/widget";
-import { backendThink } from "@driverkit/agent";
+import { mountWidget } from "driverkit/widget";
+import { backendThink } from "driverkit/agent";
 
 mountWidget(driver, { think: backendThink("/api/chat") });
 ```
@@ -163,37 +163,152 @@ first, so the host's is the one a model follows if they disagree.
 
 ## Apps that are not tidy
 
-If your actions already exist as functions, a verb calls them. If they only
-exist inside a JSX click handler, mark the button yourself and the verb clicks
-it — a handle you chose, not a selector somebody guessed:
+### Your app has no store
+
+`visible()` returns a `Snapshot`. Where it comes from is your app's business,
+and driverkit deliberately ships no reader for any particular shape — there
+used to be `rowsFromTable`, `revFromMutations` and `fromDom`, and each one was
+a guess at how an app holds its data, which is the thing this library exists
+not to do. If your rows only exist as rendered markup, the ten lines that read
+them are yours and they are short:
+
+```ts
+const rows = () =>
+  [...document.querySelectorAll("#contacts tbody tr")].map((tr) => {
+    const cell = (n) => tr.children[n].textContent.trim();
+    return { id: tr.dataset.dkId, name: cell(0), company: cell(1), status: cell(2) };
+  });
+
+// `rev` must move whenever anything an agent reads changes, and must never go
+// backwards. A counter your own code bumps is better than anything derived
+// from the DOM; a MutationObserver is the fallback when you have nowhere to
+// put one.
+let rev = 1;
+new MutationObserver(() => { rev += 1; }).observe(
+  document.querySelector("#contacts"), { childList: true, subtree: true, characterData: true },
+);
+
+mount({ app: "Contacts", verbs, visible: () => ({ where: "contacts", rev, rows: rows() }) });
+```
+
+Ten lines you can read beats an import that works for four table shapes and
+silently reports the wrong `id` column for the fifth. Two things to get right,
+both of which a reader would have had to guess for you:
+
+* **`id` is what an agent passes back.** Use the id your own records have, not
+  a row number — a positional id is stable until somebody sorts the table.
+* **Zero rows is a claim.** `rows: []` says "there are no records". If your
+  table has not rendered yet, omit `rows` entirely and say so in `note`;
+  absent means "this snapshot carries no row information", which is a
+  different answer and the honest one.
+
+### Your actions only exist inside click handlers
+
+Mark the button yourself and the verb clicks it — a handle you chose, not a
+selector somebody guessed:
 
 ```tsx
 <button data-dk="bulk-accept" onClick={/* whatever lives here */}>
 ```
 
 ```ts
-import { clickHandle, rowsFromTable, revFromMutations } from "@driverkit/adapters";
+const clickHandle = (name) => () => {
+  const el = document.querySelector(`[data-dk="${name}"]`);
+  if (!el) throw new Error(`driverkit: no handle ${name}`);
+  el.click();
+};
 
-{ name: "bulk-accept", kind: "commit", run: clickHandle("bulk-accept") }
+{ name: "bulk-accept", kind: "commit", describe: "accept every pending contact",
+  run: clickHandle("bulk-accept") }
 ```
 
-`@driverkit/adapters` also reads a rendered table into rows and derives a
-change counter from DOM mutations, so an app with no store at all can be
-driven today and cleaned up later, one verb at a time.
+Four lines, shorter than the import that used to provide them. The cost is
+real and no library can carry it for you: a click runs whatever the handler
+does, so you have to read the handler to declare `kind` — and a rendered but
+disabled button accepts a click, does nothing, and the call reports `ok`. Check
+`disabled` before clicking if you have any.
 
-## Packages
+### Somebody asks for the thing nobody wrote a verb for
 
-| package | what |
+A verb list is a set of shortcuts, and shortcuts are incomplete by
+construction. `driverkit/controls` is the other layer: mark the elements an
+agent may use, and it gets three generic verbs — `press`, `type-into`,
+`commit-control` — over whatever is on screen right now.
+
+```html
+<button data-dk-control="next-page"  data-dk-kind="read">Next</button>
+<input  data-dk-control="search"     data-dk-kind="describe" placeholder="Search" />
+<button data-dk-control="accept-all" data-dk-kind="commit">Accept all</button>
+```
+
+```ts
+import { controlsFromDom } from "driverkit/controls";
+
+const dk = controlsFromDom({ root: "#app", rows: "#contacts" });
+
+mount({
+  app: "Contacts",
+  verbs: [...myShortcuts, ...dk.verbs],
+  visible: () => dk.withControls(myVisible()),
+});
+```
+
+This is enumeration, not inference: it lists the marks you made and nothing
+else — no label matching, no roles, no "did you mean", because a near miss is
+how an agent presses Delete when it meant Dismiss. A shortcut is still how
+bulk work is safe (one call, four hundred rows, one count); a control is how
+the four hundred and first request gets done at all.
+
+It is also the only part of the library that resolves a name to an element in
+order to act, and `data-dk-kind` is a claim nothing here can check — mark a
+Delete button `read` and it is pressed without a question. Read
+[`CONTROLS.md`](packages/driverkit/CONTROLS.md), which argues the whole design
+and lists what it does not do, before importing it.
+
+## Entry points
+
+One package. One install, one version, one changelog.
+
+```sh
+npm i driverkit
+```
+
+| import | what |
 |---|---|
 | `driverkit` | the registry: verbs, the screen, one `call` |
-| `@driverkit/widget` | the chat panel |
-| `@driverkit/agent` | the loop behind it, provider-neutral |
-| `@driverkit/adapters` | reading a rendered DOM |
-| `@driverkit/browser` | the page side of the relay |
-| `@driverkit/relay` | the relay, in TypeScript |
+| `driverkit/widget` | the chat panel |
+| `driverkit/agent` | the loop behind it, provider-neutral |
+| `driverkit/controls` | the generic verbs over marked controls |
+| `driverkit/browser` | the page side of the relay |
+| `driverkit/relay` | the relay, in TypeScript — **Node only** |
 | `driverkit` (PyPI) | the relay and the MCP server, in Python |
 
-No runtime dependencies in any of them. The wire protocol is written down in
+This was six packages, which for a library whose contract is one function was
+a table of contents pretending to be an architecture. Subpaths cost nothing a
+bundler cannot shake out: import `driverkit/widget` and your bundle contains
+the widget and the core, not the relay.
+
+`driverkit/relay` imports `node:http`, and that is the one thing a browser
+bundler cannot swallow — it is the reason for the original split. It is
+published under a `"node"` condition and no other, so a browser-targeted build
+asking for it fails at build time, with the import named, rather than pulling
+Node builtins into a page. There is deliberately no browser shim: a
+`createRelay` that resolved to an empty module would silently do nothing,
+which is worse than a build error.
+
+The same goes for TypeScript, which is worth knowing before it surprises you:
+under `moduleResolution: "bundler"` — the conditions a bundler applies —
+`import { createRelay } from "driverkit/relay"` is a `TS2307`, because that
+code could not have been bundled either. Server code that imports the relay
+wants `moduleResolution: "nodenext"`, under which every entry above resolves.
+
+The accepted cost of one package is one version: a widget fix bumps the
+version of the core, and of everything else. Before 1.0 that is a feature —
+there is one number to say which driverkit you are running, and no matrix of
+which widget works with which core.
+
+No runtime dependencies (`@types/node` is types-only, for the relay's own
+declarations). The wire protocol is written down in
 [`PROTOCOL.md`](PROTOCOL.md), and the relay has two independent
 implementations that are tested against each other.
 

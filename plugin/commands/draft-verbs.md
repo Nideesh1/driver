@@ -77,9 +77,14 @@ evidence and nothing more. Do not write a verb for a function you have not read.
   not spell the screen's identity into `where` and leave `screen` out. It runs on every call, so keep it cheap,
   and never put a per-user string in the verb list: the verbs are the half that gets cached.
 - **`run` calls code that already exists.** If an action lives only inside a click handler, do not invent a
-  selector: mark the button `data-dk="..."` and use `clickHandle("...")` from `@driverkit/adapters`, and list
-  the markup change as a separate step for the human to approve. Same for `rowsFromTable` / `revFromMutations`
-  when the app has no store.
+  selector: mark the button `data-dk="..."` and write the four-line click helper by hand
+  (`document.querySelector('[data-dk="..."]').click()`, throwing when it is not there), and list the markup change
+  as a separate step for the human to approve. The library ships no helper for this and none for reading rows out
+  of the DOM either — when the app has no store, `visible()` gets a `querySelectorAll().map()` and a
+  `MutationObserver` bumping a counter for `rev`, both written by hand. A click runs whatever the handler does, so
+  read the handler before declaring `kind`, and remember a disabled button is clicked, does nothing, and reports
+  `ok`. For the asks no verb list anticipates, `driverkit/controls` publishes three generic verbs over elements
+  marked `data-dk-control` — propose it separately, never as part of this draft.
 - Return `ctx.refuse("slug", "hint")` for an expected no, a `{ count }` report from a `describe`, and nothing
   otherwise. Throwing is a bug, not a no.
 

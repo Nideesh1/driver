@@ -13,7 +13,7 @@ One process that does all three jobs this demo needs.
      driverkit's `Think` contract (`{system, tools, messages}`) to and from it.
      The key is read from the environment and never leaves this process: the
      page talks only to `/api/chat`, which is the whole reason
-     `@driverkit/agent` has no model client in it.
+     `driverkit/agent` has no model client in it.
 
   3. **Mounts the relay** at `/dk`, reusing `driverkit.relay.Relay` through the
      handler `driverkit.serve_relay` already builds — the SSE writer, the

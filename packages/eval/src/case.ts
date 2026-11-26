@@ -15,7 +15,15 @@
  * `dry.ts`, and the message always names the file and the field.
  */
 
-import type { EvalCase, Expect, LoadedCase, Scalar, SetupCall, StepBound } from "./types.ts";
+import type {
+  EvalCase,
+  Expect,
+  ExpectPath,
+  LoadedCase,
+  Scalar,
+  SetupCall,
+  StepBound,
+} from "./types.ts";
 
 /** Thrown for a case file that cannot be read as a case. Not returned: a
  *  malformed file is a programming error in the suite, not a finding about the
@@ -25,6 +33,7 @@ export class CaseError extends Error {}
 
 const EXPECT_FIELDS = new Set([
   "calls",
+  "anyOf",
   "forbid",
   "args",
   "count",
@@ -123,6 +132,32 @@ function parseExpect(raw: unknown, source: string): Expect {
     expect.calls = calls;
   }
 
+  // Several routes, any one of which is right. Refused beside `calls`, `args`
+  // or `count` rather than merged with them: a top-level route plus a list of
+  // routes is two spellings of one claim, and whichever way a reader took it
+  // the other half would be silently ignored. See `Expect.anyOf`.
+  const anyOf = raw["anyOf"];
+  if (anyOf !== undefined) {
+    for (const field of ["calls", "args", "count"]) {
+      if (raw[field] !== undefined) {
+        throw new CaseError(
+          `${source}: \`expect.anyOf\` cannot be used with \`expect.${field}\`. A case states ` +
+            `one route or several; put the route in a branch of \`anyOf\`. \`forbid\`, ` +
+            `\`commits\`, \`refused\` and \`steps\` stay at the top level — they are claims ` +
+            `about the run, not about a route.`,
+        );
+      }
+    }
+    if (!Array.isArray(anyOf) || anyOf.length < 2) {
+      throw new CaseError(
+        `${source}: \`expect.anyOf\` must be a list of TWO OR MORE routes, each ` +
+          `\`{ calls, args?, count? }\`. With one route, write it as \`calls\` — a branch ` +
+          `list of one is a route pretending to be a choice.`,
+      );
+    }
+    expect.anyOf = anyOf.map((branch, i) => parsePath(branch, source, `expect.anyOf[${i}]`));
+  }
+
   const forbid = raw["forbid"];
   if (forbid !== undefined) {
     if (!isStringList(forbid)) {
@@ -131,50 +166,11 @@ function parseExpect(raw: unknown, source: string): Expect {
     expect.forbid = forbid;
   }
 
-  const args = raw["args"];
-  if (args !== undefined) {
-    if (!isObject(args)) throw new CaseError(`${source}: \`expect.args\` must be an object`);
-    // The two spellings, told apart by whether the values are objects. An
-    // argument can only be a `Scalar`, so this cannot be ambiguous — see
-    // `Expect.args`. A MIXTURE is refused rather than guessed at, because
-    // guessing would silently drop half the assertions.
-    const values = Object.values(args);
-    const objects = values.filter((v) => isObject(v)).length;
-    if (objects > 0 && objects !== values.length) {
-      throw new CaseError(
-        `${source}: \`expect.args\` mixes the two spellings. Either a flat map of ` +
-          `arguments for the last verb in \`calls\`, or a map of verb name to arguments.`,
-      );
-    }
-    if (objects === 0 && !isScalarMap(args)) {
-      throw new CaseError(`${source}: \`expect.args\` values must be string/number/boolean/null`);
-    }
-    if (objects > 0) {
-      for (const [verb, inner] of Object.entries(args)) {
-        if (!isScalarMap(inner)) {
-          throw new CaseError(`${source}: \`expect.args.${verb}\` must be a map of scalars`);
-        }
-      }
-    }
-    expect.args = args as NonNullable<Expect["args"]>;
-  }
+  const args = parseArgs(raw["args"], source, "expect.args");
+  if (args !== undefined) expect.args = args;
 
-  const count = raw["count"];
-  if (count !== undefined) {
-    if (typeof count === "number") {
-      if (!Number.isFinite(count)) throw new CaseError(`${source}: \`expect.count\` must be finite`);
-      expect.count = count;
-    } else if (isObject(count)) {
-      for (const [verb, n] of Object.entries(count)) {
-        if (typeof n !== "number" || !Number.isFinite(n)) {
-          throw new CaseError(`${source}: \`expect.count.${verb}\` must be a number`);
-        }
-      }
-      expect.count = count as Record<string, number>;
-    } else {
-      throw new CaseError(`${source}: \`expect.count\` must be a number or a map of them`);
-    }
-  }
+  const count = parseCount(raw["count"], source, "expect.count");
+  if (count !== undefined) expect.count = count;
 
   const commits = raw["commits"];
   if (commits !== undefined) {
@@ -226,6 +222,81 @@ function parseExpect(raw: unknown, source: string): Expect {
   }
 
   return expect;
+}
+
+/** One branch of `expect.anyOf`: a whole route, validated with exactly the
+ *  same rules as the top-level fields it stands in for. */
+function parsePath(raw: unknown, source: string, at: string): ExpectPath {
+  if (!isObject(raw)) {
+    throw new CaseError(`${source}: \`${at}\` must be \`{ calls, args?, count? }\``);
+  }
+  for (const key of Object.keys(raw)) {
+    if (key !== "calls" && key !== "args" && key !== "count") {
+      throw new CaseError(
+        `${source}: \`${at}.${key}\` is not part of a route. A branch holds \`calls\`, ` +
+          `\`args\` and \`count\`; everything else belongs at the top level of \`expect\`.`,
+      );
+    }
+  }
+  const calls = raw["calls"];
+  if (!isStringList(calls) || calls.length === 0) {
+    throw new CaseError(
+      `${source}: \`${at}.calls\` must be a non-empty list of verb names. A branch IS a ` +
+        `route, so it has to say what the route is.`,
+    );
+  }
+  const args = parseArgs(raw["args"], source, `${at}.args`);
+  const count = parseCount(raw["count"], source, `${at}.count`);
+  return {
+    calls,
+    ...(args === undefined ? {} : { args }),
+    ...(count === undefined ? {} : { count }),
+  };
+}
+
+function parseArgs(raw: unknown, source: string, at: string): Expect["args"] | undefined {
+  if (raw === undefined) return undefined;
+  if (!isObject(raw)) throw new CaseError(`${source}: \`${at}\` must be an object`);
+  // The two spellings, told apart by whether the values are objects. An
+  // argument can only be a `Scalar`, so this cannot be ambiguous — see
+  // `Expect.args`. A MIXTURE is refused rather than guessed at, because
+  // guessing would silently drop half the assertions.
+  const values = Object.values(raw);
+  const objects = values.filter((v) => isObject(v)).length;
+  if (objects > 0 && objects !== values.length) {
+    throw new CaseError(
+      `${source}: \`${at}\` mixes the two spellings. Either a flat map of ` +
+        `arguments for the last verb in \`calls\`, or a map of verb name to arguments.`,
+    );
+  }
+  if (objects === 0 && !isScalarMap(raw)) {
+    throw new CaseError(`${source}: \`${at}\` values must be string/number/boolean/null`);
+  }
+  if (objects > 0) {
+    for (const [verb, inner] of Object.entries(raw)) {
+      if (!isScalarMap(inner)) {
+        throw new CaseError(`${source}: \`${at}.${verb}\` must be a map of scalars`);
+      }
+    }
+  }
+  return raw as NonNullable<Expect["args"]>;
+}
+
+function parseCount(raw: unknown, source: string, at: string): Expect["count"] | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) throw new CaseError(`${source}: \`${at}\` must be finite`);
+    return raw;
+  }
+  if (isObject(raw)) {
+    for (const [verb, n] of Object.entries(raw)) {
+      if (typeof n !== "number" || !Number.isFinite(n)) {
+        throw new CaseError(`${source}: \`${at}.${verb}\` must be a number`);
+      }
+    }
+    return raw as Record<string, number>;
+  }
+  throw new CaseError(`${source}: \`${at}\` must be a number or a map of them`);
 }
 
 /**

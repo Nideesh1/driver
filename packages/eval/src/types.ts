@@ -27,7 +27,7 @@
  */
 
 import type { Driver, Manifest, Result, Scalar, Snapshot, VerbKind } from "driverkit";
-import type { StopReason, Think } from "@driverkit/agent";
+import type { StopReason, Think } from "driverkit/agent";
 
 /**
  * A bound on a number of steps: `6`, `"<=6"`, `"<6"`.
@@ -50,13 +50,36 @@ export interface SetupCall {
 }
 
 /**
+ * One route through the app, as a case expects it: the verbs, their arguments
+ * and the counts they report.
+ *
+ * It exists so that `Expect.anyOf` can hold more than one of them. An app
+ * where two different sequences are both right — a bulk verb with a predicate,
+ * or a screen-scoped verb that means the same thing once you are on the screen
+ * — cannot be written down as one ordered `calls`, and a case that names only
+ * the author's route FAILS THE AGENT FOR FINDING THE OTHER ONE. See
+ * `Expect.anyOf`.
+ */
+export interface ExpectPath {
+  /** As `Expect.calls`: a subsequence, in order. */
+  calls: string[];
+  /** As `Expect.args`, scoped to this route. A flat map applies to the last
+   *  verb in THIS route's `calls`. */
+  args?: Record<string, Scalar> | Record<string, Record<string, Scalar>>;
+  /** As `Expect.count`, scoped to this route — which is the point: the verb
+   *  that reports the number is route-specific, and the number is not. */
+  count?: number | Record<string, number>;
+}
+
+/**
  * What should happen. Every field is optional and a case must state at least
  * one, because an expectation of nothing is a case that cannot fail.
  *
  * Read the fields as four different questions, in descending order of what
  * getting them wrong costs you: did data move that should not have
- * (`commits`), did it choose the right verb (`calls`, `forbid`), did it pass
- * the right arguments (`args`, `count`), and how far did it wander (`steps`).
+ * (`commits`), did it choose the right verb (`calls`, `forbid`, `anyOf`), did
+ * it pass the right arguments (`args`, `count`), and how far did it wander
+ * (`steps`).
  */
 export interface Expect {
   /**
@@ -74,6 +97,39 @@ export interface Expect {
    * fail.
    */
   calls?: string[];
+  /**
+   * Several routes, any one of which is right. **The field that stops a case
+   * punishing a better answer.**
+   *
+   * `calls` asserts ONE ordered route, and an app usually has more than one.
+   * The demo has two honest ways to accept a company's pending contacts —
+   * `select-where(company, status)` from anywhere, or `open-company` then the
+   * screen-scoped `select-pending-here` — and a model that takes the second
+   * has not made a mistake; it has used the verb that means exactly "the
+   * pending ones in front of me". A case naming only the first scored that
+   * 0/3 and the finding was about the case.
+   *
+   * Each branch is a whole route with its own `args` and `count`, because the
+   * verb that reports the number differs between them and the NUMBER DOES
+   * NOT. The run passes if any branch is satisfied, and the report names the
+   * route that was taken; when none is, every branch's reason is printed, so
+   * "it did something else entirely" still reads as a failure rather than as
+   * a list of near misses.
+   *
+   * Mutually exclusive with `calls`, `args` and `count`: a case states one
+   * route or several, and a top-level route beside a list of them would be
+   * two formats for the same claim. `forbid`, `commits`, `refused` and
+   * `steps` stay at the top level, because they are claims about the whole
+   * run and not about a route — a forbidden verb is forbidden whichever way
+   * the agent went.
+   *
+   * **Reach for the end state first.** Two branches are an honest statement
+   * that your app has two right answers; six are an author enumerating a
+   * model's whims. If what you care about is that 112 rows moved and nothing
+   * else did, assert the commit and the count it reported and leave the route
+   * alone.
+   */
+  anyOf?: ExpectPath[];
   /**
    * Verbs that must not be called at all.
    *

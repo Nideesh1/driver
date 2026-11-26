@@ -25,10 +25,10 @@
  * **The model is a `Think`.** This file never constructs an HTTP client, never
  * reads an environment variable and never sees an API key; the CLI's default
  * is the demo's own `/api/chat`, which keeps the key on the server. See
- * `backendThink` in `@driverkit/agent`.
+ * `backendThink` in `driverkit/agent`.
  */
 
-import { drive } from "@driverkit/agent";
+import { drive } from "driverkit/agent";
 import type { Driver, Manifest, Scalar } from "driverkit";
 
 import { cacheKey } from "./case.ts";

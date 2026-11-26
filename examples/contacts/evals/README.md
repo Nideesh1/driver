@@ -13,10 +13,10 @@ DK_PORT=8771 node --experimental-strip-types packages/eval/src/cli.ts examples/c
 
 | case | the failure it is watching for |
 |---|---|
-| `count-only` | a `describe` that changes data, and the seeded 238 |
+| `count-only` | a `describe` that changes data, and the seeded 238 — and whether the `describe` says it answers a `how many` question without navigating |
 | `named-contact` | **the recorded failure**: one named person taken as her whole company (410 rows) |
-| `describe-count-commit` | the pairing rule end to end, with 112 asserted between the two calls |
-| `empty-selection` | "accept them" with nothing selected: refuse, do not invent a selection |
+| `describe-count-commit` | the pairing rule end to end, with 112 asserted between the two calls, by whichever of the two honest routes the agent takes (`anyOf`) |
+| `empty-selection` | "accept them" with nothing selected: do not invent a selection |
 | `cross-screen` | drift on a five-verb job across three screens |
 | `navigate` | the cheapest possible ask, as a control |
 | `filter` | a screen-scoped verb reached without being refused first |
@@ -26,3 +26,10 @@ DK_PORT=8771 node --experimental-strip-types packages/eval/src/cli.ts examples/c
 
 Four of the ten expect the agent to **not act**. That is the ratio on purpose: the cases where
 nothing should happen are the ones nothing else in the repository checks.
+
+Three of these cases were rewritten after the first live run, because the agent was right and the case was
+wrong: one asserted a single route where the app has two, one attributed a count by position and caught a
+polite `clear-selection` instead, and one required an attempt-and-refusal that better screen prose makes
+unnecessary. The general lesson is in
+[`skills/driverkit/references/eval.md`](../../../skills/driverkit/references/eval.md) under "how to write a
+case that does not punish a better answer"; it is the trap every adopter will meet.

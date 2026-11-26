@@ -32,9 +32,12 @@
     "eval": "node --experimental-strip-types src/cli.ts",
     "//test": "Run from the repository root with the rest: packages/*/test/*.test.ts"
   },
+  "//dependencies": [
+    "One: `driverkit`. The agent loop it drives is `driverkit/agent`, a subpath of",
+    "that same install, so there is no second package to keep in step."
+  ],
   "dependencies": {
-    "driverkit": "0.0.0",
-    "@driverkit/agent": "0.0.0"
+    "driverkit": "0.0.0"
   },
   "keywords": [
     "eval",

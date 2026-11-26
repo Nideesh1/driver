@@ -218,7 +218,7 @@ class RawConnection:
     out here is the point: this is the shape of request that arrives from any
     client that streams a body without counting it first — Node's
     ``http.request`` with no ``content-length`` among them, which is exactly
-    what ``packages/relay/test/sse-client.ts`` is.
+    what ``packages/driverkit/test/sse-client.ts`` is.
     """
 
     def __init__(self, url: str, timeout: float = 10.0) -> None:

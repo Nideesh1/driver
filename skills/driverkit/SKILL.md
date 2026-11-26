@@ -1,6 +1,6 @@
 ---
 name: driverkit
-description: Make a web app drivable by an agent with driverkit — the app declares verbs, an agent calls them by name, no pixels and no selectors. Use when the user wants to let an agent or chatbot operate their own app ("let Claude drive this UI", "add an agent panel to my app"), write or review a driverkit verb list, mount() a driver, add the @driverkit/widget chat panel and its /api/chat endpoint, drive a tab from another process through the relay and MCP, set up tab-token auth for a multi-user deployment, adopt an app that has no store with @driverkit/adapters, or troubleshoot a tab that connects and does nothing.
+description: Make a web app drivable by an agent with driverkit — the app declares verbs, an agent calls them by name, no pixels and no selectors. Use when the user wants to let an agent or chatbot operate their own app ("let Claude drive this UI", "add an agent panel to my app"), write or review a driverkit verb list, mount() a driver, add the `driverkit/widget` chat panel and its /api/chat endpoint, drive a tab from another process through the relay and MCP, set up tab-token auth for a multi-user deployment, reach a button nobody wrote a verb for with `driverkit/controls`, or troubleshoot a tab that connects and does nothing.
 allowed-tools: Bash(npm test*) Bash(npm run build*) Bash(curl -s http://127.0.0.1:*) Bash(python3 -m unittest*)
 ---
 
@@ -11,10 +11,11 @@ function it already had) and a **snapshot** (what a person could see right now),
 name. No screenshots — an image costs ~7× the tokens and still cannot say what a button does. No selectors —
 nothing breaks when a class is renamed. No model and no API key in the library.
 
-Two integrations, same verbs: a **chat panel in the corner of the app** (`@driverkit/widget`, no transport at all,
+Two integrations, same verbs: a **chat panel in the corner of the app** (`driverkit/widget`, no transport at all,
 the key stays on the app's backend) and an **agent in another process** (the tab dials out to a **relay**, the agent
-talks to the relay over MCP). Packages: `driverkit` (core `mount()`), `@driverkit/widget`, `@driverkit/agent`,
-`@driverkit/adapters`, `@driverkit/browser`, `@driverkit/relay`, and `driverkit` on PyPI (relay + MCP + auth).
+talks to the relay over MCP). One npm package with subpaths: `driverkit` (the registry and `mount()`),
+`driverkit/widget`, `driverkit/agent`, `driverkit/controls`, `driverkit/browser`, `driverkit/relay` (Node only),
+and `driverkit` on PyPI (relay + MCP + auth). One install, one version for everything.
 `PROTOCOL.md` at the repo root is the wire contract and is the thing to read first.
 
 ## State of the library — say this before recommending it
@@ -42,7 +43,7 @@ talks to the relay over MCP). Packages: `driverkit` (core `mount()`), `@driverki
 | a chat panel inside their own app (case 1) | `mountWidget(driver, { think: backendThink("/api/chat") })` + that endpoint | [widget.md](references/widget.md) |
 | drive the app from another process, a voice assistant, Claude Desktop (case 2) | relay (standalone or ASGI-mounted) + `driverkit-mcp` | [relay-mcp.md](references/relay-mcp.md) |
 | deploy for more than one person | signed tab tokens the app's backend mints; anonymous visitors | [auth.md](references/auth.md) |
-| adopt an app with no store, or only buttons | the three-tier ladder, `clickHandle`, `fromDom` | [adapters.md](references/adapters.md) |
+| let an agent reach a button nobody wrote a verb for | `press`, `type-into`, `commit-control` over elements marked `data-dk-control` | [controls.md](references/controls.md) |
 | write another client, or debug the wire | frames, the status table, `/watch`, reserved refusals | [protocol.md](references/protocol.md) |
 | install it today, build it, run the example | workspace build, `dist`, type stripping, uv | [packaging.md](references/packaging.md) |
 | fix "the tab connects and nothing happens" | | [troubleshooting.md](references/troubleshooting.md) |
@@ -54,8 +55,10 @@ Read the matching reference before editing code.
 Installing driverkit is ten minutes. **Writing the verb list is a judgement call over somebody's codebase**, and
 getting it wrong is what costs them. In short, and at length in [authoring-verbs.md](references/authoring-verbs.md):
 
-1. **Find the actions that already exist as functions** — a store, an API client, a `lib/` layer. Those are tier-1
-   verbs. The ones trapped inside JSX click handlers are tier-2 ([adapters.md](references/adapters.md)).
+1. **Find the actions that already exist as functions** — a store, an API client, a `lib/` layer. Those are the
+   verbs worth having. For one trapped inside a JSX click handler, mark the button `data-dk="name"` and write the
+   four-line click helper yourself (the repo README's "Your app has no store" and click-handler sections); for the
+   asks no verb list anticipates, add [controls.md](references/controls.md).
 2. **Name them as intents in the user's vocabulary**, not as wrappers over internals: `park`, not `setLane`. An
    illegal move should be **inexpressible**, not refused.
 3. **Declare `kind` on every verb**, and get `commit` right. A `commit` mislabelled `read` tells an agent an
@@ -125,14 +128,14 @@ const driver = mount({
 
 Case 1 — the panel (commits are confirmed with the person by default):
 ```ts
-import { mountWidget } from "@driverkit/widget";
-import { backendThink } from "@driverkit/agent";
+import { mountWidget } from "driverkit/widget";
+import { backendThink } from "driverkit/agent";
 mountWidget(driver, { think: backendThink("/api/chat") });   // you must write /api/chat — widget.md
 ```
 
 Case 2 — from outside (`relay: ""` = same origin, so one process and no CORS):
 ```ts
-import { connect } from "@driverkit/browser";
+import { connect } from "driverkit/browser";
 connect(driver, { relay: "", app: "Contacts", token: () => fetchToken() });  // a getter, never a string
 ```
 ```sh
@@ -142,7 +145,7 @@ driverkit-mcp --relay http://127.0.0.1:7777 --tab <id>
 
 ## Check it works
 
-- `npm test` (builds first — the widget needs a built `@driverkit/agent` on disk) and, in `python/`,
+- `npm test` (builds first — `test/packaging.test.ts` asks what the package publishes) and, in `python/`,
   `python3 -m unittest discover -s tests -t tests`.
 - Run the example: `python3 examples/contacts/server.py` with `ANTHROPIC_API_KEY` set, then
   `http://127.0.0.1:8770/examples/contacts/app/`. No npm install and no bundler — the server strips types as it

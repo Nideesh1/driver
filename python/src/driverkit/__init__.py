@@ -14,7 +14,7 @@ Four things live here, and they are the whole backend side of PROTOCOL.md:
   side, the minter that says so. It grants nothing; see
   :mod:`driverkit.auth`.
 * :class:`driverkit.Relay`, the relay itself — the one place a browser tab and
-  an agent can both reach. A port of ``packages/relay/src/relay.ts``, kept
+  an agent can both reach. A port of ``packages/driverkit/src/relay/relay.ts``, kept
   behaviour-for-behaviour identical to it, because two relays that differ would
   be worse than either.
 * two ways to run that relay: :func:`driverkit.asgi.relay_asgi` mounts it into

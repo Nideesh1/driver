@@ -4,11 +4,12 @@
   "packageManager": "pnpm@10.28.2",
   "//workspaces": [
     "Declared for npm as well as pnpm-workspace.yaml, and not as a second opinion:",
-    "it is what creates node_modules/driverkit and node_modules/@driverkit/* as links",
-    "to packages/*. Those links are how a bare `driverkit` import resolves at all --",
-    "there is no `paths` mapping, deliberately, so the repository typechecks the same",
-    "way a consumer does: through each package's own `exports`. pnpm does the same",
-    "thing from its own file; both are listed so neither package manager is special."
+    "it is what creates node_modules/driverkit as a link to packages/driverkit.",
+    "That link is how a bare `driverkit` or `driverkit/widget` import resolves at",
+    "all -- there is no `paths` mapping, deliberately, so the tests and the demo",
+    "resolve the same way a consumer does: through the package's own `exports`,",
+    "including the `node` condition that keeps the relay off a page. pnpm does the",
+    "same thing from its own file; both are listed so neither manager is special."
   ],
   "workspaces": [
     "packages/*"
@@ -18,17 +19,26 @@
     "clean": "tsc -b tsconfig.build.json --clean",
     "typecheck": "tsc -p tsconfig.json",
     "//test": [
-      "The build runs first, and it has to. `@driverkit/widget` imports `drive` from",
-      "`@driverkit/agent` at RUNTIME, and that bare specifier resolves through the",
-      "workspace link to `@driverkit/agent`'s `exports`, which now name `dist/`. So",
-      "the widget tests need a built agent on disk. Everything else between packages",
-      "is `import type`, which type stripping erases, so the other five suites run",
-      "from source either way."
+      "The build runs first. Nothing in the suite imports `dist/` directly -- every",
+      "test reaches into `../src/*.ts` by relative path -- but `test/packaging.test.ts`",
+      "asks what the package publishes, and that question needs the built files on",
+      "disk. It skips itself when they are absent rather than passing vacuously, and",
+      "a skipped packaging test is how a packaging regression would get through."
     ],
-    "test": "npm run build && node --experimental-strip-types --test packages/*/test/*.test.ts"
+    "test": "npm run build && node --experimental-strip-types --test packages/*/test/*.test.ts",
+    "//e2e": [
+      "The demo in a real browser: the one thing the unit suite cannot do, since",
+      "every visual claim in them is asserted against `test/fake-dom.ts`. Needs a",
+      "browser on disk -- `npx playwright install chromium`, or DK_CHANNEL=chrome to",
+      "use the Chrome you already have. See e2e/README.md. Not part of `npm test`:",
+      "it starts a server and a browser, and `npm test` must stay a pure function of",
+      "the source."
+    ],
+    "e2e": "node --test e2e/smoke.spec.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.7",
+    "playwright": "1.65.1",
     "typescript": "^5.9.2"
   },
   "dependencies": {

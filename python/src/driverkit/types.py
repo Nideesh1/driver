@@ -1,5 +1,5 @@
 """
-driverkit — the types, mirroring ``packages/core/src/types.ts``.
+driverkit — the types, mirroring ``packages/driverkit/src/core/types.ts``.
 
 These dataclasses are not a convenience layer over dicts; they are the Python
 end of a wire contract. Every field name here matches the TypeScript interface
@@ -523,11 +523,10 @@ class Page:
         page, total given    a window, and you know how big the whole is
         page, total absent   a window, and you do NOT know how big the whole is
 
-    The third is not an edge case, it is the normal output of
-    ``@driverkit/adapters`` reading a rendered table: the DOM cannot tell a
-    virtualised grid from a short list, so an adapter that had to supply a
-    total could only omit ``page`` — asserting completeness it cannot know — or
-    invent one. Requiring it here made the field unrepresentable from the wire
+    The third is not an edge case, it is the normal answer for any app whose
+    rows are read out of a rendered table: the DOM cannot tell a virtualised
+    grid from a short list, so code that had to supply a total could only omit
+    ``page`` — asserting completeness it cannot know — or invent one. Requiring it here made the field unrepresentable from the wire
     anyway: ``int(d["total"])`` raised ``KeyError`` on the commonest snapshot a
     DOM-adapted app produces, before the renderer was ever reached.
     """

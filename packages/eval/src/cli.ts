@@ -28,7 +28,7 @@
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { backendThink } from "@driverkit/agent";
+import { backendThink } from "driverkit/agent";
 import type { Driver } from "driverkit";
 
 import { cacheKey, CaseError } from "./case.ts";

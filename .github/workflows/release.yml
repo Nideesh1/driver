@@ -1,0 +1,152 @@
+# Release: push a tag like v0.1.0 and that tag IS the version.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+#   1. set the version from the tag in both halves, build both, run every test
+#   2. publish `driverkit` to PyPI (trusted publishing, OIDC, no token)
+#   3. publish `driverkit` to npm (NPM_TOKEN, with provenance)
+#
+# No version is ever hand-edited in a commit. `packages/driverkit/package.json`
+# and `python/pyproject.toml` both say 0.0.0 on `main` and are rewritten here,
+# so the two halves cannot drift apart and a release cannot ship the previous
+# version's number.
+#
+# `packages/eval` is a development tool. It is not published, it is not in
+# `tsconfig.build.json`, and nothing below touches it.
+#
+# The publish jobs need the build job, and the build job runs the whole suite.
+# A release that ships a red build is worse than no release workflow.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set version from tag
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          # Refuse anything that is not a plain release version rather than
+          # publishing whatever a mistyped tag happened to spell.
+          case "$V" in
+            [0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH"; exit 1 ;;
+          esac
+          sed -i "s/^version = \".*\"/version = \"$V\"/" python/pyproject.toml
+          # `--no-git-tag-version`: the tag already exists, that is what
+          # started this run. `--allow-same-version` so a re-run of a release
+          # is not a failure.
+          (cd packages/driverkit && npm version "$V" --no-git-tag-version --allow-same-version)
+          # Both halves, read back from the files, so a sed that silently
+          # matched nothing is a failed release and not a published 0.0.0.
+          PY=$(grep -m1 '^version = ' python/pyproject.toml | cut -d'"' -f2)
+          JS=$(node -p 'require("./packages/driverkit/package.json").version')
+          echo "python=$PY npm=$JS tag=$V"
+          [ "$PY" = "$V" ] && [ "$JS" = "$V" ] || { echo "::error::version did not take"; exit 1; }
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: ./node_modules/.bin/tsc -b tsconfig.build.json
+
+      - name: TypeScript suite
+        run: node --experimental-strip-types --test packages/*/test/*.test.ts
+
+      - name: Typecheck
+        run: ./node_modules/.bin/tsc -p tsconfig.json
+
+      - name: Python suite
+        working-directory: python
+        run: PYTHONPATH=src uv run --no-project python -m unittest discover -s tests -t tests
+
+      - name: Build the Python package
+        run: |
+          uv build --project python --out-dir dist
+          # The relay and the stdio MCP server are the whole point of the pip
+          # half, so a wheel that does not carry them is not a release.
+          uv run --no-project python -c "
+          import glob, zipfile
+          names = zipfile.ZipFile(glob.glob('dist/*.whl')[0]).namelist()
+          for want in ('driverkit/relay.py', 'driverkit/serve_relay.py', 'driverkit/mcp_server.py'):
+              assert want in names, f'{want} missing from the wheel'
+          print('wheel ok:', len(names), 'entries')
+          "
+
+      - name: Check what npm would publish
+        working-directory: packages/driverkit
+        run: |
+          npm pack --dry-run
+          # Every subpath, resolved the way a consumer resolves it. The
+          # packaging test covers this too; it is repeated here against the
+          # version that is about to be published rather than against main.
+          node -e "
+          const { createRequire } = require('node:module');
+          const r = createRequire(process.cwd() + '/');
+          for (const s of ['driverkit', 'driverkit/agent', 'driverkit/browser', 'driverkit/controls', 'driverkit/widget', 'driverkit/relay'])
+            console.log(s, '->', r.resolve(s));
+          "
+
+      - uses: actions/upload-artifact@v4
+        with: { name: python-dist, path: dist/ }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          # Exactly the `files` list in packages/driverkit/package.json, plus
+          # the manifest itself with the version this run wrote into it.
+          path: |
+            packages/driverkit/dist/
+            packages/driverkit/package.json
+            packages/driverkit/CONTROLS.md
+            packages/driverkit/README.md
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # PyPI trusted publishing: no token, no secret
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: python-dist, path: dist/ }
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true   # re-running a release must not fail on an already-published version
+
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write   # provenance attestation, alongside the token
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: npm-package, path: pkg/ }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish
+        working-directory: pkg
+        # `--ignore-scripts`: dist/ was built in the build job and there is
+        # nothing left to run. A publish must not execute a lifecycle script
+        # with a token in its environment.
+        run: npm publish --access public --provenance --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

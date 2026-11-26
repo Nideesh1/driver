@@ -45,14 +45,13 @@
       <main class="main" id="screen" aria-live="polite"></main>
     </div>
 
-    <!-- The built @driverkit/widget carries one bare specifier (it imports
-         drive() and commas() from @driverkit/agent at runtime). A
+    <!-- No import map. There used to be one, for a single bare specifier:
+         the built widget imported drive() from @driverkit/agent, and a
          <script type="module"> resolves relative URLs only -- there is no
-         node_modules walk in a browser -- so it needs naming here. This is
-         the ONLY such entry, and the packaging test pins that it stays so. -->
-    <script type="importmap">
-    { "imports": { "@driverkit/agent": "../../../packages/agent/dist/index.js" } }
-    </script>
+         node_modules walk in a browser. One package later that import is a
+         relative path inside dist/, so the whole entry is gone and the built
+         files load from a plain static host as they stand. The packaging test
+         pins that no bare specifier comes back. -->
     <script type="module" src="./app.js"></script>
   </body>
 </html>

@@ -27,16 +27,15 @@ THE MIRROR'S SHAPE. It is `<tmp>/packages/<pkg>/…`, the same shape as the
 repository, and not a flattened copy, because the suite does not only import
 its neighbours by relative path:
 
-  * `packages/adapters/test/controls.test.ts` imports the bare specifier
-    `driverkit`, which resolves only through the workspace links in
-    `node_modules` and each package's `exports`. The repository's
+  * `packages/driverkit/test/controls.test.ts` imports the bare specifier
+    `driverkit`, which resolves only through the workspace link in
+    `node_modules` and the package's own `exports`. The repository's
     `node_modules` is symlinked into the mirror so it resolves there to the
-    same built `dist/` file it resolves to from source — cross-package imports
-    go through `dist/` in both runs, so the comparison stays honest.
-  * `packages/relay/test/packaging.test.ts` reads the six `package.json`
-    manifests relative to its own URL and loads `dist/` in a child `node`. Each
-    manifest and `dist/` is copied in beside the stripped sources.
-  * `packages/relay/test/cross-impl.test.ts` runs the Python implementation
+    same built `dist/` file it resolves to from source.
+  * `packages/driverkit/test/packaging.test.ts` reads the `package.json`
+    manifest relative to its own URL and loads `dist/` in a child `node`. The
+    manifest and `dist/` are copied in beside the stripped sources.
+  * `packages/driverkit/test/cross-impl.test.ts` runs the Python implementation
     from `<root>/python/src`, which is symlinked in for the same reason — a
     test that skips itself in the mirror and runs from source is a hole in the
     comparison, not a pass.
@@ -69,7 +68,7 @@ from tsstrip import strip_types  # noqa: E402
 
 SPEC = re.compile(r'(from\s*|import\s*\(\s*)(["\'])([^"\']+)\.ts\2')
 
-PACKAGE_DIRS = ("core", "agent", "adapters", "browser", "relay", "widget")
+PACKAGE_DIRS = ("driverkit",)
 
 #: `(label, source, expected)`. `expected` is compared after each line has its
 #: runs of whitespace collapsed, because a deleted span leaves its spaces
@@ -79,7 +78,7 @@ CASES: list[tuple[str, str, str]] = [
     (
         # The `as string` ends at the ternary's `:`. Reading that `:` as part
         # of a conditional type ate the whole else-arm of this expression in
-        # `packages/browser/src/connect.ts`.
+        # `packages/driverkit/src/browser/connect.ts`.
         "an assertion in a ternary arm",
         'const mint =\n'
         '  typeof token === "function"\n'
@@ -139,7 +138,7 @@ CASES: list[tuple[str, str, str]] = [
     ),
     (
         # A type-parameter list where no operand precedes the `<`, so it cannot
-        # be a less-than: `packages/adapters/src/controls.ts`.
+        # be a less-than: `packages/driverkit/src/controls/controls.ts`.
         "a generic arrow in an object literal",
         'const o = {\n'
         '  map: <T extends object>(x: T): T => x,\n'
@@ -158,7 +157,7 @@ CASES: list[tuple[str, str, str]] = [
         'const g = (f ).go;\n',
     ),
     (
-        # Two modifiers in a row: `packages/relay/src/auth.ts`.
+        # Two modifiers in a row: `packages/driverkit/src/relay/auth.ts`.
         "chained member modifiers",
         'class E extends Error {\n'
         '  override readonly name = "E";\n'
@@ -174,7 +173,7 @@ CASES: list[tuple[str, str, str]] = [
     (
         # `as` inside a specifier clause renames a binding; erasing it leaves
         # the module with no such binding at all:
-        # `packages/widget/src/widget.ts`.
+        # `packages/driverkit/src/widget/widget.ts`.
         "an aliased import is not an assertion",
         'import { load as loadIt, type Gone, save } from "./m.ts";\n'
         'import * as ns from "./n.ts";\n'
@@ -189,7 +188,7 @@ CASES: list[tuple[str, str, str]] = [
     ),
     (
         # A binding pattern is not a block, so its `:` renames rather than
-        # annotating: `packages/adapters/src/controls.ts`.
+        # annotating: `packages/driverkit/src/controls/controls.ts`.
         "a renaming destructuring pattern",
         'const { controls: list, hidden } = enumerate();\n'
         'for (const { id: key } of list) use(key, hidden);\n',
@@ -301,6 +300,12 @@ def main() -> int:
             p
             for p in sorted((ROOT / "packages").rglob("*.ts"))
             if "dist" not in p.relative_to(ROOT / "packages").parts
+            # A `.d.ts` is declarations and nothing else, so a type stripper
+            # erases the whole file and what is left -- `declare module "x" {`
+            # -- is not JavaScript. The dev server never serves one either: a
+            # browser asks for the `.ts` modules, not for their ambient
+            # declarations. (`test/uri-templates.d.ts` is the only one.)
+            and not p.name.endswith(".d.ts")
         ]
         if not sources:
             print("no sources found", file=sys.stderr)
@@ -316,9 +321,9 @@ def main() -> int:
                 return 1
             dst.write_text(SPEC.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}.js{m.group(2)}", code))
 
-        # The repository's shape around the stripped sources: the manifests and
-        # built `dist/` the packaging test reads, and the workspace links that
-        # a bare `driverkit` specifier resolves through.
+        # The repository's shape around the stripped sources: the manifest and
+        # built `dist/` the packaging test reads, and the workspace link that a
+        # bare `driverkit` specifier resolves through.
         (out / "package.json").write_text('{"type":"module"}\n')
         for dir_ in PACKAGE_DIRS:
             pkg = out / "packages" / dir_
@@ -329,7 +334,7 @@ def main() -> int:
                 shutil.copytree(dist, pkg / "dist", dirs_exist_ok=True)
         for sibling in ("node_modules", "python"):
             # `node_modules` for the bare specifiers; `python` because
-            # `packages/relay/test/cross-impl.test.ts` puts `<root>/python/src`
+            # `packages/driverkit/test/cross-impl.test.ts` puts `<root>/python/src`
             # on a child interpreter's PYTHONPATH and skips itself without it.
             if (ROOT / sibling).is_dir():
                 (out / sibling).symlink_to(ROOT / sibling, target_is_directory=True)

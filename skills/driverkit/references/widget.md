@@ -1,12 +1,12 @@
 # Case 1 — the chat panel in the corner of your own app
 
 The page holds the driver, so **there is no transport at all**: the loop asks a model what to do and calls the verb
-in-process. Two packages: `@driverkit/widget` (plain DOM, a shadow root, no framework — it drops into a React, Vue
-or Rails app alike) and `@driverkit/agent` (the loop; no model client, no API key).
+in-process. Two subpaths of the one package: `driverkit/widget` (plain DOM, a shadow root, no framework — it drops
+into a React, Vue or Rails app alike) and `driverkit/agent` (the loop; no model client, no API key).
 
 ```ts
-import { mountWidget } from "@driverkit/widget";
-import { backendThink } from "@driverkit/agent";
+import { mountWidget } from "driverkit/widget";
+import { backendThink } from "driverkit/agent";
 
 const panel = mountWidget(driver, {
   think: backendThink("/api/chat"),
@@ -129,7 +129,7 @@ thrown: a bounded run is an outcome a UI renders, not a failure.
 ## Headless, without the panel
 
 ```ts
-import { drive } from "@driverkit/agent";
+import { drive } from "driverkit/agent";
 const out = await drive(driver, { think, task: "accept everyone at Acme", onBeforeCommit: myPolicy });
 // out.stop, out.text, out.steps, out.messages  — pass `messages` back as `history` to continue
 ```

@@ -73,7 +73,7 @@ clicked away mid-run, paged a different company's contact list and answered `ok`
 await driver.call("next-page", {}, { screen: "contacts", rev: read.rev });
 ```
 
-Omitting either opts out of that check, which is what every call did before these fields existed. `@driverkit/agent`
+Omitting either opts out of that check, which is what every call did before these fields existed. `driverkit/agent`
 hoists `screen` into every verb's tool schema the way it hoists `rev`, unless the app has claimed the name itself —
 `go(screen)` is a real verb in a real app, and the app's meaning wins.
 
@@ -185,7 +185,7 @@ arguments does not say which screen wanted it); your hook refuses everything els
 
 `goto` is reserved in the **weak** sense, unlike `wrong-screen`: an app that declares a verb of its own named
 `goto` keeps it and the hook is never called, the same rule as the `rev` and `screen` arguments
-`@driverkit/agent` hoists into every tool schema. The app's meaning wins over ours. Declaring `screens` with no
+`driverkit/agent` hoists into every tool schema. The app's meaning wins over ours. Declaring `screens` with no
 `navigate` publishes the map and offers no `goto` — useful on its own, and `mount()` says so once, because the
 likelier reading is that the hook was forgotten.
 

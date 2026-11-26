@@ -1,23 +1,19 @@
 {
-  // `tsc -b tsconfig.build.json` builds every package, in dependency order.
+  // `tsc -b tsconfig.build.json` builds the published package.
   //
-  // A solution-style config: no files of its own, only references. `tsc -b`
-  // topologically sorts them, so `driverkit` is built before the five packages
-  // that import its types and `@driverkit/agent` before `@driverkit/widget`,
-  // which is the only cross-package import that survives to runtime.
+  // It used to list six projects and derive a build order from their
+  // references. There is one now, and the ordering problem went with the
+  // split: the areas under `packages/driverkit/src` import each other by
+  // relative path, so they are one program.
   //
-  // Separate from `tsconfig.json` and `tsconfig.src.json` on purpose. Those two
-  // are whole-repo typechecks with `noEmit`, and they see every package as one
-  // program -- useful for "is the repository consistent", useless for "what
-  // does each package publish". This one answers the second question, which is
-  // the one `npm install` asks.
+  // Kept as a solution-style config rather than inlined, for two reasons: it
+  // is the file every script, the README and the plugin already name, and it
+  // is where a second publishable package would be added if there is ever a
+  // reason for one. `packages/eval` is not that -- it is a development tool
+  // nobody installs, it publishes no `dist`, and it is deliberately absent
+  // here. The repo-wide `tsconfig.json` typechecks it with everything else.
   "files": [],
   "references": [
-    { "path": "./packages/core" },
-    { "path": "./packages/agent" },
-    { "path": "./packages/adapters" },
-    { "path": "./packages/browser" },
-    { "path": "./packages/relay" },
-    { "path": "./packages/widget" }
+    { "path": "./packages/driverkit" }
   ]
 }

@@ -10,17 +10,18 @@ you did not write.
 Do not start from the UI. Start from what already exists as a callable function — those verbs are cheap, precise and
 can count.
 
-| Look for | Likely verbs | Tier |
+| Look for | Likely verbs | What `run` is |
 |---|---|---|
-| a store / reducer / signal module (`store.ts`, `useXStore`, `*Slice.ts`, Pinia, MobX, Zustand) | its actions, almost one-to-one | 1 |
-| an API client or service layer (`lib/api.ts`, `services/`, generated SDK, tRPC router) | the mutations and the list queries | 1 |
-| anything that takes a **filter or predicate** and acts on many rows server-side | the `describe`/`commit` pair — the valuable ones | 1 |
-| a URL router (`router.push`, `navigate`) | `open`, `go-to-x` reads | 1 |
-| `onClick={...}` with the logic inline, a form's `onSubmit`, a grid's own toolbar | clicks via `data-dk` | 2 |
-| rows that only exist in a template or a third-party grid | `rowsFromTable` + `revFromMutations` | 3 |
+| a store / reducer / signal module (`store.ts`, `useXStore`, `*Slice.ts`, Pinia, MobX, Zustand) | its actions, almost one-to-one | a function the app already has |
+| an API client or service layer (`lib/api.ts`, `services/`, generated SDK, tRPC router) | the mutations and the list queries | a function the app already has |
+| anything that takes a **filter or predicate** and acts on many rows server-side | the `describe`/`commit` pair — the valuable ones | a function the app already has |
+| a URL router (`router.push`, `navigate`) | `open`, `go-to-x` reads | a function the app already has |
+| `onClick={...}` with the logic inline, a form's `onSubmit`, a grid's own toolbar | clicks via `data-dk` | a four-line click helper you write |
+| rows that only exist in a template or a third-party grid | none — this is `visible()`, not a verb | a `querySelectorAll().map()` you write (repo README, "Your app has no store") |
+| anything a person can press that no verb covers | `press`, `type-into`, `commit-control` | `driverkit/controls` ([controls.md](controls.md)) |
 
 Searches that find these fast: `grep -rn "export function\|export const.*=.*async" src/lib src/store`,
-`grep -rn "onClick=\|@click\|v-on:click" src | wc -l` (the size of the tier-2 pile),
+`grep -rn "onClick=\|@click\|v-on:click" src | wc -l` (the size of the inline-handler pile),
 `grep -rln "useMutation\|fetch(\|axios\." src`.
 
 Then **cut the list down**. A verb per button is the wrong shape: it is a big static half, it teaches the model your
@@ -71,7 +72,7 @@ Two of those readings used to be wrong in ways that bit.
 
 `read` does not say "changes nothing", because the commonest verb a
 multi-screen app has — `go`, `open-contact`, `back` — moves the person's screen
-out from under them, and the old wording told an agent that was free. The ladder
+out from under them, and the old wording told an agent that was free. `kind`
 is about **what a wrong call costs you**, and a wrong navigation costs exactly
 what a wrong read costs: the person has to look somewhere else. The two
 promises worth making are the ones that decide whether the next call is safe,
@@ -103,8 +104,8 @@ How to decide, in order:
 2. Does it change selection, filter, sort, page or which record is open, and nothing else? **`describe`** if it
    resolves a predicate and can report a count; `read` if it is a plain navigation (`next-page`, `open`).
 3. Does it only read? **`read`.**
-4. Is it a tier-2 click? **No adapter can infer the kind — read the handler and declare it yourself.** Nothing
-   checks that you were right.
+4. Is it a click on a button you marked, or a control? **Nothing can infer the kind — read the handler and
+   declare it yourself.** Nothing checks that you were right.
 
 Reclassifying a verb from `describe` to `commit` changes the manifest fingerprint, so cached copies are invalidated.
 That is deliberate; it is also why guessing now is not free.

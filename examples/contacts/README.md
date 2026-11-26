@@ -41,8 +41,12 @@ python3 examples/contacts/server.py   # DK_MODEL=claude-sonnet-5-5  DK_LLM_BASE=
 open http://127.0.0.1:8770/examples/contacts/app/
 ```
 
-No `npm install`, no build step, no bundler: the server strips the types out of
-the library's `.ts` sources as it serves them. Python standard library only.
+`npm install && npm run build` first: the page loads the library's built
+`dist/` files over relative paths. No bundler and, since the six packages
+became one, no import map either — the emitted JavaScript names no bare
+specifier at all. The server itself is Python standard library only, and it
+still strips the types out of any `.ts` it is asked for, which is how
+`check.mjs` and `verify_app.py` run the sources the page does not load.
 
 Other environment variables, all optional: `DK_PORT` (8770), `DK_HOST`
 (127.0.0.1), `DK_MAX_TOKENS` (2048), and `DK_LLM_IP` — connect to that address

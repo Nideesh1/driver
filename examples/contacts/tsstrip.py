@@ -3,7 +3,7 @@ Type-stripping, in the server, so a browser can import the library's `.ts`
 files unchanged.
 
 The problem this solves: driverkit's packages are TypeScript and they import
-each other with explicit `.ts` specifiers (`from "../../core/src/types.ts"`).
+each other with explicit `.ts` specifiers (`from "../core/types.ts"`).
 A browser will happily fetch those URLs — it routes on the MIME type, not the
 extension — but it cannot parse `const x: string = "a"`. There is no build step
 in this example and no bundler to add one, so something has to remove the types

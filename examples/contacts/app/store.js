@@ -75,7 +75,7 @@
  * app whose word the next agent will not recognise.
  */
 
-import { mount, selectionId } from "../../../packages/core/dist/registry.js";
+import { mount, selectionId } from "../../../packages/driverkit/dist/core/registry.js";
 import {
   COMPANIES,
   OWNERS,
@@ -506,7 +506,8 @@ export function createApp(onChange = () => {}, options = {}) {
           (store.selected.size
             ? ` ${store.selected.size} contacts are still selected from another screen and a ` +
               "commit verb would act on them from here."
-            : ""),
+            : " nothing is selected anywhere, so a commit verb that acts on the selection " +
+              "has nothing to act on."),
       };
     },
 
@@ -973,9 +974,12 @@ export function createApp(onChange = () => {}, options = {}) {
         name: "select-where",
         kind: "describe",
         describe:
-          "select every contact at one company, optionally only those with one status. " +
-          "Selects across the whole table and not just the page or the screen you are on, " +
-          "replaces any existing selection, and reports how many it matched.",
+          "select every contact at one company, optionally only those with one status, and " +
+          "report HOW MANY there are. This is also the verb that answers a `how many` " +
+          "question: one call from any screen, no navigating and nothing to read off a " +
+          "table, and the `count` it returns is the answer. It matches across the whole " +
+          "table and not just the page or the screen you are on, and replaces any existing " +
+          "selection.",
         args: {
           company: {
             type: "string",

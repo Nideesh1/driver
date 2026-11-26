@@ -27,9 +27,9 @@
  * real history move is the one case that writes INTO the store.
  */
 
-import { mountWidget } from "../../../packages/widget/dist/widget.js";
-import { connect } from "../../../packages/browser/dist/connect.js";
-import { backendThink } from "../../../packages/agent/dist/backend.js";
+import { mountWidget } from "../../../packages/driverkit/dist/widget/widget.js";
+import { connect } from "../../../packages/driverkit/dist/browser/connect.js";
+import { backendThink } from "../../../packages/driverkit/dist/agent/backend.js";
 import { createApp } from "./store.js";
 import { renderScreen } from "./screens.js";
 import { href, parse, same } from "./router.js";
@@ -57,7 +57,7 @@ let writingHash = false;
  * this variable and is not called until an agent asks for a commit, by which
  * time it is set.
  *
- * @type {import("../../../packages/widget/dist/widget.js").Widget | undefined}
+ * @type {import("../../../packages/driverkit/dist/widget/widget.js").Widget | undefined}
  */
 let panel;
 

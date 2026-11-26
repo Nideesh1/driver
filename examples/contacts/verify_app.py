@@ -99,14 +99,14 @@ def main() -> int:
             target.write_text(rewrite(text))
         (out / "package.json").write_text('{"type":"module"}\n')
 
-        # The mirror needs the repo's `node_modules` to resolve ONE bare
-        # specifier: `packages/widget/src/widget.ts` imports `@driverkit/agent`
-        # by name, because the widget depends on the agent package at runtime
-        # rather than only for its types. A browser resolves that through the
-        # import map in `index.html`; Node resolves it by walking up for a
-        # `node_modules`, and the mirror lives in a temp directory with none
-        # above it. Symlinked rather than copied: it is only ever read, and the
-        # workspace links in it point back here anyway.
+        # The mirror needs the repo's `node_modules` for any bare specifier
+        # the fetched sources carry. The library itself no longer has one --
+        # the widget's `drive()` import became a relative path when the six
+        # packages became one, which is also why `index.html` no longer needs
+        # an import map -- but `check.mjs` imports `uri-templates` as the RFC
+        # 6570 oracle, and Node resolves that by walking up for a
+        # `node_modules` the mirror's temp directory has none of. Symlinked
+        # rather than copied: it is only ever read.
         links = pathlib.Path(__file__).resolve().parents[2] / "node_modules"
         if links.is_dir():
             (out / "node_modules").symlink_to(links, target_is_directory=True)

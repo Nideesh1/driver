@@ -106,7 +106,7 @@ def _handler_class(relay: Relay) -> type[BaseHTTPRequestHandler]:
             Nothing exotic sends chunked, either: any client that streams a
             body without counting it first does, which includes Node's own
             ``http.request`` whenever ``content-length`` is not set by hand —
-            and ``packages/relay/test/sse-client.ts`` is such a client.
+            and ``packages/driverkit/test/sse-client.ts`` is such a client.
             """
             encodings = [
                 part.strip().lower()

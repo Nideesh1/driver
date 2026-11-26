@@ -1,7 +1,7 @@
 /**
  * A tiny app with the pairing in it, plus a scripted `think`.
  *
- * Shaped like `@driverkit/agent`'s own test app on purpose — a `describe` that
+ * Shaped like `driverkit/agent`'s own test app on purpose — a `describe` that
  * takes a predicate and reports a count, a `commit` that takes none and acts
  * on the selection — because that pair is what this harness measures and a toy
  * without it would exercise nothing. The numbers are small and fixed so a test
@@ -16,9 +16,9 @@
  * them.
  */
 
-import { mount } from "../../core/src/registry.ts";
-import type { Driver, Scalar, Snapshot, VerbContext } from "../../core/src/types.ts";
-import type { Think, ThinkInput, ThinkResult, ToolCall } from "../../agent/src/types.ts";
+import { mount } from "../../driverkit/src/core/registry.ts";
+import type { Driver, Scalar, Snapshot, VerbContext } from "../../driverkit/src/core/types.ts";
+import type { Think, ThinkInput, ThinkResult, ToolCall } from "../../driverkit/src/agent/types.ts";
 
 export interface Fixture {
   driver: Driver;

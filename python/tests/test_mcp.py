@@ -915,7 +915,7 @@ class TheAppsMapAndItsRecipes(unittest.TestCase):
     instructions an MCP client prepends.
 
     The strings asserted here are quoted from
-    ``packages/agent/src/tools.ts``, which renders the same two blocks into the
+    ``packages/driverkit/src/agent/tools.ts``, which renders the same two blocks into the
     in-page system prompt. A model driving this app from outside and a model
     driving it from inside the page must read the same sentences about the same
     app, and these two tests plus their TypeScript twins are what keep that

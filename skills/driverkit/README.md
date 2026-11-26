@@ -3,8 +3,8 @@
 A [Claude Code skill](https://code.claude.com/docs/en/skills) that knows how to use driverkit: **draft and review a
 verb list over somebody's codebase** (the part that is a judgement call rather than an install), write `visible()`
 honestly, add the widget and the `/api/chat` endpoint behind it, drive a tab from another process through the relay
-and MCP, set up tab-token auth for a multi-user deployment, adopt an app with no store through
-`@driverkit/adapters`, and troubleshoot. `SKILL.md` holds the decision tree, the rules and the common recipes;
+and MCP, set up tab-token auth for a multi-user deployment, reach a button nobody wrote a verb for through
+`driverkit/controls`, and troubleshoot. `SKILL.md` holds the decision tree, the rules and the common recipes;
 [references/](references) holds the details, loaded only when needed.
 
 Install it (SKILL.md + references) into your user skills, from a checkout:
@@ -19,7 +19,7 @@ Or from the repository, once it is public:
 ```bash
 d=~/.claude/skills/driverkit; base=https://raw.githubusercontent.com/driverkit/driverkit/main/skills/driverkit
 mkdir -p "$d/references" && curl -fsSL "$base/SKILL.md" -o "$d/SKILL.md"
-for f in authoring-verbs worked-example snapshot widget relay-mcp auth adapters protocol packaging troubleshooting; do
+for f in authoring-verbs worked-example snapshot widget relay-mcp auth controls protocol packaging troubleshooting; do
   curl -fsSL "$base/references/$f.md" -o "$d/references/$f.md"
 done
 ```

@@ -26,8 +26,8 @@ import { checkArg, RESERVED_REFUSALS } from "driverkit";
 import type { ArgSpec, Driver, Manifest, Scalar } from "driverkit";
 
 import { parseBound } from "./case.ts";
-import { askMechanism, expectedArgs } from "./score.ts";
-import type { DryResult, EvalCase, LoadedCase } from "./types.ts";
+import { askMechanism, expectedArgs, routes } from "./score.ts";
+import type { DryResult, EvalCase, ExpectPath, LoadedCase } from "./types.ts";
 
 export interface DryOptions {
   newDriver: () => Driver | Promise<Driver>;
@@ -57,12 +57,15 @@ export async function dryRun(
   for (const c of cases) {
     const where = "source" in c && c.source ? `${c.source} (${c.id})` : c.id;
     const seen = new Set<string>();
+    // Every route a case allows, so `anyOf` is checked branch by branch and a
+    // typo in the second route is not discovered by paying a model to take it.
+    const branches = routes(c.expect);
     const named = [
-      ...(c.expect.calls ?? []),
+      ...branches.flatMap((b) => b.calls ?? []),
       ...(c.expect.forbid ?? []),
       ...(c.expect.commits === "none" || c.expect.commits === undefined ? [] : c.expect.commits),
-      ...Object.keys(expectedArgs(c.expect)),
-      ...(typeof c.expect.count === "object" ? Object.keys(c.expect.count) : []),
+      ...branches.flatMap((b) => Object.keys(expectedArgs(b))),
+      ...branches.flatMap((b) => (typeof b.count === "object" ? Object.keys(b.count) : [])),
       ...(c.setup ?? []).map((s) => s.verb),
     ];
     for (const name of named) {
@@ -93,20 +96,22 @@ export async function dryRun(
       }
     }
 
-    for (const [verbName, args] of Object.entries(expectedArgs(c.expect))) {
-      const verb = verbs.get(verbName);
-      if (!verb) continue;
-      for (const [arg, value] of Object.entries(args)) {
-        const spec = verb.args?.[arg];
-        if (!spec) {
-          errors.push(
-            `${where}: \`${verbName}\` takes no argument \`${arg}\`` +
-              suggestion(arg, Object.keys(verb.args ?? {})),
-          );
-          continue;
+    for (const branch of branches) {
+      for (const [verbName, args] of Object.entries(expectedArgs(branch))) {
+        const verb = verbs.get(verbName);
+        if (!verb) continue;
+        for (const [arg, value] of Object.entries(args)) {
+          const spec = verb.args?.[arg];
+          if (!spec) {
+            errors.push(
+              `${where}: \`${verbName}\` takes no argument \`${arg}\`` +
+                suggestion(arg, Object.keys(verb.args ?? {})),
+            );
+            continue;
+          }
+          const complaint = checkArg(arg, spec, value);
+          if (complaint) errors.push(`${where}: \`${verbName}\`: ${complaint}`);
         }
-        const complaint = checkArg(arg, spec, value);
-        if (complaint) errors.push(`${where}: \`${verbName}\`: ${complaint}`);
       }
     }
 
@@ -116,7 +121,7 @@ export async function dryRun(
     // the case, not a finding about the app.
     if (c.expect.commits !== undefined) {
       const allowed = c.expect.commits === "none" ? new Set<string>() : new Set(c.expect.commits);
-      for (const name of c.expect.calls ?? []) {
+      for (const name of branches.flatMap((b) => b.calls ?? [])) {
         if (verbs.get(name)?.kind === "commit" && !allowed.has(name)) {
           // Unless the case also expects a refusal — "accept them with nothing
           // selected" expects exactly this: the commit verb IS called, it is
@@ -144,8 +149,9 @@ export async function dryRun(
       }
     }
 
-    if (typeof c.expect.count === "object") {
-      for (const [verbName, n] of Object.entries(c.expect.count)) {
+    for (const branch of branches) {
+      if (typeof branch.count !== "object") continue;
+      for (const [verbName, n] of Object.entries(branch.count)) {
         const kind = verbs.get(verbName)?.kind;
         if (kind === "read") {
           warnings.push(
@@ -158,7 +164,7 @@ export async function dryRun(
 
     if (c.expect.refused !== undefined) {
       const declared = new Set<string>(RESERVED_REFUSALS);
-      for (const name of c.expect.calls ?? []) {
+      for (const name of branches.flatMap((b) => b.calls ?? [])) {
         for (const slug of verbs.get(name)?.refuses ?? []) declared.add(slug);
       }
       const wanted = typeof c.expect.refused === "string" ? [c.expect.refused] : c.expect.refused;
@@ -196,7 +202,24 @@ export async function dryRun(
   if (!options.noReplay) {
     for (const c of cases) {
       if (c.skip) continue;
-      await replayCase(c, verbs, options, errors, warnings, replayed);
+      // Every branch of an `anyOf`, not just the first. Each route states its
+      // own count and each is replayable without a model, so a suite that
+      // allows two routes gets both of its numbers checked against the
+      // fixture — which is strictly more fixture coverage than the single
+      // route it replaced, and the reason `anyOf` carries `count` per branch.
+      const branches = routes(c.expect);
+      for (const [i, branch] of branches.entries()) {
+        await replayCase(
+          c,
+          branch,
+          branches.length > 1 ? ` route ${i + 1}` : "",
+          verbs,
+          options,
+          errors,
+          warnings,
+          replayed,
+        );
+      }
     }
   }
 
@@ -219,18 +242,20 @@ export async function dryRun(
  */
 async function replayCase(
   c: EvalCase | LoadedCase,
+  branch: Partial<ExpectPath>,
+  label: string,
   verbs: Map<string, Manifest["verbs"][number]>,
   options: DryOptions,
   errors: string[],
   warnings: string[],
   replayed: DryResult["replayed"],
 ): Promise<void> {
-  const where = "source" in c && c.source ? `${c.source} (${c.id})` : c.id;
-  const path = c.expect.calls ?? [];
-  const wanted = c.expect.count;
+  const where = ("source" in c && c.source ? `${c.source} (${c.id})` : c.id) + label;
+  const path = branch.calls ?? [];
+  const wanted = branch.count;
   if (path.length === 0 || wanted === undefined) return;
 
-  const args = expectedArgs(c.expect);
+  const args = expectedArgs(branch);
   for (const name of path) {
     const verb = verbs.get(name);
     if (!verb) return; // already an error
@@ -304,7 +329,7 @@ async function replayCase(
 
     for (const [name, expected] of pairs) {
       const actual = counts.get(name);
-      replayed.push({ id: c.id, verb: name, expected, actual });
+      replayed.push({ id: c.id + label, verb: name, expected, actual });
       if (actual !== expected) {
         errors.push(
           `FIXTURE DRIFT — ${where}: replaying \`${name}\` with the case's own arguments ` +

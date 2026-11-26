@@ -41,7 +41,9 @@ A path that changes the table without moving `rev` hands out a `rev` that is a l
 stops working, and the only symptom is an agent editing the wrong row an hour later. `onChange()` is also where the
 page redraws and where `connection.changed()` pushes a snapshot to the relay, so one funnel buys all three.
 
-Without a counter of your own, `revFromMutations` derives one from DOM mutations ([adapters.md](adapters.md)).
+Without a counter of your own, write the `MutationObserver` that derives one — the repo README's "Your app has no
+store" section has the ten lines. The library ships no reader for it: each one was a guess at how an app holds its
+data, which is the thing driverkit exists not to do.
 
 ## `page` has three states and the third is not a cop-out
 
@@ -52,8 +54,8 @@ Without a counter of your own, `revFromMutations` derives one from DOM mutations
 | `page` without `total` | a window, and you do **not** know how big the whole is |
 
 Absence is a *claim*. An agent that gets no `page` and cannot find a record concludes it does not exist. So omit
-`page` only when you know the view is complete; when reading a rendered DOM, give `{ index, size }` and no `total`
-(the adapters' default), which is the weakest honest claim — the agent knows it is looking through a window and
+`page` only when you know the view is complete; when reading a rendered DOM, give `{ index, size }` and no `total`,
+which is the weakest honest claim — the agent knows it is looking through a window and
 pages or filters instead of concluding. Never invent a total.
 
 `index` is the page the user is on; a `0` from an undeclared paginator misleads an agent about *where* it is, which

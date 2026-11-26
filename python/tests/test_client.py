@@ -114,8 +114,8 @@ class Reads(ClientTest):
 
     def test_a_page_with_no_total_parses_rather_than_raising_on_the_commonest_window(self):
         # `total` is OPTIONAL in the TS `Snapshot`, and total-absent is not an
-        # edge case: it is what `@driverkit/adapters` produces from every
-        # rendered table, because the DOM cannot tell a virtualised grid from a
+        # edge case: it is what any app reading its rows out of a rendered
+        # table produces, because the DOM cannot tell a virtualised grid from a
         # short list. Requiring it here made that snapshot unparseable — a
         # `KeyError` out of `Page.from_dict` before the renderer was reached —
         # so the whole unknown-total branch was dead code from the wire's point

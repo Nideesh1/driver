@@ -1,0 +1,1 @@
+{"calls":[{"step":1,"name":"goto","args":{"screen":"companies"},"kind":"read","ok":true}],"steps":2,"stop":"answered","text":"Grayson Robotics has 238 contacts with the status \"new\", out of 410 in total. The rest are 87 pending and 50 accepted. The remaining 35 are presumably declined, but the list doesn't show a count for that.","ms":2918}

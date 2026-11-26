@@ -1,7 +1,7 @@
 """
 driverkit — the relay, in Python, stdlib only.
 
-This is a port of ``packages/relay/src/relay.ts``, frame for frame and status
+This is a port of ``packages/driverkit/src/relay/relay.ts``, frame for frame and status
 for status. It exists because the backend half of a driverkit deployment is
 often already Python: PROTOCOL.md's argument for SSE is that *the relay belongs
 inside a server you already run*, and "already run" is a FastAPI or Django

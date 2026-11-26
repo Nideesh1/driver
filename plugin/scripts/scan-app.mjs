@@ -124,12 +124,14 @@ try {
 const deps = pkg ? { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) } : {};
 const known = ["react", "next", "vue", "nuxt", "svelte", "@angular/core", "solid-js", "preact", "lit", "htmx.org", "jquery"];
 const frameworks = known.filter((d) => deps[d]);
-const dkDeps = Object.keys(deps).filter((d) => d === "driverkit" || d.startsWith("@driverkit/"));
+// One package now, so one name to look for -- the subpaths (`driverkit/widget`,
+// `driverkit/controls`, ...) are entry points, never separate dependencies.
+const dkDeps = Object.keys(deps).filter((d) => d === "driverkit");
 
 // ---- already mounted? ----------------------------------------------------
 
 // Both the published specifier and a relative import of the built output: the
-// repository's own example imports `packages/core/dist/registry.js` directly,
+// repository's own example imports `packages/driverkit/dist/core/registry.js` directly,
 // and a scan that called that "not mounted" would invite a second driver.
 const mounts = docs.filter(
   (d) =>
@@ -222,7 +224,7 @@ say();
 say(`## App`);
 say(`- package: ${pkg?.name ? `${pkg.name}` : "(no package.json)"}`);
 say(`- framework signals: ${frameworks.length ? frameworks.join(", ") : "none found (plain DOM, or server-rendered)"}`);
-say(`- driverkit packages installed: ${dkDeps.length ? dkDeps.join(", ") : "NONE -- add them before the draft can typecheck"}`);
+say(`- driverkit installed: ${dkDeps.length ? dkDeps.join(", ") : "NO -- add it before the draft can typecheck"}`);
 say(`- driver already mounted: ${mounts.length ? mounts.map((d) => d.rel).join(", ") : "no"}`);
 if (widgets.length) say(`- widget / relay wiring in: ${cap(widgets.map((d) => d.rel), 6).join(", ")}`);
 if (existingVerbs.size) say(`- verbs already declared: ${[...existingVerbs].sort().join(", ")} (extend this list, do not duplicate it)`);
@@ -230,7 +232,7 @@ say();
 
 say(`## Marked buttons (data-dk)`);
 if (handles.size === 0) {
-  say(`none. Tier 2 of the adapters ladder is unused: no \`data-dk="..."\` attributes anywhere.`);
+  say(`none: no \`data-dk="..."\` attributes anywhere, so no verb is wired to a button.`);
 } else {
   for (const [h, where] of [...handles].slice(0, 40)) say(`- \`${h}\` in ${where.slice(0, 3).join(", ")}`);
 }
@@ -256,7 +258,7 @@ say(`## Screen shape`);
 say(`- table / grid markup: ${tables.length ? cap(tables, 5).join(", ") : "none found"}`);
 say(`- paging: ${paging.length ? cap(paging, 5).join(", ") : "none found"}`);
 say(`- selection state: ${selection.length ? cap(selection, 5).join(", ") : "none found -- a describe/commit pair may have nothing to act on"}`);
-say(`- store: ${stores.length ? cap(stores, 5).join(", ") : "none found -- visible() may have to read the DOM (@driverkit/adapters)"}`);
+say(`- store: ${stores.length ? cap(stores, 5).join(", ") : "none found -- visible() may have to read the DOM by hand"}`);
 say();
 say(`## Reminders for the draft`);
 say(`- A verb that acts on many rows takes a PREDICATE, never an id called a thousand times.`);

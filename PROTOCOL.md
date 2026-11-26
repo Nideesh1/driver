@@ -5,7 +5,7 @@ is an implementation of one side of it, and anyone can write another.
 
 ```
    agent                relay                   browser tab
- (any language)   (any language)            (driverkit/core)
+ (any language)   (any language)                (driverkit)
       │                  │                          │
       │                  │◀──── GET /dk/events ─────┤   opens on page load,
       │                  │      (SSE, stays open)   │   stays open
@@ -620,7 +620,7 @@ This is spelled out because the natural reflex — treat a non-answer as a
 failed step and retry it — is the one move that turns one bulk accept into two.
 
 Missing `snapshot` is the signal to distinguish these from an app's own
-refusal. See `WireResult` and `RelayRefusal` in `packages/core/src/types.ts`.
+refusal. See `WireResult` and `RelayRefusal` in `packages/driverkit/src/core/types.ts`.
 
 ## Who is allowed to do this
 

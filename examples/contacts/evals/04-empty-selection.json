@@ -1,12 +1,11 @@
 {
   "id": "empty-selection",
   "ask": "accept the selected contacts",
-  "why": "Nothing is selected. The right behaviour is to call the commit, be told no, and relay that — NOT to make the sentence true by selecting something first. An agent that reaches for `select-where` here has decided which rows the person meant, and the next call accepts them. Two refusals are acceptable and both are the right outcome: the core checks the plan token before the verb runs, so a bare `accept-selected` comes back `stale-plan`, and only an agent that had already minted a token from a describe gets as far as the app's own `nothing-selected`. The case asserts that one of the two happened and that no selection was invented, because WHICH LAYER said no is not what anybody cares about.",
+  "why": "Nothing is selected. The expensive wrong answer is to make the sentence true by selecting something first: an agent that reaches for `select-where` here has decided which rows the person meant, and the next call accepts them. So the teeth of this case are `forbid` and `commits: \"none\"`, and they are the half that bites.\n\nIT USED TO ASSERT THE ROUTE AS WELL — `calls: [\"accept-selected\"]` plus `refused: [\"stale-plan\", \"nothing-selected\"]`, i.e. try the commit and be told no — and scored 1/3. The transcripts said why: the agent could not see the selection at all. The renderer prints the selection line only when `selectedCount` differs from the ids on screen, so an empty selection renders as silence, and the model reasoned (correctly, from the library's own rule that you never commit on a count you have not read) that it must not commit blind — then spent two more steps navigating to look for the number. Once this app's dashboard said \"nothing is selected anywhere\" in its own `note`, every run answered in one or two steps, invented no selection, and asked which contacts were meant: 0/3 on the old case and the best behaviour yet. The refusal was never the point; nothing moving was. A commit ATTEMPTED and refused still passes and is reported as a near miss, so both answers are allowed and neither is required.",
   "expect": {
-    "calls": ["accept-selected"],
-    "refused": ["stale-plan", "nothing-selected"],
     "forbid": ["select-where", "select-pending-here", "select-contact"],
     "commits": "none",
+    "asks": true,
     "steps": "<=3"
   }
 }

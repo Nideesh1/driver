@@ -1,0 +1,37 @@
+{
+  // The build config for the package. It emits `dist/`, and it is the only
+  // config in the repository that emits anything.
+  //
+  // There used to be six of these, one per package, each `composite` with
+  // `references` to its siblings -- machinery whose whole job was to make a
+  // bare `driverkit` import inside the repository resolve to a sibling's BUILT
+  // `.d.ts` rather than to its source, so that what the repository typechecked
+  // was what a consumer would get. One package needs none of that: the areas
+  // under `src/` import each other by relative path, so there is one program,
+  // one build, and no build order to get wrong. `composite` is kept anyway --
+  // `tsc -b` wants it, and it is what makes the build incremental.
+  //
+  // Separate from the root `tsconfig.json` and `tsconfig.src.json` on purpose.
+  // Those two are whole-repo typechecks with `noEmit` and they see
+  // `packages/eval` as well; this one answers "what does the package publish",
+  // which is the question `npm install` asks.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // `tsconfig.base.json` sets `noEmit` for the typecheck-only configs at the
+    // root. This turns it back on for the one job that is emit.
+    "noEmit": false,
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    // The source text goes INTO the map. `files: ["dist"]` means `src/` is not
+    // published, so a map that merely pointed at `../src/x.ts` would dangle in
+    // every installed copy -- and a sourcemap that cannot find its source is
+    // worse than no sourcemap, because the debugger shows an empty pane
+    // instead of the emitted line it does have.
+    "inlineSources": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"]
+}

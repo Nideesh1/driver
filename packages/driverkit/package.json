@@ -1,0 +1,99 @@
+{
+  "name": "driverkit",
+  "version": "0.0.0",
+  "description": "Make a web app drivable by an agent. No pixels, no selectors, no model.",
+  "license": "MIT",
+  "type": "module",
+  "//exports": [
+    "One install, one version, one changelog. The five areas are subpaths rather",
+    "than packages because the library's contract is one function -- `mount()` --",
+    "and six package.jsons for one function is a table of contents pretending to",
+    "be an architecture. Tree-shaking keeps a page free of what it does not import;",
+    "`sideEffects: false` below is what lets a bundler prove that.",
+    "",
+    "`./relay` is the one entry that is NOT browser-safe: it imports `node:http`,",
+    "which is what drove the original split in the first place. It is published",
+    "under a `node` condition and NOTHING else, so a browser-targeted resolver",
+    "finds no target for the subpath and fails loudly at build time, rather than",
+    "pulling `node:http` into a page bundle and failing at runtime. There is",
+    "deliberately no `browser` or `default` fallback: a shim that resolved to an",
+    "empty module would hand somebody a `createRelay` that silently does nothing.",
+    "See `test/packaging.test.ts`, which resolves every subpath under browser",
+    "conditions and asserts this one is unreachable.",
+    "",
+    "The same strictness reaches TypeScript, and it is worth knowing before it",
+    "surprises somebody: `moduleResolution: \"bundler\"` applies the conditions a",
+    "bundler applies, so `import { createRelay } from \"driverkit/relay\"` is a",
+    "TS2307 under it -- correctly, since that code could not have been bundled",
+    "either. Server code that imports the relay wants `moduleResolution:",
+    "\"nodenext\"`, under which every subpath here resolves."
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/core/index.d.ts",
+      "default": "./dist/core/index.js"
+    },
+    "./agent": {
+      "types": "./dist/agent/index.d.ts",
+      "default": "./dist/agent/index.js"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "default": "./dist/browser/index.js"
+    },
+    "./controls": {
+      "types": "./dist/controls/index.d.ts",
+      "default": "./dist/controls/index.js"
+    },
+    "./widget": {
+      "types": "./dist/widget/index.d.ts",
+      "default": "./dist/widget/index.js"
+    },
+    "./relay": {
+      "node": {
+        "types": "./dist/relay/index.d.ts",
+        "default": "./dist/relay/index.js"
+      }
+    },
+    "./relay/serve": {
+      "node": {
+        "types": "./dist/relay/serve.d.ts",
+        "default": "./dist/relay/serve.js"
+      }
+    }
+  },
+  "main": "./dist/core/index.js",
+  "module": "./dist/core/index.js",
+  "types": "./dist/core/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "CONTROLS.md"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.json",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "//dependencies": [
+    "`@types/node` is a real dependency and not a dev one: dist/relay/relay.d.ts and",
+    "dist/relay/serve.d.ts both re-export `node:http` types in their PUBLIC surface, so a",
+    "consumer who installs driverkit without it gets TS2307 on the package's own",
+    "declarations the moment they import `driverkit/relay`. A types package in",
+    "`dependencies` is the documented answer to exactly that case. It is the price of",
+    "shipping the relay in the same package as the browser code; nothing is emitted",
+    "into a page bundle by a types-only dependency."
+  ],
+  "dependencies": {
+    "@types/node": "^22.0.0"
+  },
+  "keywords": [
+    "agent",
+    "mcp",
+    "automation",
+    "llm",
+    "sse",
+    "chat",
+    "ui"
+  ],
+  "sideEffects": false
+}

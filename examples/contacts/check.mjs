@@ -31,14 +31,14 @@ import { LANDINGS, SCREEN_SPECS, href, parse } from "./app/router.js";
 // so the templates are checked against a real implementation rather than
 // against the code that wrote them.
 import uriTemplates from "uri-templates";
-import { drive } from "../../packages/agent/src/loop.ts";
-import { renderSnapshot } from "../../packages/agent/src/render.ts";
-import { systemPrompt, toolsFor, READ_SCREEN } from "../../packages/agent/src/tools.ts";
-import { connect } from "../../packages/browser/src/connect.ts";
-import { mountWidget } from "../../packages/widget/src/widget.ts";
-import { backendThink } from "../../packages/agent/src/backend.ts";
-import { HttpEventSource } from "../../packages/relay/test/sse-client.ts";
-import { FakeDocument } from "../../packages/widget/test/fake-dom.ts";
+import { drive } from "../../packages/driverkit/src/agent/loop.ts";
+import { renderSnapshot } from "../../packages/driverkit/src/agent/render.ts";
+import { systemPrompt, toolsFor, READ_SCREEN } from "../../packages/driverkit/src/agent/tools.ts";
+import { connect } from "../../packages/driverkit/src/browser/connect.ts";
+import { mountWidget } from "../../packages/driverkit/src/widget/widget.ts";
+import { backendThink } from "../../packages/driverkit/src/agent/backend.ts";
+import { HttpEventSource } from "../../packages/driverkit/test/sse-client.ts";
+import { FakeDocument } from "../../packages/driverkit/test/fake-dom.ts";
 
 const BASE = process.argv[2] || "http://127.0.0.1:8791";
 

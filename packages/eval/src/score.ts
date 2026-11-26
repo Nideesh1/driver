@@ -18,7 +18,15 @@
  */
 
 import type { Manifest } from "driverkit";
-import type { CallRecord, EvalCase, Judgement, Mark, Scalar, Transcript } from "./types.ts";
+import type {
+  CallRecord,
+  EvalCase,
+  ExpectPath,
+  Judgement,
+  Mark,
+  Scalar,
+  Transcript,
+} from "./types.ts";
 import { parseBound } from "./case.ts";
 
 /** Slugs an app might plausibly use for "ask the person", tried when the
@@ -85,71 +93,58 @@ export function judge(c: EvalCase, t: Transcript, options: JudgeOptions): Judgem
     );
   }
 
-  // ---- did it choose the right verb -----------------------------------
-  let verb: Mark = "n/a";
-  if (expect.calls || expect.forbid) {
-    verb = "ok";
-    const names = t.calls.map((call) => call.name);
-    if (expect.calls) {
-      const missing = missingFromSubsequence(names, expect.calls);
-      if (missing) {
-        verb = "wrong";
-        notes.push(
-          `expected \`${expect.calls.join("→")}\`, and \`${missing}\` did not come ` +
-            `(in order) in \`${names.join("→") || "no calls at all"}\``,
-        );
-      }
+  // ---- did it choose the right verb, and pass the right arguments ------
+  //
+  // One route or several, scored the same way: `routes` turns the top-level
+  // `calls`/`args`/`count` into a single branch, so there is exactly one
+  // implementation of "did this route happen" and `anyOf` is not a second
+  // scoring path that can disagree with the first. The branch that is
+  // REPORTED is the first one that fully matched, or — when none did — the one
+  // that got furthest, because the author reading a red case wants the near
+  // miss and not the branch they wrote first.
+  const branches = routes(expect);
+  const scored = branches.map((branch) => scoreRoute(branch, t));
+  const chosen =
+    scored.find((r) => r.wrong === 0) ??
+    scored.reduce((best, r) => (r.wrong < best.wrong ? r : best), scored[0]!);
+
+  let verb: Mark = chosen.verb;
+  // `args` and `counts` come from the route that matched and are not touched
+  // again: which verb carried the argument and which reported the number are
+  // route-specific facts, and the argument and the number are not. That
+  // asymmetry is the whole reason a branch of `anyOf` holds all three.
+  const args: Mark = chosen.args;
+  const counts: Mark = chosen.counts;
+
+  if (branches.length > 1) {
+    if (chosen.wrong === 0) {
+      // Which of the right answers it gave. Worth a line even when green: a
+      // case whose second branch is the only one that ever matches is telling
+      // you the first is not how this app is actually driven.
+      notes.push(`took route ${scored.indexOf(chosen) + 1} of ${branches.length}: \`${chosen.route}\``);
+    } else {
+      notes.push(
+        `none of the ${branches.length} routes this case allows was taken. ` +
+          `What ran: \`${t.calls.map((call) => call.name).join("→") || "no calls at all"}\``,
+      );
+      scored.forEach((r, i) => {
+        for (const line of r.notes) notes.push(`route ${i + 1} (\`${r.route}\`): ${line}`);
+      });
     }
-    for (const bad of expect.forbid ?? []) {
-      if (names.includes(bad)) {
+  } else {
+    for (const line of chosen.notes) notes.push(line);
+  }
+
+  // `forbid` is a claim about the RUN and not about a route: a forbidden verb
+  // is forbidden whichever way the agent went, so it is applied after the
+  // branch has been picked and can turn a matched route red on its own.
+  if (expect.forbid) {
+    if (verb === "n/a") verb = "ok";
+    for (const bad of expect.forbid) {
+      if (t.calls.some((call) => call.name === bad)) {
         verb = "wrong";
         const call = t.calls.find((x) => x.name === bad)!;
         notes.push(`called \`${bad}\`${argText(call.args)}, which this case forbids`);
-      }
-    }
-  }
-
-  // ---- did it pass the right arguments ---------------------------------
-  let args: Mark = "n/a";
-  if (expect.args) {
-    args = "ok";
-    for (const [verbName, wanted] of Object.entries(expectedArgs(expect))) {
-      const made = t.calls.filter((call) => call.name === verbName);
-      if (made.length === 0) {
-        args = "wrong";
-        notes.push(`\`${verbName}\` was never called, so its arguments cannot be right`);
-        continue;
-      }
-      const index = made.findIndex((call) => matches(call.args, wanted));
-      if (index === -1) {
-        args = "wrong";
-        notes.push(
-          `\`${verbName}\` wanted ${argText(wanted).trim()} and got ` +
-            made.map((call) => argText(call.args).trim()).join(" then "),
-        );
-      } else if (index > 0) {
-        // Not a failure: the model corrected itself, which is what `refuses`
-        // and `bad-argument` are for. Worth a line, because the correction
-        // cost a model turn that a better `describe` or a tighter `oneOf`
-        // would not have.
-        notes.push(`\`${verbName}\` got there on attempt ${index + 1}, not the first`);
-      }
-    }
-  }
-
-  // ---- are the numbers still the numbers -------------------------------
-  let counts: Mark = "n/a";
-  if (expect.count !== undefined) {
-    counts = "ok";
-    for (const [verbName, wanted] of Object.entries(expectedCounts(expect, t))) {
-      const reported = lastCount(t, verbName);
-      if (reported !== wanted) {
-        counts = "wrong";
-        notes.push(
-          `\`${verbName}\` reported ${reported === undefined ? "no count" : reported}` +
-            ` where the case says ${wanted}. Either the arguments were wrong, or THE FIXTURE ` +
-            `MOVED — \`--dry-run\` replays this call without a model and will say which.`,
-        );
       }
     }
   }
@@ -221,6 +216,114 @@ export function judge(c: EvalCase, t: Transcript, options: JudgeOptions): Judgem
     nearMisses,
     notes,
     pass,
+  };
+}
+
+/**
+ * The routes a case allows, always as a list.
+ *
+ * A case without `anyOf` is one branch built from its top-level fields, which
+ * keeps `scoreRoute` the only place that knows what matching a route means. A
+ * case that states none of the three is one empty branch, which marks all
+ * three questions `n/a` — the shape of a case that only forbids things.
+ */
+export function routes(expect: {
+  calls?: string[];
+  anyOf?: ExpectPath[];
+  args?: Record<string, Scalar> | Record<string, Record<string, Scalar>>;
+  count?: number | Record<string, number>;
+}): Array<Partial<ExpectPath>> {
+  if (expect.anyOf) return expect.anyOf;
+  return [
+    {
+      ...(expect.calls === undefined ? {} : { calls: expect.calls }),
+      ...(expect.args === undefined ? {} : { args: expect.args }),
+      ...(expect.count === undefined ? {} : { count: expect.count }),
+    },
+  ];
+}
+
+interface RouteScore {
+  route: string;
+  verb: Mark;
+  args: Mark;
+  counts: Mark;
+  notes: string[];
+  /** How many of the three questions this route got wrong. The tie-break for
+   *  which branch a red case reports. */
+  wrong: number;
+}
+
+/** Did this one route happen, with these arguments and these counts. Pure, and
+ *  deliberately ignorant of `forbid`, `commits` and `steps`: those are claims
+ *  about the run. */
+function scoreRoute(branch: Partial<ExpectPath>, t: Transcript): RouteScore {
+  const notes: string[] = [];
+  const names = t.calls.map((call) => call.name);
+
+  let verb: Mark = "n/a";
+  if (branch.calls) {
+    verb = "ok";
+    const missing = missingFromSubsequence(names, branch.calls);
+    if (missing) {
+      verb = "wrong";
+      notes.push(
+        `expected \`${branch.calls.join("→")}\`, and \`${missing}\` did not come ` +
+          `(in order) in \`${names.join("→") || "no calls at all"}\``,
+      );
+    }
+  }
+
+  let args: Mark = "n/a";
+  if (branch.args) {
+    args = "ok";
+    for (const [verbName, wanted] of Object.entries(expectedArgs(branch))) {
+      const made = t.calls.filter((call) => call.name === verbName);
+      if (made.length === 0) {
+        args = "wrong";
+        notes.push(`\`${verbName}\` was never called, so its arguments cannot be right`);
+        continue;
+      }
+      const index = made.findIndex((call) => matches(call.args, wanted));
+      if (index === -1) {
+        args = "wrong";
+        notes.push(
+          `\`${verbName}\` wanted ${argText(wanted).trim()} and got ` +
+            made.map((call) => argText(call.args).trim()).join(" then "),
+        );
+      } else if (index > 0) {
+        // Not a failure: the model corrected itself, which is what `refuses`
+        // and `bad-argument` are for. Worth a line, because the correction
+        // cost a model turn that a better `describe` or a tighter `oneOf`
+        // would not have.
+        notes.push(`\`${verbName}\` got there on attempt ${index + 1}, not the first`);
+      }
+    }
+  }
+
+  let counts: Mark = "n/a";
+  if (branch.count !== undefined) {
+    counts = "ok";
+    for (const [verbName, wanted] of Object.entries(expectedCounts(branch, t))) {
+      const reported = lastCount(t, verbName);
+      if (reported !== wanted) {
+        counts = "wrong";
+        notes.push(
+          `\`${verbName}\` reported ${reported === undefined ? "no count" : reported}` +
+            ` where the case says ${wanted}. Either the arguments were wrong, or THE FIXTURE ` +
+            `MOVED — \`--dry-run\` replays this call without a model and will say which.`,
+        );
+      }
+    }
+  }
+
+  return {
+    route: branch.calls?.join("→") ?? "(no calls named)",
+    verb,
+    args,
+    counts,
+    notes,
+    wrong: [verb, args, counts].filter((m) => m === "wrong").length,
   };
 }
 

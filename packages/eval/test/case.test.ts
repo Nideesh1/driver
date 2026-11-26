@@ -141,3 +141,78 @@ test("a case error names the file", () => {
   assert.ok(err instanceof CaseError);
   assert.match(err.message, /evals\/07-filter\.json/);
 });
+
+test("`anyOf` holds two or more whole routes, and a route needs its own calls", () => {
+  // Two or more, because one branch is a route pretending to be a choice and
+  // the author who wrote it meant `calls`. The next reader of a one-branch
+  // `anyOf` would take it for a list that is allowed to grow and never notice
+  // that nothing else was ever permitted.
+  const c = parseCase(
+    {
+      id: "x",
+      ask: "accept the pending ones at Acme",
+      expect: {
+        anyOf: [
+          { calls: ["select-where", "accept"], args: { "select-where": { company: "Acme" } }, count: { "select-where": 7 } },
+          { calls: ["open-company", "select-here", "accept"] },
+        ],
+        commits: ["accept"],
+      },
+    },
+    "x.json",
+  );
+  assert.equal(c.expect.anyOf?.length, 2);
+  assert.deepEqual(c.expect.anyOf?.[1]?.calls, ["open-company", "select-here", "accept"]);
+  assert.throws(
+    () => parseCase({ id: "x", ask: "a", expect: { anyOf: [{ calls: ["go"] }] } }, "x.json"),
+    /TWO OR MORE/,
+  );
+  assert.throws(
+    () => parseCase({ id: "x", ask: "a", expect: { anyOf: [{ count: 3 }, { calls: ["go"] }] } }, "x.json"),
+    /must be a non-empty list/,
+  );
+});
+
+test("`anyOf` beside a top-level route is refused rather than merged", () => {
+  // Two spellings of one claim, and whichever way a reader took it the other
+  // half would be silently unasserted. The top-level fields that are claims
+  // about the RUN rather than about a route are still allowed beside it.
+  assert.throws(
+    () => parseCase({ id: "x", ask: "a", expect: { calls: ["go"], anyOf: [{ calls: ["a"] }, { calls: ["b"] }] } }, "x.json"),
+    /cannot be used with/,
+  );
+  assert.throws(
+    () => parseCase({ id: "x", ask: "a", expect: { count: 3, anyOf: [{ calls: ["a"] }, { calls: ["b"] }] } }, "x.json"),
+    /cannot be used with/,
+  );
+  const c = parseCase(
+    {
+      id: "x",
+      ask: "a",
+      expect: { anyOf: [{ calls: ["a"] }, { calls: ["b"] }], forbid: ["c"], commits: "none", steps: "<=4" },
+    },
+    "x.json",
+  );
+  assert.deepEqual(c.expect.forbid, ["c"]);
+});
+
+test("a route's own fields are validated like the top-level ones", () => {
+  assert.throws(
+    () => parseCase({ id: "x", ask: "a", expect: { anyOf: [{ calls: ["a"], steps: 3 }, { calls: ["b"] }] } }, "x.json"),
+    /not part of a route/,
+  );
+  assert.throws(
+    () =>
+      parseCase(
+        { id: "x", ask: "a", expect: { anyOf: [{ calls: ["a"], args: { q: "x", b: { c: 1 } } }, { calls: ["b"] }] } },
+        "x.json",
+      ),
+    /mixes the two spellings/,
+  );
+});
+
+test("adding a route changes the cache key, because it changes the verdict", () => {
+  const one = { id: "x", ask: "a", expect: { anyOf: [{ calls: ["a"] }, { calls: ["b"] }] } };
+  const two = { id: "x", ask: "a", expect: { anyOf: [{ calls: ["a"] }, { calls: ["c"] }] } };
+  assert.notEqual(caseKey(parseCase(one, "x.json")), caseKey(parseCase(two, "x.json")));
+});

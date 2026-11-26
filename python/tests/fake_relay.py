@@ -8,7 +8,7 @@ client that sent the wrong method, forgot the content type, mishandled a
 chunked SSE body, or read an outcome off a status code.
 
 The tab behind it is a small port of the toy app in
-``packages/core/test/registry.test.ts`` — two descents, a lane each, one row
+``packages/driverkit/test/registry.test.ts`` — two descents, a lane each, one row
 per page, and the rule that a machine may not move a descent out of
 ``pruning``. Reusing that app means the Python tests pin the same behaviours
 the TypeScript tests pin, rather than a second, friendlier fiction. Two verbs

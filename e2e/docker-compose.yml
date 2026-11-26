@@ -1,0 +1,83 @@
+# The demo and a relay, in one command.
+#
+#   docker compose -f e2e/docker-compose.yml up --build
+#   open http://127.0.0.1:8770/examples/contacts/app/
+#
+# No API key is needed to serve the page. Every screen, the router and the
+# relay work without one; only `/api/chat` does not, and the widget says so in
+# its own transcript rather than going quiet. To get the widget talking to a
+# model, put the key in the environment of the shell that runs compose:
+#
+#   ANTHROPIC_API_KEY=... docker compose -f e2e/docker-compose.yml up --build
+#
+# It is never written to a file here and never reaches the browser: the page
+# talks only to `/api/chat`, which is the whole reason `driverkit/agent` has no
+# model client in it.
+#
+# This is an addition, not a replacement. The demo needs `python3` and a built
+# `packages/driverkit/dist`, and nothing else:
+#
+#   npm ci && npm run build && python3 examples/contacts/server.py
+
+name: driverkit-demo
+
+services:
+  # The demo: the page, the type-stripped sources, `/api/chat`, and the relay
+  # mounted at `/dk` -- one process, which is the shape `PROTOCOL.md` argues
+  # for. This is the one to drive, and the one the browser smoke test drives.
+  demo:
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    ports:
+      - "127.0.0.1:${DK_PORT:-8770}:8770"
+    environment:
+      # Empty when unset, which is the no-key path, not an error.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      DK_MODEL: ${DK_MODEL:-claude-sonnet-5-5}
+      DK_MAX_TOKENS: ${DK_MAX_TOKENS:-2048}
+    healthcheck:
+      # The page itself, not `/`: a 200 here means the static handler resolved
+      # a path under the repo root and the demo is actually serveable.
+      test:
+        - CMD-SHELL
+        - >-
+          python3 -c "import urllib.request,sys;
+          sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8770/examples/contacts/app/').status == 200 else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  # The relay on its own, on its own port, from the pip half of the project
+  # (`driverkit-relay`, stdlib only). Most deployments should NOT run this --
+  # mount `driverkit.asgi.relay_asgi` in the server you already have instead --
+  # but having it here is how you see that the Python package stands alone, and
+  # it is the target for driving a page that is not this demo.
+  #
+  # Off by default so `up` is one service and one port. Start it with:
+  #   docker compose -f e2e/docker-compose.yml --profile relay up --build
+  relay:
+    profiles: ["relay"]
+    build:
+      context: ..
+      dockerfile: e2e/Dockerfile
+    ports:
+      - "127.0.0.1:${DK_RELAY_PORT:-7777}:7777"
+    # Same trick as the demo, and the same reason: the relay binds loopback
+    # inside the container and socat carries the published port to it, so
+    # `--allow-remote` is not needed and no secret has to exist. A relay that
+    # serves non-loopback callers has to be able to tell them apart -- it
+    # refuses to start otherwise -- and the honest way to avoid inventing a
+    # credential for a dev container is to not cross that line at all.
+    # The published port is bound to 127.0.0.1, so this host is the boundary.
+    command:
+      - bash
+      - -c
+      - >-
+        python3 -m driverkit.serve_relay --host 127.0.0.1 --port 7778 &
+        until python3 -c "import socket,sys; s=socket.socket(); s.settimeout(.3);
+        sys.exit(s.connect_ex(('127.0.0.1',7778)))"; do sleep 0.2; done;
+        exec socat TCP-LISTEN:7777,fork,reuseaddr TCP:127.0.0.1:7778
+    environment:
+      PYTHONPATH: /app/python/src

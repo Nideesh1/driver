@@ -17,9 +17,9 @@ src/
   components/DriverCombo.tsx  a native <select> of drivers
 ```
 
-Sorting the piles: the store and `lib/api.ts` are tier 1 — **including `bulkAssign`, which takes a filter and
-returns a count, which is the most valuable thing in the repo.** The per-row cancel button and the CSV export are
-tier 2 (logic inline in JSX). The map is nothing: a canvas is invisible to driverkit and to an agent, and the
+Sorting the piles: the store and `lib/api.ts` are already functions — **including `bulkAssign`, which takes a
+filter and returns a count, which is the most valuable thing in the repo.** The per-row cancel button and the CSV
+export are only click handlers (logic inline in JSX), so they need a marked button and a helper of their own. The map is nothing: a canvas is invisible to driverkit and to an agent, and the
 markers are the same rows the table has, so it needs no verb at all.
 
 ## The draft
@@ -73,7 +73,7 @@ const driver = mount({
       args: { job: { type: "string", describe: "job reference" },
               reason: { type: "string", describe: "why", oneOf: ["no-access","customer-request","damaged"] } },
       refuses: ["no-such-job", "already-delivered"],
-      run: clickHandle("cancel-row") },     // tier 2 — see below
+      run: clickHandle("cancel-row") },     // a marked button — see below
 
     { name: "export-csv", kind: "read", describe: "download the current filtered list as a CSV",
       run: clickHandle("export") },
@@ -109,21 +109,24 @@ const driver = mount({
 - **`setPage(n)`, `setSort(col)`, `toggleRow(id)`.** Chrome. `toggleRow` in particular is the `select(id)`-per-row
   shape the design exists to prevent.
 - **Anything about the map.** A canvas carries no text; the rows already say where the jobs are.
-- **`DriverCombo`.** A native `<select>` is invisible to the adapters, and the driver codes are already an `oneOf`
+- **`DriverCombo`.** A native `<select>`'s options are invisible to anything reading the DOM, and the driver codes
+  are already an `oneOf`
   on `assign-selected`, which is better than driving a dropdown.
 - **`bulkAssign({ filter, driverId })` exposed directly.** It takes a predicate *and* writes, which is exactly the
   verb that accepts fifty thousand rows because a filter was wider than anybody thought. It stays an
   implementation detail of `assign-selected`, which is fed the selection the agent already counted.
 
-## The tier-2 half, in full
+## The click-handler half, in full
 
 ```tsx
 <button data-dk="cancel-row" onClick={() => api.cancelJob(j.id, "ops")}>Cancel</button>
 <button data-dk="export"     onClick={exportCsv}>Export</button>
 ```
 
-Two honest costs here, both from [adapters.md](adapters.md): `cancel-job`'s `args` are **not** passed to the
-handler — a click runs whatever the handler closes over, so this verb cancels *the open row* and its `describe`
-should say so (fix it by making the real verb call `api.cancelJob` once `lib/` is reachable); and a
-rendered-but-disabled button would be clicked and report `ok` if `fromDom`'s `disabled` check did not catch it.
-Both are reasons the ladder ends at tier 1 — one verb at a time, starting with `cancel-job`.
+`clickHandle` is four lines you write yourself — the repo README's "Your actions only exist inside click handlers"
+section has them; the library ships no helper, because a click is the one thing it cannot make any claim about.
+Two honest costs: `cancel-job`'s `args` are **not** passed to the handler — a click runs whatever the handler
+closes over, so this verb cancels *the open row* and its `describe` should say so (fix it by making the real verb
+call `api.cancelJob` once `lib/` is reachable); and a rendered-but-disabled button is clicked, does nothing, and
+reports `ok` unless you check `disabled` first. Both are reasons to end up calling the function — one verb at a
+time, starting with `cancel-job`.

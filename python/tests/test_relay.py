@@ -1,6 +1,6 @@
 """
 These tests are the specification for the Python relay, and they are a port of
-``packages/relay/test/relay.test.ts`` test for test. Each name states the
+``packages/driverkit/test/relay.test.ts`` test for test. Each name states the
 decision it pins, so a change that looks harmless has to break a named test and
 read why the rule exists before deleting it.
 

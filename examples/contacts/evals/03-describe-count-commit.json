@@ -1,11 +1,20 @@
 {
   "id": "describe-count-commit",
   "ask": "accept everyone at Acme Industrial who is waiting on a decision",
-  "why": "The pairing rule end to end: the predicate goes on the `describe`, the `commit` takes none and acts on the selection, and the number between them is the thing a person would have had to see before pressing a bulk button. 112 is asserted at the `select-where` so that a commit on the wrong number of rows is a count failure and not a silent success.",
+  "why": "The pairing rule end to end: the predicate goes on a `describe`, the `commit` takes none and acts on the selection, and the number between them is the thing a person would have had to see before pressing a bulk button. 112 is asserted at whichever verb counted, so a commit on the wrong number of rows is a count failure and not a silent success.\n\nTHE CASE ITSELF WAS THE FIRST FINDING. Written with one route — `select-where` then `accept-selected` — it scored 0/3 while the model did `open-company → select-pending-here → accept-selected` three times identically, which is the better answer: `select-pending-here` is the company-screen verb that means exactly \"the pending ones in front of me\", and it reports the same 112. The case was punishing a smarter path, so it now states both routes with `anyOf` and keeps its teeth in the number and the commit rather than in the itinerary. See `skills/driverkit/references/eval.md`, \"how to write a case that does not punish a better answer\".",
   "expect": {
-    "calls": ["select-where", "accept-selected"],
-    "args": { "select-where": { "company": "Acme Industrial", "status": "pending" } },
-    "count": { "select-where": 112 },
+    "anyOf": [
+      {
+        "calls": ["select-where", "accept-selected"],
+        "args": { "select-where": { "company": "Acme Industrial", "status": "pending" } },
+        "count": { "select-where": 112 }
+      },
+      {
+        "calls": ["open-company", "select-pending-here", "accept-selected"],
+        "args": { "open-company": { "company": "Acme Industrial" } },
+        "count": { "select-pending-here": 112 }
+      }
+    ],
     "commits": ["accept-selected"],
     "steps": "<=5"
   }
