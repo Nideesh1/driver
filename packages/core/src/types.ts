@@ -37,11 +37,31 @@ export interface ArgSpec {
  * What a verb does to the world, declared in the cached half so an agent knows
  * before it calls.
  *
- *   `read`     — changes nothing. Free to call, free to get wrong.
- *   `describe` — changes what is SELECTED or FILTERED, changes no data, and
- *                reports a `count`. Also safe: the worst outcome is the wrong
- *                rows highlighted.
- *   `commit`   — changes data. May be irreversible.
+ *   `read`     — changes no data and reports no count. Free to call, free to
+ *                get wrong. It may still move what the person is looking at:
+ *                navigation is a read.
+ *   `describe` — changes what is SELECTED, changes no data, and reports a
+ *                `count`. Also safe: the worst outcome is the wrong rows
+ *                highlighted.
+ *   `commit`   — changes data. May be irreversible; see `Verb.reversible`.
+ *
+ * `read` used to promise "changes nothing", and that was false of the commonest
+ * verb a multi-screen app has. `go`, `open-contact`, `back` and `sort-by` move
+ * the person's screen out from under them — the most visible thing an agent can
+ * do to somebody who is watching — and the cached half was telling it that was
+ * free. The wording was fixed rather than a fourth kind added, because these
+ * three are a ladder of WHAT A WRONG CALL COSTS YOU, and a wrong navigation
+ * costs exactly what a wrong read costs: the person has to look somewhere else.
+ * The two promises worth making are the ones that decide whether the next call
+ * is safe — no data moved, and no count is left pending — so those are the two
+ * this now makes, and they are true of every navigation verb.
+ *
+ * `describe` no longer says "or FILTERED", and that was not a trim. By that
+ * sentence a search box is a `describe`, which is how `search` gets declared
+ * one; but the rest of what `describe` means — that it reports a `count`, that
+ * the count is what a following `commit` acts on, that the pair is the safety
+ * mechanism — is true only of selection. A verb that narrows a list and leaves
+ * nothing pending is a `read`.
  *
  * This exists because of one failure mode. Asked to "select the top 1000 rows
  * and bulk accept", an agent that cannot tell `select` from `accept` has to
@@ -113,6 +133,74 @@ export interface Verb<A extends Record<string, Scalar> = Record<string, Scalar>>
    * copy would go on outlining the thing the verb no longer touches.
    */
   at?: string;
+  /**
+   * The screen this verb belongs to, or the screens it belongs to, matched
+   * against `Snapshot.screen`.
+   *
+   * Absent means the verb applies anywhere, which is the right answer for most
+   * of them: `select-contact` and `clear-selection` work from any screen, and
+   * an app with one screen never fills this in.
+   *
+   * **An array is for a verb that genuinely lives on more than one screen**,
+   * and it was added because a single string made the library's own worked
+   * example lie. `next-page` and `prev-page` page both the contacts list and a
+   * company's contact list; declaring either screen would have the demo refuse
+   * a paging call on a screen that was still publishing a `page: {index, size,
+   * total}` block and whose rendered snapshot still said "more rows exist off
+   * screen; use the app's own paging verb". Faced with writing that
+   * contradiction into the example, the app invented an `no-pages-here`
+   * refusal of its own instead — which is the smell this field exists to
+   * remove: an app hand-rolling a check and naming it, so that the next app
+   * names it something else and no agent recognises both.
+   *
+   * A single string behaves exactly as it always did. An EMPTY ARRAY is
+   * refused at `mount()`, the way a duplicate verb name is: it says the verb
+   * works nowhere, which no author means, and a verb that can never be called
+   * is permanently dead weight in everybody's cached prefix. Omit the field to
+   * mean "anywhere".
+   *
+   * **The tool list does not change with the screen, and must not.** A verb
+   * list that varied per screen would bust the prompt prefix on every single
+   * navigation, which is the cost argument the whole library is built on — so
+   * `next-page` is offered on the dashboard too, and the core refuses it there
+   * with the screen named. Declaring the mapping statically is what makes it
+   * cacheable: the names of the screens and which verb lives on which are the
+   * same for every user forever, and only *which screen is live* is dynamic.
+   *
+   * What this buys over an app's own guard is that the refusal is structural
+   * and says both halves of the answer. Before it, the app wrote the check by
+   * hand and invented a slug for it, and an agent had no way to learn which
+   * screen a verb wanted except by being refused once — the manifest was a
+   * flat list with no screen on any entry. Now the mapping is in the cached
+   * half, where a well-briefed agent reads it before calling, which is the
+   * same argument `refuses` is in there for.
+   *
+   * In `fingerprint()`, for the reason `kind` is: moving a verb to another
+   * screen changes what the cached surface claims about where it works, and so
+   * does giving it a second one.
+   */
+  screen?: string | string[];
+  /**
+   * `true` on a `commit` whose effect the app can undo.
+   *
+   * Read only for `kind: "commit"`, and absent makes no claim — exactly like
+   * `kind` itself, because the two wrong defaults cost the same two things:
+   * assuming reversible tells an agent a bulk accept can be taken back, and
+   * assuming irreversible marks every commit of an app written before this
+   * field as the dangerous kind, which is a warning on everything and
+   * therefore a warning on nothing.
+   *
+   * It exists because `set-setting("dense-rows", "true")` and accepting 3,412
+   * contacts were both `commit`, so both got the same shouted banner and both
+   * stopped to ask a person. Putting a page-size change behind a confirmation
+   * dialog is how people learn to click Yes without reading, which is the exact
+   * failure the gate exists to prevent. The ladder's third rung was carrying
+   * two different costs and only had words for the worse one.
+   *
+   * Reversible is not harmless: it still changes data and the person still
+   * sees it. It means there is a way back, not that nobody minds.
+   */
+  reversible?: true;
   args?: Record<string, ArgSpec>;
   /**
    * The refusals this verb can return, as short stable slugs.
@@ -249,6 +337,25 @@ export interface Row {
 export interface Snapshot {
   /** Where the user is, in their words: "contacts, filtered to Acme". */
   where: string;
+  /**
+   * Which screen that is, as a stable kebab-case id: `contacts`, `company`.
+   *
+   * `where` is prose for a human and carries everything else the person can
+   * see — the filter, the sort, and on a drill-down a sentence about the record
+   * they opened — so it changes constantly for reasons that are not navigation,
+   * and "did I navigate?" cannot be answered by diffing it. This can be
+   * compared with `===`, and that is its whole job.
+   *
+   * Dynamic, which is why it is here and not in the manifest: the *names* of
+   * an app's screens and which verb belongs to which are static and go in
+   * `Verb.screen`; which one is live right now is as per-turn as a row is.
+   *
+   * Absent means the app does not describe its screens, NOT that it has one.
+   * An app that leaves it out keeps every behaviour it had: the core cannot
+   * check a `Verb.screen` or a `CallOptions.screen` against nothing, and makes
+   * no claim rather than inventing one.
+   */
+  screen?: string;
   /** Monotonic, bumped on every change. An agent echoes it back to prove it is
    *  acting on what it saw; see `stale` in PROTOCOL.md. */
   rev: number;
@@ -375,6 +482,26 @@ export interface Manifest {
    *  went stale without diffing. */
   version: string;
   app: string;
+  /**
+   * The app's own briefing, in its own words: "this app has screens —
+   * dashboard, contacts, companies, settings — and `go` reaches those".
+   *
+   * It is here because it is static by definition and belongs in the half that
+   * gets cached once. Before it there was nowhere: a widget could pass
+   * `instructions` to `drive()`, an agent arriving through the relay or MCP
+   * never saw those, and an app that needed to say something about itself to
+   * BOTH paths had to put it in `Snapshot.note` — in the uncached half, paid
+   * for on every single turn, for a sentence that never changes. That was the
+   * one thing in the library the in-page path and the outside path disagreed
+   * about.
+   *
+   * Static means static. No ids, no counts, no user, nothing that differs
+   * between two people or two minutes; one per-screen word in here makes the
+   * prefix uncacheable across users, which is where most of the saving lives.
+   * It is in `fingerprint()` for that reason — it is part of what a cached
+   * copy claims.
+   */
+  instructions?: string;
   verbs: Array<{
     name: string;
     describe: string;
@@ -384,6 +511,19 @@ export interface Manifest {
      *  nothing else: driverkit never resolves it and never sends it to a
      *  model. See `Verb.at`, which this is copied from. */
     at?: string;
+    /** The screen, or screens, this verb belongs to; absent for "anywhere".
+     *  Copied from `Verb.screen`, which carries the reasoning — above all why
+     *  the tool list must NOT vary with the screen.
+     *
+     *  Copied in the SHAPE the app declared it, a string staying a string, so
+     *  that a client written before verbs could name two screens goes on
+     *  reading every single-screen app exactly as it did. A reader that wants
+     *  one rule for both should normalise with an `Array.isArray` of its own
+     *  rather than hope. */
+    screen?: string | string[];
+    /** `true` on a `commit` the app can undo. Copied from `Verb.reversible`;
+     *  absent makes no claim. */
+    reversible?: true;
     args?: Record<string, ArgSpec>;
     refuses?: string[];
   }>;
@@ -418,6 +558,10 @@ export interface TabInfo {
 export interface MountOptions {
   /** Shown in the manifest. A name a human would recognise. */
   app: string;
+  /** The app's own briefing, copied into `Manifest.instructions` and read by
+   *  every path that drives it — the in-page prompt and the MCP server alike.
+   *  Static: see `Manifest.instructions` for what may not go in it. */
+  instructions?: string;
   verbs: Verb<never>[] | Verb<Record<string, Scalar>>[] | Verb<any>[];
   /** Called fresh on every read. Must be cheap: it runs on each verb call. */
   visible: () => Snapshot;
@@ -439,4 +583,21 @@ export interface CallOptions {
    *  the call is refused as `stale` rather than applied to a row the agent
    *  never saw. Omitting it opts out of the check. */
   rev?: number;
+  /**
+   * The `Snapshot.screen` the agent believes it is on. Checked BEFORE `rev`,
+   * and refused as `wrong-screen`.
+   *
+   * Before this, a `next-page` call sent with no `rev` landed on a screen the
+   * agent had never seen, paged a different company's contact list, and
+   * answered `ok`. "You are somewhere else" is a better answer than "the
+   * number moved", and the two are different mistakes with different fixes —
+   * read again, versus navigate back — which is why this is a separate check
+   * and a separate slug rather than more prose on `stale`.
+   *
+   * Before `rev` for the same reason `rev` is before the argument check: if the
+   * agent is not even on the screen it thinks it is, then the arguments and the
+   * rev both describe something it never saw, and complaining about either
+   * answers the wrong question. Omitting it opts out, like `rev`.
+   */
+  screen?: string;
 }

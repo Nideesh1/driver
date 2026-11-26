@@ -513,6 +513,27 @@ function readRev(raw: Scalar | undefined): number | undefined | typeof BAD_REV {
 }
 
 /**
+ * The `screen` a model sent, as a string, or `BAD_REV`.
+ *
+ * The same shape as `readRev`, and for the same reason: a safety check that
+ * silently disables itself when its argument arrives in the wrong type is worse
+ * than no check, because the transcript then reads `ok` for a call made against
+ * a screen the model never saw. A number or a boolean is not a screen id, it is
+ * evidence the model did not read one off a screen, so it is refused rather
+ * than dropped. An empty string is refused too: `""` is not the same claim as
+ * leaving the field out, which is "I make none".
+ *
+ * `null` is absent, matching `checkArg` and `readRev`: a vendor serialising an
+ * omitted optional field as `null` has said nothing, not something wrong.
+ */
+function readScreen(raw: Scalar | undefined): string | undefined | typeof BAD_REV {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "string") return BAD_REV;
+  const text = raw.trim();
+  return text ? text : BAD_REV;
+}
+
+/**
  * One tool call: resolve it, maybe gate it, run it, render it.
  *
  * `result` is null when nothing was called on the driver — `read_screen`, or a
@@ -581,6 +602,31 @@ async function runOne(
     rev = hoisted;
   }
 
+  // `screen` is hoisted exactly like `rev`, down to the app keeping the name if
+  // it declared one: `go(screen)` is a real verb in a real app, and the app's
+  // meaning wins over ours.
+  let screen: string | undefined;
+  if (!(verb.args && "screen" in verb.args)) {
+    const raw = args.screen;
+    delete args.screen;
+    const hoisted = readScreen(raw);
+    if (hoisted === BAD_REV) {
+      const snapshot = driver.snapshot();
+      const result: Result = {
+        ok: false,
+        refused: "bad-argument",
+        hint:
+          "`screen` must be the id printed on the `screen` line of the screen you are " +
+          `acting on${snapshot.screen ? `, like \`${snapshot.screen}\`` : ""}. Got ` +
+          `${JSON.stringify(raw)}. Read the screen and quote it, or leave \`screen\` out ` +
+          "entirely.",
+        snapshot,
+      };
+      return { result, text: renderResult(result) };
+    }
+    screen = hoisted;
+  }
+
   if (verb.kind === "commit" && options.onBeforeCommit) {
     const snapshot = driver.snapshot();
     let decision: CommitDecision;
@@ -616,6 +662,9 @@ async function runOne(
     }
   }
 
-  const result = await driver.call(verb.name, args, rev === undefined ? {} : { rev });
+  const result = await driver.call(verb.name, args, {
+    ...(rev === undefined ? {} : { rev }),
+    ...(screen === undefined ? {} : { screen }),
+  });
   return { result, text: renderResult(result) };
 }

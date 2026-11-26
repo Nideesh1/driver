@@ -33,16 +33,25 @@ const REFUSAL = "refusal" as const;
  * The slugs an app may not use as a refusal of its own, or as a verb name.
  *
  * PROTOCOL.md's reserved list, in code, because a list that lives only in prose
- * is a list nothing checks. Six come from the core itself, three from the relay
- * and one from a confirmation gate, and they have one property in common: each
- * says something about WHERE a call stopped, not about the app's rules. An app
- * that refuses with `timeout` has taken away an agent's only way to tell "the
- * app said no, phrase it differently" from "your call never landed, reconnect
- * or pick another tab" — and an agent that cannot tell those apart will retry a
- * commit that may already have run.
+ * is a list nothing checks. Seven come from the core itself, three from the
+ * relay and one from a confirmation gate, and they have one property in common:
+ * each says something about WHERE a call stopped, not about the app's rules. An
+ * app that refuses with `timeout` has taken away an agent's only way to tell
+ * "the app said no, phrase it differently" from "your call never landed,
+ * reconnect or pick another tab" — and an agent that cannot tell those apart
+ * will retry a commit that may already have run.
+ *
+ * `wrong-screen` is the newest, and the only one that was ever an app's own. An
+ * app with six screens wrote the check by hand and had to invent a word for it;
+ * the next app would have picked `not-on-this-screen`, and an agent that had
+ * learned one would not recognise the other. The slug says where a call
+ * stopped — you are not there — so it belongs here with the rest, and
+ * `Verb.screen` with `CallOptions.screen` is how an app now gets the check for
+ * nothing. An app that was refusing it by hand is told so at mount; see below.
  */
 export const RESERVED_REFUSALS: readonly string[] = [
   "stale",
+  "wrong-screen",
   "unknown-verb",
   "bad-argument",
   "unmounted",
@@ -54,6 +63,38 @@ export const RESERVED_REFUSALS: readonly string[] = [
 ];
 
 const RESERVED = new Set(RESERVED_REFUSALS);
+
+/** Spelled once. The core originates this slug from two checks and names it in
+ *  a third message, and three string literals is how the three come to
+ *  disagree. */
+const WRONG_SCREEN = "wrong-screen";
+
+/**
+ * A verb's `screen` as a list, whatever shape the app declared it in.
+ *
+ * One string and `["one-string"]` mean the same thing to every check in here,
+ * and the alternative — `Array.isArray` at each of the three places that reads
+ * the field — is how two of the three come to disagree about the one-element
+ * case. The declared shape is still what goes in the manifest and in the
+ * fingerprint; this is only for deciding and for phrasing.
+ */
+function screensOf(screen: string | string[]): string[] {
+  return Array.isArray(screen) ? screen : [screen];
+}
+
+/**
+ * `a`, `b` and `c` — for a hint a person and a model both read.
+ *
+ * It reads naturally for one as well as for several, which is the point: the
+ * refusal for a verb on one screen must not acquire a comma or the word "and"
+ * because the field can now hold a list. One screen phrases exactly as it did
+ * before this field could be an array.
+ */
+function naming(screens: string[]): string {
+  const quoted = screens.map((s) => `\`${s}\``);
+  if (quoted.length <= 1) return quoted.join("");
+  return `${quoted.slice(0, -1).join(", ")} and ${quoted[quoted.length - 1]}`;
+}
 
 /**
  * Say so once, and keep running.
@@ -174,12 +215,40 @@ export function mount(options: MountOptions): Driver {
       );
     }
 
+    // Thrown at mount, the way a duplicate name is, and for the same reason: it
+    // is a static fact about the surface that makes the verb permanently
+    // uncallable. `screen: []` says the verb works on no screen at all, which
+    // no author means — it is what a `.filter()` over a list of screens
+    // produces when the list was empty, or what a config file hands over when
+    // a key is missing. The author who meant "anywhere" leaves the field out,
+    // and that is said here rather than guessed at, because guessing either
+    // way is wrong: treating it as "anywhere" silently makes a scoped verb
+    // global, and treating it as "nowhere" leaves a verb in everybody's cached
+    // prefix that can only ever be refused.
+    if (Array.isArray(verb.screen) && verb.screen.length === 0) {
+      throw new Error(
+        `driverkit: the verb \`${verb.name}\` declares \`screen: []\`, which says it works on ` +
+          `no screen at all. Omit \`screen\` to mean "anywhere", or name the screens it works ` +
+          `on.`,
+      );
+    }
+
     for (const slug of verb.refuses ?? []) {
       if (RESERVED.has(slug)) {
         throw new Error(
           `driverkit: the verb \`${verb.name}\` declares the reserved refusal \`${slug}\` ` +
             `(reserved: ${RESERVED_REFUSALS.join(", ")}). Reserved slugs say where a call ` +
-            `stopped, not what your app decided; pick a name from your own vocabulary.`,
+            `stopped, not what your app decided; pick a name from your own vocabulary.` +
+            // Named, because this is the one reserved slug an app may already
+            // be using: it was an app's invention before it was the core's, and
+            // an author who hits this wants the replacement rather than a rule.
+            // At mount, where it costs one stack trace at startup, and never on
+            // a refusal path.
+            (slug === WRONG_SCREEN
+              ? ` \`${WRONG_SCREEN}\` is now the core's: put \`screen: "<the screen this verb ` +
+                `is on>"\` on the verb, give \`Snapshot.screen\` the screen that is live, and ` +
+                `the refusal — naming both screens — comes back without this guard.`
+              : ""),
         );
       }
     }
@@ -191,8 +260,13 @@ export function mount(options: MountOptions): Driver {
   // driving, so it must not vary call to call; deriving it lazily on every
   // read would invite someone to fold `visible()` into it.
   const manifest: Manifest = {
-    version: fingerprint(options.app, verbs),
+    version: fingerprint(options.app, verbs, options.instructions),
     app: options.app,
+    // The app's own briefing, in the half that is cached once. Omitted rather
+    // than sent as an empty string, so an app that passes nothing produces the
+    // manifest it produced before this field existed -- byte for byte, which
+    // is what the fingerprint hashes.
+    ...(options.instructions ? { instructions: options.instructions } : {}),
     verbs: [...verbs.values()].map((v) => ({
       name: v.name,
       describe: v.describe,
@@ -201,6 +275,18 @@ export function mount(options: MountOptions): Driver {
       // hint for whoever is drawing the run, not a way to find an element; see
       // `Verb.at`.
       ...(v.at ? { at: v.at } : {}),
+      // `screen` IS read in here, by `call` below, and it is still copied for
+      // the same reason `kind` is: the manifest is the only description of this
+      // verb an agent gets, and "works only on the companies list" is a fact it
+      // should read in the cached half rather than discover by being refused.
+      //
+      // Copied in the shape the app declared, a string staying a string rather
+      // than being normalised to a one-element array. Every client reading
+      // `verbs[].screen` today reads it as a string, and normalising would move
+      // every single-screen app's manifest -- and its fingerprint -- for a
+      // change that app did not make.
+      ...(v.screen ? { screen: v.screen } : {}),
+      ...(v.reversible ? { reversible: v.reversible } : {}),
       ...(v.args ? { args: v.args } : {}),
       ...(v.refuses ? { refuses: v.refuses } : {}),
     })),
@@ -226,11 +312,67 @@ export function mount(options: MountOptions): Driver {
       return no("unknown-verb", `no verb named \`${name}\`. known: ${known}`, read());
     }
 
+    const before = read();
+
+    // WHICH SCREEN comes before WHICH REV, which comes before the arguments.
+    // Each check describes a wider mistake than the next, and the widest one is
+    // the useful answer: if the agent is not on the screen it thinks it is,
+    // then the rev and the arguments both describe something it never saw, and
+    // answering "the number moved" sends it to re-read a screen when what it
+    // needs is to navigate back. A `next-page` that lands on another company's
+    // contact list and answers `ok` is the live bug this ordering exists to
+    // make impossible.
+    //
+    // Both screen checks are skipped when the app does not fill in
+    // `Snapshot.screen`. There is nothing to compare against, and inventing a
+    // comparison -- treating absent as "not that one" -- would refuse every
+    // screen-scoped verb in an app that simply has not adopted the field.
+    if (opts.screen !== undefined && before.screen !== undefined && opts.screen !== before.screen) {
+      return no(
+        WRONG_SCREEN,
+        `you believed you were on the \`${opts.screen}\` screen but the app is on ` +
+          `\`${before.screen}\`; read the screen again before acting on it`,
+        before,
+      );
+    }
+
+    if (verb.screen !== undefined) {
+      const wants = screensOf(verb.screen);
+      if (before.screen === undefined) {
+        // Said once, not refused. The app declared a verb→screen mapping and no
+        // live screen, so the check it asked for cannot run -- which is a
+        // mistake in the app rather than in the call, and refusing a verb an
+        // author believes they scoped correctly would break a working app over
+        // a missing field. See `warn`.
+        warn(
+          `the verb \`${name}\` names ${wants.length > 1 ? "the screens" : "the screen"} ` +
+            `${naming(wants)} but \`visible()\` returns no \`screen\`, so the check cannot run. ` +
+            `Fill in \`Snapshot.screen\` with the id of the screen that is live, or drop ` +
+            `\`screen\` from the verb.`,
+        );
+      } else if (!wants.includes(before.screen)) {
+        // ALL the screens are named, the live one and every one the verb works
+        // on. `wrong-screen` on its own is a dead end: an agent that is told no
+        // and not told where to go has to guess, and the guess is another
+        // refused call. Naming only one of several would be a subtler version
+        // of the same dead end -- it would send an agent to the contacts list
+        // when the company screen it is two clicks from would have done. The
+        // verb that navigates is the app's and cannot be named from here, which
+        // is what `Manifest.instructions` is for.
+        return no(
+          WRONG_SCREEN,
+          `you are on the \`${before.screen}\` screen; \`${name}\` works on the ` +
+            `${naming(wants)} ${wants.length > 1 ? "screens" : "screen"}. Go ` +
+            `${wants.length > 1 ? "to one of those" : "there"} first, then call it again.`,
+          before,
+        );
+      }
+    }
+
     // Staleness is checked BEFORE arguments, and that order is deliberate. If
     // the screen has moved on, the arguments describe a row the agent never
     // saw, so complaining about their shape would be answering the wrong
     // question -- and the fix is the same either way: read again.
-    const before = read();
     if (opts.rev !== undefined && opts.rev !== before.rev) {
       return no(
         "stale",
@@ -337,7 +479,11 @@ export function mount(options: MountOptions): Driver {
  * the copy I cached still the current one" -- and a collision costs a stale
  * manifest, not a security property.
  */
-function fingerprint(app: string, verbs: Map<string, Verb<any>>): string {
+function fingerprint(
+  app: string,
+  verbs: Map<string, Verb<any>>,
+  instructions?: string,
+): string {
   // `kind` is in here on purpose. A verb reclassified from `describe` to
   // `commit` has not changed its name or its arguments, so without this the
   // fingerprint would not move and every agent holding a cached manifest would
@@ -346,6 +492,36 @@ function fingerprint(app: string, verbs: Map<string, Verb<any>>): string {
   // So is `at`, for the weaker but real version of the same reason: it is part
   // of what a cached manifest claims about the surface, and a UI holding the
   // old copy would outline an element the verb no longer touches.
+  //
+  // `screen` and `reversible` are in for the strong version of it. Moving a
+  // verb to another screen changes where a cached copy says it works, and so
+  // does GIVING IT A SECOND ONE -- a verb that now also works on a company's
+  // contact list is a verb whose cached description was wrong about where it
+  // can be called. Dropping `reversible` from a commit changes whether an agent
+  // was told there is a way back -- which is the same class of mistake as a
+  // reclassified `kind`.
+  //
+  // The DECLARED shape is hashed, so `"contacts"` and `["contacts"]` give
+  // different versions. That is not a wart: they are different bytes in the
+  // manifest, a client caching the manifest would see a different document, and
+  // a fingerprint that hid the difference would be claiming two cached copies
+  // are interchangeable when they do not read the same. So is `instructions`: it is rendered straight into the
+  // system prompt, so an agent holding the old manifest is briefed with the
+  // app's old words.
+  //
+  // All three are APPENDED, and only when the app actually used them, so the
+  // shape of an app that uses none is the exact string it was before these
+  // fields existed. That is not neatness: every stored `Manifest.version` out
+  // there was computed from the old string, and an upgrade of this library that
+  // silently moved every app's version would tell every agent its cached
+  // manifest had gone stale when nothing about the app had changed at all.
+  const extras = (v: Verb<any>): Array<Record<string, unknown>> => {
+    const e: Record<string, unknown> = {};
+    if (v.screen) e.screen = v.screen;
+    if (v.reversible) e.reversible = v.reversible;
+    return Object.keys(e).length ? [e] : [];
+  };
+
   const shape = JSON.stringify([
     app,
     [...verbs.values()]
@@ -356,8 +532,10 @@ function fingerprint(app: string, verbs: Map<string, Verb<any>>): string {
         v.at ?? null,
         v.args ?? null,
         v.refuses ?? null,
+        ...extras(v),
       ])
       .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+    ...(instructions ? [instructions] : []),
   ]);
   let h1 = 0x811c9dc5;
   let h2 = 0x01000193;

@@ -85,6 +85,37 @@ import type { Settings } from "./settings.ts";
  */
 export type RunControlsFactory = (options: RunControlsOptions) => RunControls;
 
+/**
+ * The selection size at which a commit is confirmed even though the app said
+ * it could be undone. A commit acting on MORE than this many rows is asked
+ * about; `commitAskAbove` overrides it.
+ *
+ * **This number is a judgement and not a fact**, so here is the judgement. Two
+ * lines could have been drawn and they are drawn in different places:
+ *
+ *   - Where can a person still check the claim themselves? A screenful. This
+ *     library's premise is that an agent sees exactly what the person sees, and
+ *     its own demo puts twenty rows on a screen; past a screenful the person
+ *     cannot look at what is about to change, so "the app can undo it" is a
+ *     promise they have no way to weigh.
+ *   - Where does an app's undo stop being credible? Much higher — somewhere in
+ *     the thousands, where a batch half-applies, a buffer sized for one row
+ *     runs out, or a server gives up at row 1,800.
+ *
+ * The lower line is taken, and 25 rather than 20 because the first is the point
+ * where the gate stops being able to help and the second is a page size that
+ * differs per app: a selection a few rows past one screenful is an ordinary
+ * thing a person was probably looking at, and tripping the dialog on it would
+ * put us back to asking about the trivial. Anything that cannot be seen at once
+ * is asked about, which is the side of the line to err on — the cost of a
+ * needless question here is one click, and the cost of a missed one is an
+ * "undo" that turns out to be partial.
+ *
+ * It is one number for every app and therefore wrong for some of them, which is
+ * exactly why it is an option.
+ */
+export const COMMIT_ASK_ABOVE = 25;
+
 
 export interface WidgetOptions
   extends Pick<DriveOptions, "think" | "instructions" | "maxSteps" | "refusalLimit"> {
@@ -152,7 +183,8 @@ export interface WidgetOptions
    *  passing if the host app overrode that property. */
   gap?: number;
   /**
-   * Ask the person before every `commit` verb. **Default true.**
+   * Ask the person before a `commit` verb the app cannot undo. **Default
+   * true.**
    *
    * This is the one place where the widget's default differs from `drive`'s,
    * and the difference is deliberate. `drive` is a library primitive and a
@@ -167,11 +199,56 @@ export interface WidgetOptions
    * the cheapest possible place to put a human in front of the expensive
    * failure.
    *
-   * Set it false to opt out — for an app whose commits are all small and
-   * reversible, where a question every time is noise that teaches people to
-   * click through questions.
+   * **A commit that declares `Verb.reversible` runs without a question**,
+   * which is what that flag was added to buy. `set-setting("dense-rows",
+   * "true")` and accepting 3,412 contacts were both getting the same dialog,
+   * and a modal on a page-size change is how people learn to click Yes without
+   * reading — the next one they skip is the bulk accept. An absent
+   * `reversible` still makes no claim in either direction and is still gated:
+   * a commit that has not said there is a way back is treated as one that has
+   * not got one. See `commitAskAbove` for the selection size that overrides
+   * the flag, and `confirmEveryCommit` for an app that wants the old
+   * behaviour.
+   *
+   * Set it false to opt out entirely — for an app whose commits are all small,
+   * where a question even on the irreversible ones is noise that teaches
+   * people to click through questions.
    */
   confirmCommits?: boolean;
+  /**
+   * The selection size past which a commit is confirmed **even when it
+   * declared itself reversible**. Default `COMMIT_ASK_ABOVE`.
+   *
+   * "Undo" over three thousand rows is a promise an app may not be able to
+   * keep at that size, whatever it declared — an undo buffer sized for one
+   * row, a half-applied batch, a server that gave up at row 1,800.
+   * `reversible` is a claim about the KIND of change and not about its volume,
+   * so the volume is checked separately and the flag does not get to answer
+   * for it.
+   *
+   * The size is the count the run's last `describe` verb reported, or
+   * `Snapshot.selectedCount`, or `Snapshot.selected.length` when the whole
+   * selection is on screen. A commit with no count at all is never "large" by
+   * this test; an irreversible one is gated anyway by the absence of a claim,
+   * which is the stronger of the two reasons.
+   */
+  commitAskAbove?: number;
+  /**
+   * Ask before **every** `commit`, reversible or not. Default false.
+   *
+   * The behaviour the widget had before it read `Verb.reversible`, kept as an
+   * option rather than as the default. An app that genuinely wants it exists:
+   * one whose "undo" is a toast that vanishes in five seconds, or one under a
+   * rule that a person signs for every write. Those are decisions about the
+   * app and the app gets to make them; what they are not is the right default
+   * for everybody, because a dialog on a page-size change teaches people to
+   * click through dialogs.
+   *
+   * Moot when `confirmCommits` is false — nothing is asked either way — and
+   * moot when the host supplies `onBeforeCommit`, which replaces the built-in
+   * row outright.
+   */
+  confirmEveryCommit?: boolean;
   /**
    * Where Pause, Resume and Step are sent. Default `runControls`.
    *
@@ -240,8 +317,10 @@ const STOP_NOTE: Record<StopReason, string | null> = {
  * panel.unmount();
  * ```
  *
- * Every `commit` verb is confirmed with the person by default, in the panel,
- * with the count the preceding `describe` reported. See `confirmCommits`.
+ * A `commit` verb the app cannot undo is confirmed with the person by default,
+ * in the panel, with the count the preceding `describe` reported. One that
+ * declares `Verb.reversible` runs without a question unless it acts on a large
+ * selection. See `confirmCommits`, `commitAskAbove` and `confirmEveryCommit`.
  */
 export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   const doc = options.document ?? (globalThis as { document?: DocumentLike }).document;
@@ -265,6 +344,15 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     ...defaultSettings(options.confirmCommits !== false),
     ...(options.pace === undefined ? {} : { pace: clampPace(options.pace) }),
   });
+
+  // Not a `Settings` field, deliberately: the three settings and the commit
+  // switch are the viewer's to change because they are about how fast this
+  // person reads and how much they trust this run, and "how many rows is too
+  // many to take an app's undo on faith for" is not that — it is a property of
+  // the app's own undo, which the author knows and the viewer does not. So it
+  // is a mount option and nothing else, and it is not remembered.
+  const askAbove =
+    options.commitAskAbove === undefined ? COMMIT_ASK_ABOVE : options.commitAskAbove;
 
   const host = doc.createElement("div");
   // A class on the host element, in the light DOM, because the positioning
@@ -450,7 +538,9 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   if (!options.onBeforeCommit) {
     const commitRow = setRow(
       "Confirm commits",
-      "Ask before any step that changes data. One question per call, not per row — a commit acts on the whole selection.",
+      options.confirmEveryCommit
+        ? "Ask before any step that changes data. One question per call, not per row — a commit acts on the whole selection."
+        : "Ask before a step that changes data the app cannot undo, and before any step that changes a lot of rows. One question per call, not per row — a commit acts on the whole selection.",
     );
     commitRow.appendChild(
       toggle("dk-t-commits", "Ask before changing data", () => settings.confirmCommits, (on) => {
@@ -649,10 +739,6 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     /** The built-in gate. Renders a question in the transcript and waits. */
     function confirmCommit(req: CommitRequest): Promise<CommitDecision> {
       if (!settings.confirmCommits) return Promise.resolve(true);
-      // A question nobody can see is not a question. The person may have hit
-      // Escape while the model was thinking, or be reading the settings view.
-      setOpen(true);
-      setSettingsOpen(false);
 
       // `Snapshot.selectedCount` as the fallback, because a commit verb takes
       // no predicate and acts on the current selection — so the size of that
@@ -660,7 +746,43 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       // `describe` verb happened to report one in this run. It matters most in
       // the case where `lastCount` is missing for a good reason: the person
       // selected the rows themselves, or did it in an earlier run.
-      const count = lastCount ?? req.snapshot.selectedCount;
+      //
+      // `selected.length` last, and only as a floor: that field carries just
+      // the ids that are ON SCREEN, so it is the true size of the selection
+      // exactly when the whole selection is in front of the person, and an
+      // undercount otherwise. An app that fills `selectedCount` is believed
+      // over it, which is why it comes third.
+      const count = lastCount ?? req.snapshot.selectedCount ?? req.snapshot.selected?.length;
+
+      // The flag is read here and nowhere else, and only on a `commit` —
+      // `drive` calls this gate for commits alone, so `req.verb.kind` is
+      // already that. Absent means the app made no claim, which is gated: a
+      // commit that has not said there is a way back is treated as one that
+      // has not got one. See `confirmCommits`.
+      const reversible = req.verb.reversible === true;
+
+      // A size check beside the flag rather than folded into it, because they
+      // answer different questions. `reversible` is a claim about the kind of
+      // change; this is about how much of it there is, and an undo over
+      // thousands of rows is a promise an app may not be able to keep at that
+      // size whatever it declared. Strictly greater than, so the option reads
+      // as "ask above this many". See `COMMIT_ASK_ABOVE`.
+      const large = count !== undefined && count > askAbove;
+
+      if (reversible && !options.confirmEveryCommit && !large) {
+        // Through without a dialog, which is the whole point of the flag. Note
+        // what is NOT done here: `lastCount` is left alone. It is cleared when
+        // a question is asked, because that is when the number has been put in
+        // front of somebody and spoken for; a commit that ran without asking
+        // has not used it up, and the next commit — which may well be the
+        // irreversible one — still needs it to be answerable.
+        return Promise.resolve(true);
+      }
+
+      // A question nobody can see is not a question. The person may have hit
+      // Escape while the model was thinking, or be reading the settings view.
+      setOpen(true);
+      setSettingsOpen(false);
 
       const row = el("div", "dk-ask");
       const question = el("div", "dk-ask-q");
@@ -669,8 +791,21 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
           ? `${req.verb.describe}?`
           : `${req.verb.describe} — ${commas(count)} rows?`;
       const why = el("div", "dk-ask-why");
+      // The two dialogs must not read alike. Two questions with the same words
+      // are one question as far as a person's attention is concerned, and the
+      // person who stops reading the reversible one has stopped reading the
+      // other one too — which is the failure this whole change exists to
+      // avoid, reintroduced one level down. So a reversible commit says there
+      // is a way back, and says why it is being asked about at all when the
+      // only reason is the size.
       why.textContent =
-        "This changes data and may be irreversible." +
+        (reversible
+          ? "This changes data, but the app says this can be undone." +
+            (large
+              ? " You are being asked because of how many rows it affects: an undo over" +
+                " this many is a promise an app may not be able to keep."
+              : "")
+          : "This changes data and may be irreversible.") +
         (count === undefined
           ? " No count was reported, so nobody can tell you how many rows it affects."
           : "") +

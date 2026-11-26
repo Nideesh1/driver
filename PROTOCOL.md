@@ -65,13 +65,50 @@ repurposing one is breaking.
 ```json
 { "t": "hello", "tab": "7f3a-...", "app": "Contacts",
   "manifest": { "version": "a3f2...", "app": "Contacts", "verbs": [...] },
-  "snapshot": { "where": "contacts", "rev": 7, "rows": [...] },
+  "snapshot": { "where": "contacts", "screen": "contacts", "rev": 7, "rows": [...] },
   "title": "Contacts — Acme", "url": "/contacts?company=Acme" }
 ```
 
 The `tab` id is minted by the tab, not the relay, so a reconnect can resume the
 same identity. `title` and `url` exist only so a human can tell two tabs apart
 when asked "which one?".
+
+The manifest is the static half and carries three optional fields a relay only
+forwards, all of them cacheable for the life of the app:
+
+- `instructions` — the app's own briefing, in its own words ("this app has
+  screens: dashboard, contacts, companies, settings — `go` reaches those"). It
+  belongs here because it never changes, and because the alternative was an app
+  repeating itself in every snapshot's `note`, in the half that is paid for on
+  every turn. An MCP server puts it in its server instructions; an in-page loop
+  folds it into the cached system prompt.
+- `verbs[].screen` — the screen that verb belongs to, **or an array of the
+  screens it belongs to**; absent for "anywhere".
+  **The tool list must not vary with the live screen**: a verb list that changed
+  on every navigation would bust the prompt prefix every time the person moved,
+  which is the cost argument the whole protocol is built on. So every verb is
+  offered on every screen, the mapping is declared once in the cached half, and
+  the core refuses a call made off a verb's screens as `wrong-screen` with the
+  live screen and all of the verb's own named in the hint.
+
+  The array exists for a verb that genuinely lives on two screens, and it was
+  added because one string made the worked example lie: `next-page` pages both
+  the contacts list and a company's contact list, so declaring either screen
+  would refuse a paging call on a screen that is still publishing a `page`
+  block. Faced with that, an app invents a refusal slug of its own, which is
+  the pattern `wrong-screen` was reserved to end.
+
+  A client must read both shapes. The shape the app declared is the shape that
+  is sent — a string stays a string, and a relay must not normalise it: the
+  manifest's bytes are what `version` fingerprints, so normalising would move
+  the version of every app that names one screen. `screen: []` is not valid and
+  is refused where the app mounts: it says the verb works nowhere, which is an
+  authoring mistake rather than a way to say "anywhere".
+- `verbs[].reversible` — `true` on a `commit` the app can undo. Absent makes no
+  claim, like `kind`. It exists because changing a page size and accepting three
+  thousand contacts were both `commit`, so both were shouted about and both
+  stopped to ask a person — and a confirmation dialog on a page-size change is
+  how people learn to click Yes without reading.
 
 **`result`** — the answer to exactly one `call`.
 
@@ -84,8 +121,18 @@ when asked "which one?".
 
 ```json
 { "t": "snapshot", "tab": "7f3a-...",
-  "snapshot": { "where": "contact c-8821", "rev": 8, ... } }
+  "snapshot": { "where": "contact c-8821", "screen": "contact", "rev": 8, ... } }
 ```
+
+`snapshot.screen` is optional and is a stable, kebab-case screen id beside
+`where`. `where` is prose for a human and carries the filter, the sort and, on
+a drill-down, a description of the record — so it moves constantly for reasons
+that are not navigation, and "did I navigate?" cannot be answered by diffing
+it. `screen` can be compared with string equality, and that is its whole job.
+Which screen is live is dynamic and belongs here; the *names* of an app's
+screens and which verb belongs to which are static and belong in the manifest.
+A tab that does not describe its screens omits it, and that is not a claim that
+it has one. See `Snapshot.screen`.
 
 **Every tab→relay frame carries `tab`.** `POST /dk/result` has no path parameter
 and the relay serves many tabs at once, so without it the relay cannot tell who
@@ -103,12 +150,27 @@ is what makes the shared-presence case work: both parties watching one screen.
 
 ```json
 { "t": "call", "id": "c-17", "name": "select-where",
-  "args": { "where": "company=Acme" }, "rev": 7 }
+  "args": { "where": "company=Acme" }, "rev": 7, "screen": "contacts" }
 ```
 
 `id` is echoed back in the `result`. `rev` is optional and is the agent's claim
 about what it was looking at; the core refuses the call as `stale` when it no
 longer matches. See `CallOptions.rev`.
+
+`screen` is optional and is the agent's claim about WHICH SCREEN it was looking
+at: the `snapshot.screen` it last read. The core checks it **before** `rev` and
+refuses the call as `wrong-screen`, naming the screen the caller believed it was
+on and the one the app is actually on. The two checks catch different mistakes
+and have different fixes — navigate back, versus read again — which is why they
+are two fields and two slugs rather than more prose on `stale`. A paging call
+sent with neither lands on whatever screen is there when it arrives, pages a
+list the agent never saw, and answers `ok`.
+
+A relay forwards both untouched and compares neither. It does not know which
+screen a tab is on, and a relay that decided would be a second set of rules
+beside the core's. An empty `screen` string is dropped rather than forwarded: it
+is not the id of any screen, and no app should be asked to refuse a call over a
+field a caller left blank. See `CallOptions.screen`.
 
 **`ping`** — a comment line, every 20s, to keep proxies from closing an idle
 stream. Carries nothing.
@@ -141,7 +203,7 @@ tries to drive it.
 | `GET` | `/dk/tabs/:tab/manifest` | the static half — cache this |
 | `GET` | `/dk/tabs/:tab/snapshot` | the last snapshot the tab pushed |
 | `GET` | `/dk/tabs/:tab/watch` | SSE: `snapshot` frames as they happen |
-| `POST` | `/dk/tabs/:tab/call` | `{name, args?, rev?}` → a `WireResult` |
+| `POST` | `/dk/tabs/:tab/call` | `{name, args?, rev?, screen?}` → a `WireResult` |
 
 And the two the tab uses, which an agent never touches:
 
@@ -359,9 +421,16 @@ The relay answers with a `WireResult` whose `snapshot` is **absent** and whose
 | `tab-went-away` | the stream closed between accepting the call and answering |
 | `timeout` | the tab accepted the call and did not answer within the deadline |
 
-These three slugs, plus `stale`, `unknown-verb`, `bad-argument`, `unmounted`
-and `threw` from the core, and `declined-by-user` from a confirmation gate, are
-**reserved**. (`declined-by-user` is not a transport outcome at all — it is a
+These three slugs, plus `stale`, `wrong-screen`, `unknown-verb`,
+`bad-argument`, `unmounted` and `threw` from the core, and `declined-by-user`
+from a confirmation gate, are **reserved**. (`wrong-screen` is the core's answer
+to a call aimed at a screen the app is not on — either because the verb declared
+a `screen` of its own and the live one is something else, or because the call
+carried a `screen` that no longer matches. It was an app's invention before it
+was the core's: an app with six screens had to write the check by hand and name
+it, the next one would have picked `not-on-this-screen`, and an agent that had
+learned one would not have recognised the other. It says where a call stopped,
+not what an app decided, so it is reserved like the rest.) (`declined-by-user` is not a transport outcome at all — it is a
 person saying no to a `commit` before it ran. It is a refusal rather than an
 error on purpose, so the loop that drives the app treats it as an answer to
 adapt to, and never as a failure to retry.) An app must not name one of its

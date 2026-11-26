@@ -41,22 +41,41 @@ evidence and nothing more. Do not write a verb for a function you have not read.
   filtered, and returns `{ count }`. The paired `commit` verb takes **no arguments** and acts on the current
   selection. That is what makes a count always visible before data moves.
 - **Declare `kind` on every verb.** An absent one makes no safety claim in either direction, so an agent cannot
-  tell a free read from something irreversible. `read` changes nothing, `describe` changes the selection or the
-  filter, `commit` changes data.
+  tell a free read from something irreversible. `read` **changes no data and reports no count** — navigation is a
+  read, and it is not "changes nothing": it moves the person's screen out from under them. `describe` changes what
+  is **selected** (not merely filtered) and reports a `count`. `commit` changes data.
+- **Mark a `commit` the app can undo `reversible: true`.** Read only on a `commit`, and absent makes no claim. It
+  exists because a page-size change and accepting 3,412 rows were both getting the same shouted capitals, and a
+  banner that fires on a page size is one a model learns to read past. It says there is a way back, not that
+  nobody minds.
+- **A verb that works on one screen only declares `screen: "<id>"`**, and `visible()` returns `screen` — the live
+  screen's stable kebab-case id, beside the prose `where`. The core then refuses a call made elsewhere as
+  `wrong-screen`, naming the screen the app is on *and* the screen the verb wants. Do not write that guard by hand
+  and do not invent a slug for it. **The tool list must not vary with the screen**: declaring the mapping
+  statically is what keeps the prompt prefix cacheable across navigations. A verb that genuinely works on two
+  screens names both: `screen` takes a list (`["contacts", "company"]`), and the refusal names every screen it
+  works on. `screen: []` is refused at mount — leave the field out to mean "anywhere".
+- **The app's own briefing goes in `MountOptions.instructions`**, not in every snapshot's `note`. It lands in
+  `Manifest.instructions`, which is cached once and read by both the in-page loop and an agent arriving over the
+  relay or MCP. A host's own `instructions` to `drive()`/`mountWidget` is a *different* field, folded in after the
+  app's — so the host's is the one a model follows if they disagree — and it reaches only the in-page path.
 - **Fill in `refuses`.** Short stable slugs from the app's own vocabulary (`nothing-selected`, `already-paid`).
   It is the field people skip and the one that lets an agent avoid a call instead of discovering the answer by
   making it. Declaring it also opts the verb into a dev-time check.
-- **Never use a reserved slug** as a verb name or a refusal: `stale`, `unknown-verb`, `bad-argument`,
-  `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`, `declined-by-user`. `mount()` throws on it.
+- **Never use a reserved slug** as a verb name or a refusal: `stale`, `wrong-screen`, `unknown-verb`,
+  `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`, `declined-by-user`. `mount()`
+  throws on it. `wrong-screen` is the one an app is likeliest to have invented already — use `screen` instead.
 - **Names** are kebab-case, stable, unique. **`describe`** is one imperative line in the user's vocabulary
   ("accept the selected contacts"), never "calls patchContacts". Each arg's `describe` is written for a reader
   who cannot see the app; use `oneOf` instead of prose when the set is closed.
 - **Arguments are scalars only** (`string | number | boolean`), because a verb whose args cannot survive JSON
   cannot be called from outside the page.
 - **`visible()` returns only what the person can see** — same filter, same sort, same page — plus `rev`,
-  `page` (include `total` only if the app really knows it; omit `page` only when the rows are all there are),
-  `selected` (on-screen ids only) and `selectedCount` (the honest total). It runs on every call, so keep it
-  cheap, and never put a per-user string in the verb list: the verbs are the half that gets cached.
+  `screen` (the live screen's id, if the app has more than one), `page` (include `total` only if the app really
+  knows it; omit `page` only when the rows are all there are), `selected` (on-screen ids only) and
+  `selectedCount` (the honest total). `screen` is for comparing with `===`; `where` is the prose about it, so do
+  not spell the screen's identity into `where` and leave `screen` out. It runs on every call, so keep it cheap,
+  and never put a per-user string in the verb list: the verbs are the half that gets cached.
 - **`run` calls code that already exists.** If an action lives only inside a click handler, do not invent a
   selector: mark the button `data-dk="..."` and use `clickHandle("...")` from `@driverkit/adapters`, and list
   the markup change as a separate step for the human to approve. Same for `rowsFromTable` / `revFromMutations`

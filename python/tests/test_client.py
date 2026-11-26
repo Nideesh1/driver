@@ -190,6 +190,38 @@ class Reads(ClientTest):
         self.assertIn("10,000", rendered)
         self.assertIn("on screen", rendered)
 
+    def test_the_screen_id_renders_above_the_prose_and_only_when_the_app_has_one(self):
+        # `where` carries the filter, the sort and a drill-down's record
+        # description, so it moves constantly for reasons that are not
+        # navigation. `screen` is the one line on this block that can be
+        # compared for equality, which is what makes "did I navigate?"
+        # answerable at all. First, because it is the stable fact and the prose
+        # is about it. String-for-string with the TS renderer, which is the
+        # standing promise about these two files.
+        rendered = render_snapshot(
+            Snapshot.from_dict(
+                {
+                    "where": "Acme Industrial \u2014 410 contacts, pending",
+                    "screen": "company",
+                    "rev": 12,
+                    "rows": [{"id": "c-1"}],
+                }
+            )
+        )
+        self.assertTrue(rendered.startswith("screen: company\nwhere: Acme Industrial"))
+        # The wire name is the contract and a round trip must not lose it.
+        self.assertEqual(
+            Snapshot.from_dict({"where": "x", "rev": 1, "screen": "a"}).to_dict()["screen"], "a"
+        )
+
+        # An app that does not describe its screens renders exactly what it
+        # rendered before the field existed. Not cosmetic: this is the uncached
+        # half, and a line that says nothing is paid for on every turn.
+        plain = Snapshot.from_dict({"where": "contacts", "rev": 12, "rows": [{"id": "c-1"}]})
+        self.assertTrue(render_snapshot(plain).startswith("where: contacts (rev 12)"))
+        self.assertNotIn("screen:", render_snapshot(plain))
+        self.assertNotIn("screen", plain.to_dict())
+
     def test_an_uncounted_selection_stays_uncounted_rather_than_becoming_its_window(self):
         # Absence means "I do not count", and defaulting it to `len(selected)`
         # would be the library inventing the exact false confidence the field

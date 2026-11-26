@@ -11,9 +11,9 @@ between the file on disk and the response body. That something is here.
 
 WHY A STRIPPER AND NOT A TRANSPILER. Type erasure is all that is needed:
 driverkit's source deliberately contains no `enum`, no `namespace`, no
-parameter properties, no decorators and no generic functions — every TS
-construct in it is pure annotation, which means the correct output is the input
-with some spans deleted. Nothing is rewritten, no code moves, and line numbers
+parameter properties and no decorators — every TS construct in it is pure
+annotation, which means the correct output is the input with some spans
+deleted. Nothing is rewritten, no code moves, and line numbers
 are preserved exactly (every deleted span keeps its newlines), so a stack trace
 in the browser console points at the real line of the real `.ts` file.
 
@@ -27,31 +27,46 @@ drops the type-only ones:
   * `: T` annotations on parameters, variables and return positions.
   * `as T` and `satisfies T` assertions.
   * `?` optional-parameter markers.
-  * `<T, U>` type arguments at `new`/call sites.
+  * `<T, U>` type arguments at `new`/call sites and type *parameters* on
+    generic functions and arrows.
   * `!` non-null assertions.
 
 The two genuinely ambiguous characters in TypeScript are `:` and `<`, and both
 are resolved structurally rather than by regex:
 
-  `:` — a frame stack records, for every open bracket, whether it is a block or
-  an object literal, and how many unmatched ternary `?`s are outstanding. A `:`
-  belongs to a ternary if one is outstanding, to a property if the frame is an
-  object literal, and otherwise it is an annotation. (`=> {` is always a block
-  in JavaScript — an object literal there needs parentheses — which is what
-  makes the block/object test decidable without a parser.)
+  `:` — a frame stack records, for every open bracket, whether it is a block, an
+  object literal or a binding pattern, and how many unmatched ternary `?`s are
+  outstanding. A `:` belongs to a ternary if one is outstanding, to a property
+  if the frame is an object literal or a pattern, and otherwise it is an
+  annotation — except after `)`, which cannot be a property key, so a `:` there
+  is a method's return type even inside an object literal. (`=> {` is always a
+  block in JavaScript — an object literal there needs parentheses — which is
+  what makes the block/object test decidable without a parser.)
 
   `<` — a trial balanced scan runs over the following tokens and accepts only
   type-shaped ones. If the scan closes and the token after it is `(`, these were
-  type arguments; otherwise the `<` was a less-than and is emitted untouched.
+  type arguments or parameters; otherwise the `<` was a less-than and is emitted
+  untouched. The scan is skipped entirely when the preceding token is a literal
+  or a closing bracket, where a `<` can only be less-than; where nothing that
+  could end an operand precedes it — after `=`, `:`, `(`, `,` — it cannot be
+  less-than at all, which is how `map: <T>(x: T): T => x` is recognised.
   `>>` closing two nested angles is handled by consuming the `>` characters of a
   single token one at a time, which is also why `>>> 0` in the core's
   fingerprint survives.
 
+Two smaller ambiguities are resolved the same way. A `{` in a return-type
+position is the function's body rather than an object type whenever the type
+read so far is already complete (`clear(): void {}`), since nothing continues a
+finished type. And `as` is a rename, not an assertion, while inside an
+`import`/`export` specifier clause — a clause being exactly a run of names,
+strings, `{`, `}`, `,` and `*`, so a `.` or a `(` ends one and `import.meta as
+unknown as T` is an assertion again.
+
 This is not a TypeScript compiler and makes no attempt to be. It is checked by
 executing its output: see `verify_strip.py`, which strips every package file,
-runs the result under plain Node with no type-stripping flag, and compares the
-behaviour of a mounted driver against the same script run on the original `.ts`
-sources via `node --experimental-strip-types`.
+runs the library's own test suite against the result under plain Node with no
+type-stripping flag, and requires the same tests to pass, fail and skip as the
+original `.ts` sources do under `node --experimental-strip-types`.
 """
 
 from __future__ import annotations
@@ -274,7 +289,13 @@ OBJECT_AFTER_PUNCT = {
     "(", ",", "=", ":", "[", "?", "&&", "||", "??", "...", "+", "=>>",
     "+=", "==", "===", "!=", "!==", "return",
 }
-OBJECT_AFTER_NAME = {"return", "yield", "throw", "case", "do", "typeof", "await"}
+OBJECT_AFTER_NAME = {
+    "return", "yield", "throw", "case", "do", "typeof", "await",
+    # A binding pattern, not a block: `const { controls: list } = …`. Its `:`
+    # renames a property and is punctuation, exactly as in an object literal.
+    # A `{` after a declarator keyword can be nothing else.
+    "const", "let", "var",
+}
 
 #: Tokens a type expression may contain. Used by the trial angle scan.
 TYPE_PUNCT = {
@@ -283,10 +304,37 @@ TYPE_PUNCT = {
 }
 
 #: Stops a `: T` / `as T` consumption when seen at depth zero.
-TYPE_STOP = {",", ";", ")", "]", "}", "=", "=>", "?"}
+#:
+#: `?` and `:` are in here, and the conditional-type rule in `end_of_type`
+#: overrides them: a `?` only continues the type when an `extends` is
+#: outstanding (`T extends U ? X : Y`), and a `:` only when such a `?` is.
+#: Everywhere else at depth zero both belong to the enclosing expression --
+#: `x as string : y` is the else-arm of a JavaScript ternary.
+TYPE_STOP = {",", ";", ")", "]", "}", "=", "=>", "?", ":"}
+
+#: Names after which a type is still unfinished, so a following `{` opens an
+#: object type rather than a function body. Only the words that can legally
+#: stand immediately before a `{` in a type are listed: a chained assertion
+#: (`x as unknown as { … }`), a conditional type's `extends`, a predicate's
+#: `is`/`asserts`, and the prefix operators.
+TYPE_PREFIX_NAMES = {
+    "as", "satisfies", "extends", "is", "asserts",
+    "keyof", "typeof", "readonly", "infer",
+}
 
 #: Member and parameter modifiers that exist only for the type checker.
 MODIFIERS = {"readonly", "public", "private", "protected", "abstract", "override", "declare"}
+
+#: What a member may begin with. `static` is real JavaScript and stays, but a
+#: modifier after one is still at the start of a member: `static readonly z`.
+MEMBER_PREFIXES = MODIFIERS | {"static"}
+
+#: An `export` followed by one of these is a declaration and not a specifier
+#: clause, so the `as` in `export const x = y as T` is an assertion again.
+CLAUSE_END_NAMES = {
+    "const", "let", "var", "function", "class", "async", "default", "enum",
+    "abstract", "new", "await",
+}
 
 BODY_FIRST_KEYWORDS = {
     "const", "let", "var", "return", "if", "for", "while", "do", "switch",
@@ -445,10 +493,30 @@ def strip_types(src: str) -> str:
         return b < n and toks[b].kind == PUNCT_K and toks[b].text in ("?", ":")
 
     def end_of_type(i: int, is_return: bool) -> int:
-        """Index just past a type expression beginning at `i`."""
+        """Index just past a type expression beginning at `i`.
+
+        Two depth-zero decisions are made by tracking the shape of the type so
+        far rather than by pattern-matching the text around it:
+
+        `complete` — whether what has been read is already a whole type. A type
+        is complete after a name, a literal, or a closing `)`/`]`/`}`/`>`, and
+        incomplete after an operator (`|`, `&`, `=>`, `.`, an opening bracket,
+        a prefix keyword like `keyof`). No type can be *continued* by a `{`, so
+        a `{` arriving when the type is already complete is the body of the
+        function being annotated -- `clear(): void {}` -- while one arriving
+        when it is not starts an object type -- `(): { a: string } {…}`.
+
+        `cond` — outstanding conditional-type `?`s, which is what lets a
+        conditional type's `:` be told from a ternary's. A depth-zero `?`
+        continues the type only when an `extends` is outstanding, and a
+        depth-zero `:` only when such a `?` is.
+        """
         depth = 0
         j = i
         last = ""
+        complete = False
+        cond = 0
+        saw_extends = False
         while j < n:
             t = toks[j]
             if t.kind in (WS, COMMENT):
@@ -461,13 +529,19 @@ def strip_types(src: str) -> str:
                 # it is the arrow of the function whose return type this is.
                 if t.text == "=>" and depth == 0 and last == ")":
                     last = t.text
+                    complete = False
                     j += 1
                     continue
                 if t.text in ("(", "[", "{"):
-                    if t.text == "{" and depth == 0 and is_return and not looks_like_object_type(j):
+                    if t.text == "{" and depth == 0 and (
+                        complete or (is_return and not looks_like_object_type(j))
+                    ):
+                        # Nothing continues a finished type, so this `{` opens
+                        # the annotated function's body.
                         return j
                     depth += 1
                     last = t.text
+                    complete = False
                     j += 1
                     continue
                 if t.text in (")", "]", "}"):
@@ -475,24 +549,45 @@ def strip_types(src: str) -> str:
                         return j
                     depth -= 1
                     last = t.text
+                    complete = True
                     j += 1
                     continue
                 if t.text == "<":
                     depth += 1
                     last = t.text
+                    complete = False
                     j += 1
                     continue
                 if set(t.text) == {">"}:
                     depth = max(0, depth - len(t.text))
                     last = ">"
+                    complete = True
+                    j += 1
+                    continue
+                if depth == 0 and t.text == "?" and saw_extends:
+                    # `T extends U ? …` — the true-arm of a conditional type.
+                    cond += 1
+                    saw_extends = False
+                    last = t.text
+                    complete = False
+                    j += 1
+                    continue
+                if depth == 0 and t.text == ":" and cond > 0:
+                    cond -= 1
+                    last = t.text
+                    complete = False
                     j += 1
                     continue
                 if depth == 0 and t.text in TYPE_STOP:
                     return j
                 last = t.text
+                complete = False
                 j += 1
                 continue
+            if depth == 0 and t.kind == NAME and t.text == "extends":
+                saw_extends = True
             last = t.text
+            complete = t.kind != NAME or t.text not in TYPE_PREFIX_NAMES
             j += 1
         return n
 
@@ -622,6 +717,11 @@ def strip_types(src: str) -> str:
                 j = nxt(i)
                 member_start = prev is None or (
                     prev.kind == PUNCT_K and prev.text in ("{", "}", ";", "(", ",")
+                    # Modifiers chain -- `override readonly name = …`,
+                    # `static readonly z`. `prev` is read from the token
+                    # stream, not from the output, so a modifier just erased is
+                    # still sitting there.
+                    or (prev.kind == NAME and prev.text in MEMBER_PREFIXES)
                 )
                 follows_name = j < n and (
                     toks[j].kind in (NAME, STR, NUM)
@@ -682,7 +782,19 @@ def strip_types(src: str) -> str:
                     i = end
                     continue
 
+            if in_clause and t.text in CLAUSE_END_NAMES:
+                # `export const …`, `export default …`: a declaration, not a
+                # list of specifiers.
+                in_clause = False
+
             if t.text in ("as", "satisfies"):
+                if t.text == "as" and in_clause:
+                    # A rename, not an assertion: `import { load as loadIt }`,
+                    # `import * as ns`. Erasing it takes the binding's name
+                    # with it and the module then has no `loadIt` at all.
+                    out.append(t.text)
+                    i += 1
+                    continue
                 j = nxt(i)
                 end = end_of_type(j, is_return=False)
                 emit_blank(i, end)
@@ -696,11 +808,13 @@ def strip_types(src: str) -> str:
         if t.kind == PUNCT_K:
             text = t.text
 
-            if text == ";":
+            # A specifier clause is made of names, strings, `{`, `}`, `,` and
+            # `*` and nothing else, so anything else ends it -- including the
+            # `.` of `import.meta` and the `(` of a dynamic `import()`.
+            if text not in ("{", "}", ",", "*"):
                 in_clause = False
 
             if text in ("(", "["):
-                in_clause = False
                 stack.append(_Frame("paren" if text == "(" else "bracket"))
                 out.append(text)
                 i += 1
@@ -751,12 +865,15 @@ def strip_types(src: str) -> str:
                     out.append(text)
                     i += 1
                     continue
-                if frame.kind == "object":
+                prev = prev_sig_emitted(i)
+                is_return = prev is not None and prev.kind == PUNCT_K and prev.text == ")"
+                if frame.kind == "object" and not is_return:
                     out.append(text)
                     i += 1
                     continue
-                prev = prev_sig_emitted(i)
-                is_return = prev is not None and prev.kind == PUNCT_K and prev.text == ")"
+                # A `:` after `)` inside an object literal is a method's return
+                # type, not a property separator: `)` cannot be a property key.
+                # `{ withControls: (s: S): S => … }` has one of each.
                 j = nxt(i)
                 end = end_of_type(j, is_return=is_return)
                 emit_blank(i, end)
@@ -765,9 +882,17 @@ def strip_types(src: str) -> str:
 
             if text == "<":
                 prev = prev_sig_emitted(i)
-                if prev is not None and (
-                    prev.kind == NAME and prev.text not in OPERAND_END_KEYWORDS
-                ):
+                # A `<` is a less-than only if something that can end an
+                # operand precedes it. Where nothing does -- the start of an
+                # expression, after `=`, `:`, `(`, `,`, `return` -- it cannot
+                # be an operator, so it opens a type-parameter list:
+                # `withControls: <S extends Snapshot>(s: S): S => …`. Where one
+                # does, the trial scan decides, as before.
+                literal_before = prev is not None and (
+                    prev.kind in (NUM, STR, TMPL, REGEX)
+                    or (prev.kind == PUNCT_K and prev.text in (")", "]", "}", "++", "--"))
+                )
+                if not literal_before:
                     end = type_args_end(i)
                     if end != -1:
                         emit_blank(i, end)

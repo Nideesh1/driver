@@ -200,6 +200,7 @@ class Driverkit:
         name: str,
         args: Mapping[str, Scalar] | None = None,
         rev: int | None = None,
+        screen: str | None = None,
     ) -> Result:
         """``POST /dk/tabs/:tab/call`` — run a verb, get the screen back.
 
@@ -210,6 +211,14 @@ class Driverkit:
         verb whose effect does not depend on what is on screen (``scroll``) and
         wrong for one that names a row.
 
+        ``screen`` is the other half of that claim and is checked first: the
+        ``Snapshot.screen`` you believed you were on. A paging call sent with
+        no ``rev`` once landed on a screen the agent had never seen, paged a
+        different company's contact list and answered ``ok`` — "you are
+        somewhere else" is a better answer than "the number moved", and the two
+        have different fixes. Comes back refused as ``wrong-screen``, naming
+        both screens. Omitting it opts out, like ``rev``.
+
         Returns a Result either way. Only the relay being unreachable, or
         answering with something that is not a Result, raises.
         """
@@ -218,6 +227,11 @@ class Driverkit:
             # Sent only when asked for. An explicit `"rev": null` would be a
             # claim about the screen, and the claim we want to make is none.
             payload["rev"] = rev
+        if screen:
+            # Same rule, and an empty string is not a claim either: it is not
+            # the id of any screen, so sending it would ask the app to refuse a
+            # call over a field the caller left blank.
+            payload["screen"] = screen
 
         body = self._post(f"/dk/tabs/{urllib.parse.quote(tab, safe='')}/call", payload)
         if not isinstance(body, Mapping) or "ok" not in body:

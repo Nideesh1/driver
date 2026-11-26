@@ -99,6 +99,21 @@ def main() -> int:
             target.write_text(rewrite(text))
         (out / "package.json").write_text('{"type":"module"}\n')
 
+        # The mirror needs the repo's `node_modules` to resolve ONE bare
+        # specifier: `packages/widget/src/widget.ts` imports `@driverkit/agent`
+        # by name, because the widget depends on the agent package at runtime
+        # rather than only for its types. A browser resolves that through the
+        # import map in `index.html`; Node resolves it by walking up for a
+        # `node_modules`, and the mirror lives in a temp directory with none
+        # above it. Symlinked rather than copied: it is only ever read, and the
+        # workspace links in it point back here anyway.
+        links = pathlib.Path(__file__).resolve().parents[2] / "node_modules"
+        if links.is_dir():
+            (out / "node_modules").symlink_to(links, target_is_directory=True)
+        else:
+            print(f"no node_modules at {links}: run `npm install` first", file=sys.stderr)
+            return 1
+
         bad = 0
         for js in sorted(out.rglob("*.js")) + sorted(out.rglob("*.mjs")):
             run = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True)

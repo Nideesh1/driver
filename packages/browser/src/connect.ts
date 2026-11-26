@@ -555,11 +555,17 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
       result = await driver.call(
         frame.name,
         frame.args ?? {},
-        // Only when the agent sent one. The core treats a present `rev` as a
-        // staleness check and an absent one as opting out, so passing
-        // `{ rev: undefined }` would be fine today and a trap the day someone
-        // tightens that check.
-        frame.rev === undefined ? {} : { rev: frame.rev },
+        // Only when the agent sent one. The core treats a present `rev` or
+        // `screen` as a check and an absent one as opting out of it, so passing
+        // `{ rev: undefined }` would be fine today and a trap the day somebody
+        // tightens that. `screen` is the agent's claim about which screen it
+        // read, checked by the core before `rev`; this hop is where it would
+        // otherwise be dropped, which would leave the field working in-page and
+        // silently doing nothing over the relay.
+        {
+          ...(frame.rev === undefined ? {} : { rev: frame.rev }),
+          ...(frame.screen === undefined ? {} : { screen: frame.screen }),
+        },
       );
     } catch (err) {
       // `mount()`'s driver turns a throwing verb into `refused: "threw"`, so

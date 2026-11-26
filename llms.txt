@@ -74,7 +74,7 @@ verb takes no predicate and acts on the current selection, so a count is always 
 
 ## Examples
 
-- [examples/contacts](examples/contacts/): a CRM contacts screen, 3,412 seeded rows, the widget in the corner and
+- [examples/contacts](examples/contacts/): a six-screen CRM — dashboard, contacts list, one contact, companies list, one company, settings — 3,412 seeded rows, the widget in the corner and
   the relay mounted at `/dk` on the same port — one page drivable both ways. `python3 examples/contacts/server.py`,
   stdlib only, no bundler (`tsstrip.py` erases the types as the sources are served),
   `http://127.0.0.1:8770/examples/contacts/app/`. `ANTHROPIC_API_KEY` is needed only by the widget.

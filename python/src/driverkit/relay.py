@@ -865,6 +865,17 @@ class Relay:
             # the relay's call.
             if isinstance(rev, (int, float)) and not isinstance(rev, bool):
                 frame["rev"] = rev
+            screen = parsed.get("screen")
+            # `screen` on exactly the same terms, and with the same restraint:
+            # this relay does not know which screen the tab is on, does not
+            # compare it and does not refuse it. It is the agent's claim and the
+            # driver's check. An empty string is dropped rather than forwarded,
+            # because it is not the id of any screen and no app should be asked
+            # to refuse a call over a field left blank. Behaviourally identical
+            # to the TypeScript relay, which is the standing promise about these
+            # two files.
+            if isinstance(screen, str) and screen:
+                frame["screen"] = screen
             sent = tab.stream.write(_sse(frame))
             if not sent:
                 tab.pending.pop(call_id, None)

@@ -42,6 +42,7 @@ const COUNT_NOTE =
  * The screen as a short text block.
  *
  * ```
+ * screen: contacts
  * where: contacts, filtered to Acme (rev 8)
  * selected: c-8821
  * rows 1-2 of 5
@@ -52,9 +53,18 @@ const COUNT_NOTE =
  *
  * Field order is fixed so the same screen renders identically every time: a
  * model comparing two reads should see a diff only where the screen changed.
+ *
+ * `screen` goes FIRST, above the prose, and is omitted by an app that does not
+ * declare one. It is the one line on this block a model can compare for
+ * equality: `where` carries the filter, the sort and a drill-down's record
+ * description, so it moves for reasons that are not navigation, and two reads
+ * either side of a `go` differ in a dozen ways. One short word that changes if
+ * and only if the screen changed is worth a line of the uncached half.
  */
 export function renderSnapshot(snapshot: Snapshot): string {
-  const lines = [`where: ${snapshot.where} (rev ${snapshot.rev})`];
+  const lines = snapshot.screen
+    ? [`screen: ${snapshot.screen}`, `where: ${snapshot.where} (rev ${snapshot.rev})`]
+    : [`where: ${snapshot.where} (rev ${snapshot.rev})`];
 
   const selected = snapshot.selected ?? [];
   if (selected.length > 0) {

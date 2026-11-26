@@ -49,9 +49,11 @@ __all__ = [
 Scalar = str | int | float | bool | None
 
 #: What a verb does to the world, declared in the cached half so an agent knows
-#: before it calls: ``read`` changes nothing, ``describe`` changes what is
-#: selected or filtered and reports a ``count``, ``commit`` changes data and
-#: may be irreversible. Mirrors ``VerbKind``.
+#: before it calls: ``read`` changes no data and reports no count (it may still
+#: move the person's screen — navigation is a read), ``describe`` changes what
+#: is selected and reports a ``count``, ``commit`` changes data and may be
+#: irreversible. Mirrors ``VerbKind``, whose comment carries the argument for
+#: why navigation is a ``read`` and not a fourth kind.
 VerbKind = str
 VERB_KINDS = ("read", "describe", "commit")
 
@@ -59,7 +61,8 @@ VERB_KINDS = ("read", "describe", "commit")
 #: closed set. A client has to be able to tell "your app said no", which means
 #: rephrase and retry, from "your call never landed", which means reconnect or
 #: pick another tab. These three are reserved, along with the core's own
-#: ``stale``, ``unknown-verb``, ``bad-argument``, ``unmounted`` and ``threw``:
+#: ``stale``, ``wrong-screen``, ``unknown-verb``, ``bad-argument``,
+#: ``unmounted`` and ``threw``:
 #: an app that names one of its verb refusals the same thing takes that
 #: distinction away, and if ``timeout`` can mean either then it means neither.
 #: See ``RelayRefusal`` and PROTOCOL.md, "When a call never reaches a tab".
@@ -87,6 +90,24 @@ def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
     explicit nulls would make a round-tripped manifest stop matching itself.
     """
     return {k: v for k, v in d.items() if v is not None}
+
+
+def _screens(value: Any) -> str | tuple[str, ...] | None:
+    """A verb's ``screen`` off the wire, in the shape it was sent in.
+
+    One string, several, or nothing. The shape is preserved rather than
+    normalised because the manifest is the cached half and its bytes are what a
+    fingerprint is taken of: turning ``"contacts"`` into ``["contacts"]`` on a
+    round trip would move the version of every app that names one screen, and
+    tell every agent holding a cached copy that it had gone stale when nothing
+    about the app had changed.
+    """
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, (list, tuple)):
+        named = tuple(s for s in value if isinstance(s, str) and s)
+        return named or None
+    return None
 
 
 @dataclass(frozen=True)
@@ -147,11 +168,41 @@ class VerbSpec:
     #: field as dangerous, and a warning on everything is a warning on nothing.
     #: Absent means absent: make no claim.
     kind: VerbKind | None = None
+    #: The screen this verb belongs to, or the screens it belongs to, matched
+    #: against ``Snapshot.screen``; None for "anywhere".
+    #:
+    #: The tool list does NOT vary with it, and must not: a verb list that
+    #: changed on every navigation would bust the prompt prefix every time the
+    #: person moved, which is the cost argument the library is built on. The
+    #: mapping is static — which verb lives on which screen is the same for
+    #: every user forever — and only which screen is live is dynamic. So the
+    #: verb is offered everywhere and the core refuses it off its screens, with
+    #: the live one and all of the verb's own in the hint. See ``Verb.screen``.
+    #:
+    #: Several screens because one string made the worked example lie:
+    #: ``next-page`` pages both the contacts list and a company's contact list,
+    #: and declaring either would refuse a call on a screen still publishing a
+    #: ``page`` block. A tuple rather than a list for the reason ``refuses`` is
+    #: one — this dataclass is frozen and therefore hashable, and one mutable
+    #: field would take that away. ``from_dict`` accepts the wire's list and
+    #: ``to_dict`` writes one back.
+    screen: str | tuple[str, ...] | None = None
+    #: True on a ``commit`` the app says it can undo, else None for "the app
+    #: did not say".
+    #:
+    #: Not defaulted to either answer, for the reason ``kind`` is not:
+    #: assuming reversible tells an agent a bulk accept can be taken back, and
+    #: assuming irreversible marks every commit written before this field as
+    #: the dangerous kind, which is a warning on everything. Only read for
+    #: ``commit``; see ``Verb.reversible``.
+    reversible: bool | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "VerbSpec":
         args = d.get("args") or {}
         kind = d.get("kind")
+        reversible = d.get("reversible")
+        screen = d.get("screen")
         return cls(
             name=d["name"],
             describe=d.get("describe", ""),
@@ -162,12 +213,31 @@ class VerbSpec:
             # a safety claim from a word it does not know is the one thing it
             # must not do.
             kind=kind if kind in VERB_KINDS else None,
+            # A string stays a string and a list becomes a tuple, so the shape
+            # the app declared survives the round trip: a client that reads
+            # `verbs[].screen` as a string goes on doing so for every
+            # single-screen app. Non-strings inside a list are dropped rather
+            # than coerced — `str(None)` is the screen id "None", which is a
+            # screen no app has — and a list left empty by that, or sent empty,
+            # becomes None: the core refuses `screen: []` at mount precisely
+            # because "works nowhere" is nobody's intention, so a reader that
+            # met one anyway would be inventing a claim from a mistake.
+            screen=_screens(screen),
+            # Only a literal True is a claim. The wire form is `true` or the
+            # field is absent, so anything else — 0, "", "no" — is a relay or
+            # an app getting it wrong, and the safe reading of a garbled
+            # "you can undo this" is that nobody said it.
+            reversible=True if reversible is True else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "describe": self.describe}
         if self.kind is not None:
             out["kind"] = self.kind
+        if self.screen is not None:
+            out["screen"] = self.screen if isinstance(self.screen, str) else list(self.screen)
+        if self.reversible:
+            out["reversible"] = True
         if self.args:
             out["args"] = {k: v.to_dict() for k, v in self.args.items()}
         if self.refuses:
@@ -183,21 +253,39 @@ class Manifest:
     version: str
     app: str
     verbs: tuple[VerbSpec, ...] = ()
+    #: The app's own briefing, in its own words, from ``MountOptions``.
+    #:
+    #: Static by definition, which is why it rides in the cached half and is
+    #: folded into the MCP server instructions rather than into every snapshot.
+    #: Before this field the two halves of the library disagreed: a widget
+    #: could be handed ``instructions`` and an agent arriving over the relay
+    #: could not, so an app that had something to say about itself to both had
+    #: to repeat it in ``Snapshot.note`` and pay for it on every turn.
+    instructions: str | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Manifest":
+        instructions = d.get("instructions")
         return cls(
             version=d.get("version", ""),
             app=d.get("app", ""),
             verbs=tuple(VerbSpec.from_dict(v) for v in d.get("verbs") or ()),
+            instructions=str(instructions) if instructions else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "version": self.version,
             "app": self.app,
             "verbs": [v.to_dict() for v in self.verbs],
         }
+        # Omitted rather than sent as null, like every other absent optional
+        # here: the TS core computes the manifest version from a shape that
+        # leaves it out, and a round trip through this class must not turn
+        # "the app said nothing" into a field.
+        if self.instructions is not None:
+            out["instructions"] = self.instructions
+        return out
 
     def verb(self, name: str) -> VerbSpec | None:
         for v in self.verbs:
@@ -310,6 +398,24 @@ class Snapshot:
     #: about to change.
     selected_count: int | None = None
     note: str | None = None
+    #: Which screen that is, as a stable kebab-case id: ``contacts``,
+    #: ``company``. The partner of ``where``, which is prose for a human and
+    #: carries the filter, the sort and a drill-down's record description — so
+    #: it moves constantly for reasons that are not navigation, and "did I
+    #: navigate?" cannot be answered by diffing it. This can be compared with
+    #: ``==``, and that is its whole job.
+    #:
+    #: Dynamic, which is why it is here: the names of an app's screens and
+    #: which verb belongs to which are static and live on ``VerbSpec.screen``;
+    #: which one is live is as per-turn as a row. None means the app does not
+    #: describe its screens, not that it has one.
+    #:
+    #: Declared LAST although it renders FIRST, and beside ``where`` in the TS
+    #: `Snapshot`. Every field of this dataclass is positional, so inserting
+    #: one after ``rev`` would silently reinterpret ``Snapshot("contacts", 7,
+    #: rows)`` — written against yesterday's version — as a screen id. New
+    #: fields go on the end here, whatever order they are documented in.
+    screen: str | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Snapshot":
@@ -317,9 +423,11 @@ class Snapshot:
         selected = d.get("selected")
         page = d.get("page")
         count = d.get("selectedCount")
+        screen = d.get("screen")
         return cls(
             where=d.get("where", ""),
             rev=int(d.get("rev", 0)),
+            screen=str(screen) if screen else None,
             rows=tuple(Row.from_dict(r) for r in rows) if rows is not None else None,
             page=Page.from_dict(page) if page else None,
             selected=tuple(str(s) for s in selected) if selected is not None else None,
@@ -329,6 +437,8 @@ class Snapshot:
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"where": self.where, "rev": self.rev}
+        if self.screen is not None:
+            out["screen"] = self.screen
         if self.rows is not None:
             out["rows"] = [r.to_dict() for r in self.rows]
         if self.page is not None:

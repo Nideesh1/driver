@@ -143,6 +143,43 @@ class RoundTrip(RelayTest):
         frame = one.es.next_event("call")
         self.assertNotIn("rev", frame, "the relay invented a rev the agent never claimed")
 
+    def test_screen_is_forwarded_untouched_on_exactly_the_same_terms_as_rev(self):
+        # This relay does not know which screen a tab is on, does not compare
+        # one and does not refuse one: `screen` is the agent's claim and the
+        # driver's check. A relay with an opinion about it would be a second set
+        # of rules beside the core's. Behaviourally identical to the TypeScript
+        # relay, which is the standing promise about these two files.
+        one = self.tab("t1")
+        one.hello()
+
+        pending = call_async(self.url, "t1", {"name": "next-page", "screen": "contacts"})
+        frame = one.es.next_event("call")
+        self.assertEqual(frame["screen"], "contacts")
+
+        refused = {
+            "ok": False,
+            "refused": "wrong-screen",
+            "hint": "you believed you were on the `contacts` screen but the app is on `settings`",
+            "snapshot": {"where": "settings", "screen": "settings", "rev": 9},
+        }
+        one.answer(frame["id"], refused)
+        # Byte for byte, `snapshot.screen` included: the screen the agent is
+        # actually on is the whole fix, and a hop that dropped it would cost a
+        # round trip to rediscover.
+        self.assertEqual(pending.result()[1], refused)
+
+    def test_a_call_with_no_screen_or_an_empty_one_arrives_with_none(self):
+        one = self.tab("t1")
+        call_async(self.url, "t1", {"name": "goto"})
+        self.assertNotIn(
+            "screen", one.es.next_event("call"), "the relay invented a screen nobody claimed"
+        )
+        # An empty string is dropped rather than forwarded: it is the id of no
+        # screen, and no app should be asked to refuse a call over a field a
+        # caller left blank.
+        call_async(self.url, "t1", {"name": "goto", "screen": ""})
+        self.assertNotIn("screen", one.es.next_event("call"))
+
     def test_a_field_the_relay_has_never_heard_of_reaches_the_agent_anyway(self):
         one = self.tab("t1")
         # `kind` on a verb and `count` on a result are both newer than this

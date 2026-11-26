@@ -12,8 +12,9 @@ const panel = mountWidget(driver, {
   think: backendThink("/api/chat"),
   greeting: "Ask me to do things in Contacts. Try: “select everyone at Acme whose status is new, "
           + "tell me how many, then accept them”.",
-  instructions: "A contact's status moves new → pending → accepted or declined. "
-              + "`accept-selected` is the only verb that changes data.",     // STATIC: no user, no screen
+  // THIS HOST's voice, not the app's. What the app has to say about itself goes in
+  // MountOptions.instructions, which also reaches an agent arriving over the relay.
+  instructions: "Keep answers to one sentence; this panel is narrow.",       // STATIC: no user, no screen
   onError: (err) => console.error("driverkit widget:", err),
 });
 // panel.ask("…"), panel.open(), panel.close(), panel.moveTo({x,y}), panel.unmount()
@@ -74,8 +75,21 @@ watching a chatbot move their own screen should not learn about a thousand accep
 The gate fires on `kind === "commit"` and nowhere else — which is the other reason a mislabelled `kind` is
 expensive. It asks **one question per call, not per row**: a commit verb takes no predicate and acts on the whole
 selection, so accepting a thousand contacts is one call and one prompt. The question carries the count the
-preceding `describe` reported, falling back to `Snapshot.selectedCount`; with neither it says so out loud ("no
-count was reported, so nobody can tell you how many rows it affects").
+preceding `describe` reported, falling back to `Snapshot.selectedCount` and then to `Snapshot.selected.length`;
+with none of the three it says so out loud ("no count was reported, so nobody can tell you how many rows it
+affects").
+
+A commit that declares `Verb.reversible` **runs without a question**. That is what the flag buys: a page-size
+change and a bulk accept of 3,412 rows were getting the same dialog, and a modal on something trivial is how
+people learn to click Yes without reading — the next one they skip is the bulk accept. An absent `reversible`
+makes no claim and is still gated.
+
+Two things override the flag. A commit acting on more than `commitAskAbove` rows (default `COMMIT_ASK_ABOVE`,
+25 — one screenful, past which the person cannot check the selection by eye) is asked about anyway, because
+"undo" over thousands of rows is a promise an app may not be able to keep at that size whatever it declared. And
+`confirmEveryCommit: true` restores the ask-on-every-commit behaviour for an app that wants it. When a reversible
+commit does get a dialog it says **"this can be undone"**, so the two dialogs do not read alike — two dialogs
+with the same words are one dialog as far as a person's attention is concerned.
 
 A "no" reaches the model as the `declined-by-user` refusal — an ordinary answer, never an exception — so it adapts
 ("you declined that; want me to narrow it first?") instead of leaving a dead panel. `onBeforeCommit` **replaces**
@@ -87,11 +101,13 @@ the built-in dialog rather than stacking with it; it receives `{ name, args, ver
 | option | default | |
 |---|---|---|
 | `think` | — | required. See above |
-| `confirmCommits` | `true` | false only for an app whose commits are all small and reversible |
+| `confirmCommits` | `true` | false only for an app whose commits are all small; above both rules below |
+| `commitAskAbove` | 25 | selection size past which even a `reversible` commit is confirmed |
+| `confirmEveryCommit` | `false` | true to ask before every commit, reversible or not |
 | `onBeforeCommit` | — | your own confirmation, instead of the built-in one |
 | `maxSteps` | 12 | model round trips. Enough for read → describe → check → commit → answer with room for two refusals |
 | `refusalLimit` | 3 | stop after this many identical refusals (same verb, same slug), counted across the run |
-| `instructions` | — | static app guidance folded into the system prompt. Per-user text here breaks caching across users |
+| `instructions` | — | static guidance from THIS HOST, folded into the system prompt **after** the app's own `Manifest.instructions` — so the host's is what a model follows if they disagree, and it reaches only this path. Per-user text here breaks caching across users |
 | `title` / `greeting` / `placeholder` | app name | header, first transcript line, input placeholder |
 | `open` | `false` | a panel that opens itself is a panel over something the person was reading |
 | `position` / `draggable` / `snapThreshold` / `persist` | CSS / `true` / 72 / `true` | corner or `{x,y}`; dragged position is remembered per app and viewer in `localStorage`, as a fraction of free space |

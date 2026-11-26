@@ -55,14 +55,41 @@ it could have known from the manifest. So push constraints into the argument typ
 - `refuses: [...]` is the field people skip and the one that earns its place: listing the refusals in the **cached**
   half lets an agent avoid a call instead of discovering the answer by making it. Short, stable slugs; declaring the
   list opts the verb into a dev-time check that a refusal it emits is on it.
+- A verb that only works on one screen says `screen: "<id>"` and the core writes the refusal — do not hand-roll
+  that check or invent a slug for it. `wrong-screen` is reserved for exactly that reason. [screens.md](screens.md).
 
 ## 3. Assign `read` / `describe` / `commit` — the expensive mistake
 
 | kind | means | the agent is told |
 |---|---|---|
-| `read` | changes nothing | free to call, free to get wrong |
-| `describe` | changes what is **selected or filtered**, changes no data, reports a `count` | safe; worst case is the wrong rows highlighted |
+| `read` | **changes no data and reports no count.** Navigation is a read | free to call, free to get wrong |
+| `describe` | changes what is **selected**, changes no data, reports a `count` | safe; worst case is the wrong rows highlighted |
 | `commit` | changes data, may be irreversible | `*** THIS CHANGES DATA AND MAY BE IRREVERSIBLE ***` — do not call it to find out what it does |
+| `commit` + `reversible: true` | changes data, and the app can undo it | the same warning in plain words, without the capitals |
+
+Two of those readings used to be wrong in ways that bit.
+
+`read` does not say "changes nothing", because the commonest verb a
+multi-screen app has — `go`, `open-contact`, `back` — moves the person's screen
+out from under them, and the old wording told an agent that was free. The ladder
+is about **what a wrong call costs you**, and a wrong navigation costs exactly
+what a wrong read costs: the person has to look somewhere else. The two
+promises worth making are the ones that decide whether the next call is safe,
+and both hold for a navigation.
+
+`describe` is about **selection**, not filtering. By the old wording a search
+box was a `describe` — while none of the rest of what `describe` means applied
+to it. The count is the number a following `commit` acts on, and the
+describe→count→commit pair is the safety mechanism; a verb that narrows a list
+and leaves nothing pending is a `read`.
+
+`reversible: true` is read only on a `commit`, and absent makes no claim — like
+`kind` itself, and for the same reason. It exists because
+`set-setting("rows-per-page", "50")` and accepting 3,412 contacts were both
+just `commit`, so both got identical capitals, and a banner that fires on a
+page-size change is one a model learns to read past. It means there is a way
+back, not that nobody minds: the data still changes and the person still sees
+it. Declare it only when your app really can put the change back.
 
 **This is the part most likely to be got wrong and the most expensive when it is.** A `commit` mislabelled `read`
 tells an agent an irreversible call is free to try — and the widget's confirmation gate fires on `kind === "commit"`
@@ -116,8 +143,12 @@ selection?" is unanswerable; "accept 1,000 contacts?" is not.
 ## 5. `visible()`
 
 The snapshot is the uncached half and the honesty of the whole integration. Full contract in
-[snapshot.md](snapshot.md); the four rules that matter while drafting verbs:
+[snapshot.md](snapshot.md), screens in [screens.md](screens.md); the five rules that matter while drafting verbs:
 
+- **`screen` is the id and `where` is the prose.** `screen` is stable kebab-case and exists to be compared with
+  `===`, which is the only way "did I navigate?" can be answered — `where` changes constantly for reasons that are
+  not navigation. Do not spell the screen's identity into `where` and leave `screen` out; an app with one screen
+  can omit `screen` entirely, and omitting it is not a claim to have one.
 - **Never more rows than the person can see** — same filters, same sort, same page. That is what keeps cost flat as
   the data grows, and what makes "park that one" resolvable without a query.
 - **`rev` must move on every mutation.** Route every change through one `bump()`. A path that changes the table
@@ -139,7 +170,12 @@ console.log(JSON.stringify(driver.manifest(), null, 2));       // the static hal
 Checklist before you call it done:
 
 - [ ] Every verb has a `kind`, and every `commit` really does write.
-- [ ] No verb name or `refuses` slug is a reserved slug (`mount()` throws, but check before shipping prompts).
+- [ ] No verb name or `refuses` slug is a reserved slug — `wrong-screen` included, which is the one most likely to
+      already be in an app's own vocabulary (`mount()` throws, but check before shipping prompts).
+- [ ] Every verb that works on one screen only has a `screen`, and `visible()` returns the screen that is live.
+- [ ] Anything the app needs to say about itself is in `MountOptions.instructions`, not repeated in every
+      snapshot's `note` — the manifest is cached once, the note is paid for on every turn.
+- [ ] Every `commit` the app can undo says `reversible: true`, and no `commit` that cannot says it.
 - [ ] Bulk work takes predicates. No `select(id)`-per-row verb exists.
 - [ ] Every `commit` that acts on a selection has a `describe` partner that counts.
 - [ ] No `describe` text names a function, a table, a component or an endpoint.

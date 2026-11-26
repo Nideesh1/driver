@@ -7,6 +7,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { mount } from "../../core/src/registry.ts";
+import type { Snapshot } from "../../core/src/types.ts";
 import { DECLINED, drive } from "../src/index.ts";
 import type { CommitRequest, ToolCall, Turn } from "../src/index.ts";
 import { call, contacts, scripted, TOTAL } from "./app.ts";
@@ -98,7 +100,10 @@ test("the tool list is built from the manifest, carrying kind and refuses", asyn
   // first two lines must not miss that a verb is irreversible.
   assert.match(byName["accept-selected"]!.description, /COMMIT: THIS CHANGES DATA/);
   assert.match(byName["select-where"]!.description, /DESCRIBE: this changes what is SELECTED/);
-  assert.match(byName["open"]!.description, /READ-ONLY: this changes nothing/);
+  // `read` promises no DATA and no COUNT, and no longer "nothing": `open` is a
+  // drill-down, and it moves the person's screen out from under them.
+  assert.match(byName["open"]!.description, /READ-ONLY: this changes no data and reports no count/);
+  assert.match(byName["open"]!.description, /navigating is a read/);
 
   // The refusals are in the cached half, which is the entire point of the
   // field: a well-briefed agent never makes the call.
@@ -973,5 +978,207 @@ test("an absent rev still opts out of the staleness check, and null counts as ab
     const out = await drive(app.driver, { think: s.think, task: "accept two" });
     assert.equal(out.stop, "answered");
     assert.equal(app.accepted().length, 2, `rev ${String(rev)} was treated as a claim`);
+  }
+});
+
+// ---- screens -------------------------------------------------------------
+
+/**
+ * A two-screen app, built here rather than in `app.ts` because the thing under
+ * test is the hop between a model's tool arguments and `CallOptions`, and that
+ * needs a `Snapshot.screen` to disagree with.
+ */
+function twoScreens() {
+  let screen = "contacts";
+  let paged = 0;
+  /** What the last verb was actually handed. The hoisted `screen` is
+   *  `CallOptions`, not an argument, and a verb must never receive ours. */
+  let seenArgs: Record<string, unknown> = {};
+  const driver = mount({
+    app: "Scoped",
+    instructions: "this app has screens: contacts and settings. `go` reaches both.",
+    visible: (): Snapshot => ({
+      where: `${screen} (${paged} pages in)`,
+      screen,
+      rev: paged + 1,
+      rows: [{ id: "r-1" }],
+    }),
+    verbs: [
+      {
+        name: "go",
+        kind: "read",
+        describe: "go to one of the app's screens",
+        args: { screen: { type: "string", describe: "which", oneOf: ["contacts", "settings"] } },
+        run: ({ screen: to }: { screen: string }) => {
+          screen = to;
+        },
+      },
+      {
+        name: "next-page",
+        kind: "read",
+        describe: "show the next page",
+        screen: "contacts",
+        run: (args: Record<string, unknown>) => {
+          seenArgs = { ...args };
+          paged++;
+        },
+      },
+    ],
+  });
+  return { driver, paged: () => paged, at: () => screen, seenArgs: () => seenArgs };
+}
+
+test("the loop hoists screen out of the model's arguments and into the call", async () => {
+  // The bug this closes, end to end: a paging call aimed at the contacts list
+  // arrives after the person has clicked away, and without a screen claim it
+  // pages whatever list is in front of it and answers `ok`. With one, the model
+  // is told it is somewhere else — which is a different fix from "read again".
+  const app = twoScreens();
+  const s = scripted([
+    () => {
+      // The person clicks away while the model is thinking.
+      void app.driver.call("go", { screen: "settings" });
+      return { calls: [call("next-page", { screen: "contacts" })] };
+    },
+    (input) => {
+      const last = input.messages[input.messages.length - 1] as { text: string };
+      assert.match(last.text, /refused: wrong-screen/);
+      assert.match(last.text, /you believed you were on the `contacts` screen/);
+      // And the screen it is actually on is in the rendered snapshot, so the
+      // next turn needs no read.
+      assert.match(last.text, /screen: settings/);
+      return { text: "You moved to settings; shall I go back?" };
+    },
+  ]);
+
+  const out = await drive(app.driver, { think: s.think, task: "show me the next page" });
+  assert.equal(out.stop, "answered");
+  assert.equal(app.paged(), 0, "a call quoting a screen paged another screen's list");
+});
+
+test("a screen claim that matches is not a refusal, and `screen` never reaches the verb", async () => {
+  // The hoisted field is `CallOptions`, not an argument. A verb whose `args`
+  // say nothing about screens must not be handed one: the core does not strip
+  // unknown arguments, so a verb reading `args.screen` would be reading ours
+  // and an app that later gives the name its own meaning would find it taken.
+  const app = twoScreens();
+  const s = scripted([
+    { calls: [call("next-page", { screen: "contacts" })] },
+    (input) => {
+      const last = input.messages[input.messages.length - 1] as { text: string };
+      assert.match(last.text, /^ok/);
+      return { text: "done" };
+    },
+  ]);
+
+  const out = await drive(app.driver, { think: s.think, task: "next page" });
+  assert.equal(out.stop, "answered");
+  assert.equal(app.paged(), 1);
+  assert.deepEqual(app.seenArgs(), {}, "the hoisted screen was passed to the verb as an argument");
+});
+
+test("a screen that is not a string is refused, never silently dropped", async () => {
+  // Same rule as a junk `rev`, for the same reason: a safety check that
+  // disables itself when its argument arrives in the wrong type is worse than
+  // no check, because the transcript then reads `ok` for a call made against a
+  // screen the model never saw. `""` is refused too — it is not the same claim
+  // as leaving the field out, which is "I make none".
+  for (const junk of [7, true, "", "   "]) {
+    const app = twoScreens();
+    await app.driver.call("go", { screen: "settings" });
+    const s = scripted([
+      { calls: [call("next-page", { screen: junk as never })] },
+      (input) => {
+        const last = input.messages[input.messages.length - 1] as { text: string };
+        assert.match(
+          last.text,
+          /refused: bad-argument/,
+          `screen ${JSON.stringify(junk)} got through`,
+        );
+        assert.match(last.text, /the `screen` line/);
+        return { text: "I will read the screen again." };
+      },
+    ]);
+
+    const out = await drive(app.driver, { think: s.think, task: "next page" });
+    assert.equal(out.stop, "answered");
+    assert.equal(app.paged(), 0);
+  }
+});
+
+test("an absent screen opts out of the check, and null counts as absent", async () => {
+  // The other half, pinned so a stricter reading of the rule above cannot
+  // quietly make the field mandatory. Omitting it is a documented choice, and a
+  // vendor serialising an omitted optional field as `null` has said nothing.
+  for (const screen of [undefined, null]) {
+    const app = twoScreens();
+    const s = scripted([
+      { calls: [call("next-page", screen === undefined ? {} : { screen })] },
+      { text: "done" },
+    ]);
+    const out = await drive(app.driver, { think: s.think, task: "next page" });
+    assert.equal(out.stop, "answered");
+    assert.equal(app.paged(), 1, `screen ${JSON.stringify(screen)} blocked a good call`);
+  }
+});
+
+test("a verb's own screen argument still reaches the verb, hoisting or not", async () => {
+  // `go(screen)` is the navigation verb, so this is the one place where
+  // stealing the name would break the app's own vocabulary. The app's meaning
+  // wins, exactly as it does for `rev`.
+  const app = twoScreens();
+  const s = scripted([{ calls: [call("go", { screen: "settings" })] }, { text: "done" }]);
+  const out = await drive(app.driver, { think: s.think, task: "open settings" });
+  assert.equal(out.stop, "answered");
+  assert.equal(app.at(), "settings", "the hoisted screen swallowed the app's own argument");
+});
+
+test("a screen-scoped verb refused off its screen is a refusal the loop can learn from", async () => {
+  // The structural refusal, through the whole loop: no app-written guard, no
+  // app-invented slug, and both screen names in what the model reads.
+  const app = twoScreens();
+  const s = scripted([
+    () => {
+      void app.driver.call("go", { screen: "settings" });
+      return { calls: [call("next-page")] };
+    },
+    (input) => {
+      const last = input.messages[input.messages.length - 1] as { text: string };
+      assert.match(last.text, /refused: wrong-screen/);
+      assert.match(last.text, /you are on the `settings` screen/);
+      assert.match(last.text, /`next-page` works on the `contacts` screen/);
+      return { calls: [call("go", { screen: "contacts" })] };
+    },
+    { calls: [call("next-page")] },
+    { text: "done" },
+  ]);
+
+  const out = await drive(app.driver, { think: s.think, task: "next page" });
+  assert.equal(out.stop, "answered");
+  assert.equal(app.paged(), 1);
+});
+
+test("the app's own briefing is in the system prompt on every turn, and still byte-identical", async () => {
+  // Both halves of the point. The briefing reaches the cached prefix — so an
+  // agent arriving through the widget and one arriving through MCP read the
+  // same sentence — and it does not move between turns, because it came from
+  // the manifest and the manifest does not vary.
+  const app = twoScreens();
+  const s = scripted([
+    { calls: [call("next-page")] },
+    { calls: [call("go", { screen: "settings" })] },
+    { text: "done" },
+  ]);
+
+  await drive(app.driver, { think: s.think, task: "look around" });
+  assert.equal(s.seen.length, 3);
+  assert.match(s.seen[0]!.system, /this app has screens: contacts and settings/);
+  for (const input of s.seen.slice(1)) {
+    assert.equal(input.system, s.seen[0]!.system, "navigating moved the system prompt");
+    assert.equal(
+      JSON.stringify(input.tools),
+      JSON.stringify(s.seen[0]!.tools),
+      "navigating moved the tool list",
+    );
   }
 });

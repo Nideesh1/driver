@@ -54,6 +54,7 @@ def render_snapshot(snapshot: Snapshot) -> str:
 
     ::
 
+        screen: contacts
         where: contacts, filtered to Acme (rev 8)
         selected: c-8821
         rows 1-2 of 5
@@ -63,8 +64,22 @@ def render_snapshot(snapshot: Snapshot) -> str:
 
     Field order is fixed so the same screen renders identically every time: a
     model comparing two reads should see a diff only where the screen changed.
+
+    ``screen`` goes FIRST, above the prose, and is omitted by an app that does
+    not declare one. It is the one line on this block a model can compare for
+    equality: ``where`` carries the filter, the sort and a drill-down's record
+    description, so it moves for reasons that are not navigation, and two reads
+    either side of a ``go`` differ in a dozen ways. One short word that changes
+    if and only if the screen changed is worth a line of the uncached half.
+    Verbatim from the TS half, which this file is kept string-for-string with.
     """
+    # ``getattr`` for the same reason ``selected_count`` below uses it: the
+    # field arrives from the wire, and an older ``Snapshot`` dataclass without
+    # it must keep rendering rather than raise.
+    screen = getattr(snapshot, "screen", None)
     lines = [f"where: {snapshot.where} (rev {snapshot.rev})"]
+    if screen:
+        lines.insert(0, f"screen: {screen}")
 
     selected = snapshot.selected or ()
     if selected:

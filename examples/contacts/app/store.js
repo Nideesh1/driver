@@ -39,13 +39,26 @@
  * thousand times*; it does not say an agent may not point at one row. A verb
  * surface that can only act in bulk cannot do the ordinary thing.
  *
- * **Screen-scoped verbs refuse `wrong-screen` rather than silently working.**
- * The manifest is flat and cached, so every verb in this app is offered on
- * every screen — there is no way to say "this one is only on the companies
- * list". `next-page` on the dashboard therefore has to be a refusal with the
- * fix in it ("the contacts list has pages; `go(contacts)` first"), which is
- * the closest this library gets to expressing a screen boundary. See the
- * report; this is the sharpest of the gaps.
+ * **A screen-scoped verb declares `screen` and the core writes the refusal.**
+ * The verb list is still flat and still cached — it has to be, or every
+ * navigation would bust the prompt prefix — but each scoped verb now names the
+ * screen it lives on, `visible()` returns the screen that is live, and
+ * `wrong-screen` comes back from the core naming BOTH screens. This app used
+ * to hand-roll that check and invent the slug for it, which is why the slug is
+ * reserved now: the next app would have called it something else and no agent
+ * would have recognised both.
+ *
+ * `next-page` and `prev-page` are where this app pushed the field. They
+ * genuinely work on two screens — the contacts list and a company's contact
+ * list, which both page — and `Verb.screen` used to be one string, so scoping
+ * them to either would have made this app refuse a call on a screen it was
+ * still publishing a `page` block for. The demo refused to write that
+ * contradiction down and declared no `screen` at all, refusing an invented
+ * `no-pages-here` instead; `Verb.screen` now takes a list, so the two carry
+ * `screen: ["contacts", "company"]` and the core writes the refusal with every
+ * screen named. The hand-rolled slug and the predicate behind it are gone,
+ * which is the point: an app that invents a word for "you are not there" is an
+ * app whose word the next agent will not recognise.
  */
 
 import { mount } from "../../../packages/core/dist/registry.js";
@@ -78,20 +91,33 @@ export const PAGE_SIZES = ["10", "20", "50", "100"];
 export { COMPANIES, OWNERS, STATUSES, TOTAL };
 
 /**
- * One line, on every screen, naming the other screens.
+ * The app's own briefing, said once.
  *
- * It is here, in the snapshot, because there is nowhere better. `Manifest`
- * carries `app`, `version` and `verbs` and no field for the app's own
- * briefing: the widget can pass `instructions` to `drive()`, but an agent
- * coming in through the relay never sees those, so a screen map kept there
- * would be visible to one of driverkit's two paths and not the other. So it
- * rides in the uncached half and is paid for on every single turn. Kept to one
- * line for that reason, and listed in the report as a gap rather than
- * defended as a design.
+ * This used to be a 130-character screen map pasted into every screen's
+ * `note`, because the only other place for it was the widget's own
+ * `instructions` — which an agent arriving over the relay never sees. So the
+ * app repeated itself in the UNCACHED half, on every single turn, for a
+ * sentence that never changes.
+ *
+ * `MountOptions.instructions` is now where it goes. It lands in
+ * `Manifest.instructions`, which is cached once and read by both paths: the
+ * in-page loop folds it into the system prompt, and the MCP server puts it in
+ * its server instructions. One place, both ways in.
+ *
+ * Static means static, which is the rule that keeps this cheap: no ids, no
+ * counts, no user, nothing that differs between two people or two minutes. It
+ * is in the manifest fingerprint for exactly that reason — it is part of what
+ * a cached copy claims.
  */
-const MAP =
-  "this app has screens: dashboard, contacts, companies, settings — `go` reaches those; " +
-  "`open-contact`/`open-company` open one record";
+const INSTRUCTIONS =
+  "This is a CRM with six screens: a dashboard, a contacts list, one screen per contact, a " +
+  "companies list, one screen per company, and settings. `go` reaches the four main screens; " +
+  "`open-contact` and `open-company` drill into one record and replace the screen you are on, " +
+  "and `back` walks out again. Several verbs work on one screen only — their tool description " +
+  "says which, and calling one elsewhere is refused as `wrong-screen` naming the screen you " +
+  "are on and the screen it wants. A contact's status moves new → pending → accepted or " +
+  "declined. The selection is global: it survives navigation, so a commit verb can act on " +
+  "rows that are not on the screen in front of you, and `selectedCount` is its honest size.";
 
 /**
  * Build a fresh store and a driver over it.
@@ -182,9 +208,12 @@ export function createApp(onChange = () => {}) {
     );
   }
 
-  /** Whichever list the current screen pages through, or null if it does not
-   *  page. One function so `next-page` need not know which screen it is on
-   *  beyond "does this one page at all". */
+  /** Whichever list the current screen pages through, or null on a screen with
+   *  no list. The two screens named here are exactly the two `next-page` and
+   *  `prev-page` declare, and the core refuses those verbs anywhere else — so
+   *  the null branch is now unreachable through a verb and is kept only
+   *  because `windowRows` and `pageCount` are also called while rendering the
+   *  other four screens. */
   function pagedRows() {
     if (store.route.screen === "contacts") return filtered();
     if (store.route.screen === "company") return companyRows();
@@ -282,8 +311,17 @@ export function createApp(onChange = () => {}) {
    * see the report, where "should each screen declare its own visible()" is
    * the question this shape is an answer to.
    *
-   * TWO HONEST COMPROMISES, written down because they are gaps in the
-   * `Snapshot` type and not shortcuts here.
+   * EVERY SCREEN FILLS IN BOTH `screen` AND `where`, and they are not two
+   * spellings of one thing. `screen` is the stable kebab-case id — the same
+   * string `Verb.screen` is matched against, comparable with `===`, and the
+   * only honest answer to "did I navigate?". `where` is prose for a human and
+   * carries everything else the person can see: the filter, the sort, the
+   * status tab, and on a drill-down a sentence about the record that is open.
+   * It changes constantly for reasons that are not navigation, which is why
+   * diffing it was never an answer and why identity moved out of it.
+   *
+   * ONE HONEST COMPROMISE, written down because it is a gap in the `Snapshot`
+   * type and not a shortcut here.
    *
    * 1. `selected` reports only the selected ids ON SCREEN and `selectedCount`
    *    carries the true size. `select-where` can select three thousand rows;
@@ -294,15 +332,15 @@ export function createApp(onChange = () => {}) {
    *    "selected 410 rows in all; the 20 ids above are only the ones on
    *    screen".
    *
-   * 2. A record screen's own fields are in `where`. There is no field in
-   *    `Snapshot` for "the thing I drilled into": `rows` is a list of records
-   *    and the open contact is not one of its own history events. The
-   *    alternative was one record row plus five activity rows in the same flat
-   *    `rows` array, which the agent-side renderer prints as a ragged
-   *    thirteen-column table full of dashes, because it takes the union of
-   *    every row's keys. So the fields went into the sentence documented as
-   *    "where the user is, in their words", and the report says plainly that
-   *    this is the wrong place for them.
+   * A record screen's own fields ride in `where` as well, and that one is no
+   * longer a compromise. There is still no field in `Snapshot` for "the thing
+   * I drilled into" — `rows` is a list of records and the open contact is not
+   * one of its own history events, and putting it there produces the ragged
+   * thirteen-column table full of dashes that the renderer makes of a union of
+   * row keys. But `where` is documented as prose about what the person can
+   * see, and the fields of the record they are looking at are exactly that.
+   * What used to be wrong about it was that `where` was also carrying the
+   * screen's identity; `screen` carries that now.
    */
   const screens = {
     /**
@@ -325,7 +363,8 @@ export function createApp(onChange = () => {}) {
       const hottest = [...store.companies].sort((a, b) => b.pending - a.pending)[0];
 
       return {
-        where: "dashboard",
+        screen: "dashboard",
+        where: "the dashboard: seven metric tiles rolled up from the whole table",
         rev: store.rev,
         rows: [
           { id: "contacts", metric: "contacts in all", value: TOTAL },
@@ -337,12 +376,11 @@ export function createApp(onChange = () => {}) {
         ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
         note:
           "this screen is a dashboard, not a table: each row above is one metric tile and " +
-          "`id` names the tile, not a record. " +
+          "`id` names the tile, not a record." +
           (store.selected.size
-            ? `${store.selected.size} contacts are still selected from another screen and a ` +
-              "commit verb would act on them from here. "
-            : "") +
-          MAP,
+            ? ` ${store.selected.size} contacts are still selected from another screen and a ` +
+              "commit verb would act on them from here."
+            : ""),
       };
     },
 
@@ -353,16 +391,11 @@ export function createApp(onChange = () => {}) {
       const q = store.query.trim();
       const onScreen = visibleRows.filter((r) => store.selected.has(r.id)).map((r) => r.id);
 
-      const notes = [];
-      if (store.selected.size > onScreen.length) {
-        notes.push("a commit verb acts on the whole selection, not just the rows on this page");
-      }
-      notes.push(MAP);
-
       return {
+        screen: "contacts",
         where: q
-          ? `contacts list, filtered to “${q}” (${all.length} of ${TOTAL})`
-          : `contacts list (${TOTAL} rows)`,
+          ? `the contacts list, filtered to “${q}” (${all.length} of ${TOTAL} rows match)`
+          : `the contacts list, unfiltered (${TOTAL} rows)`,
         rev: store.rev,
         rows: visibleRows.map((r) => ({
           id: r.id,
@@ -373,7 +406,12 @@ export function createApp(onChange = () => {}) {
         page: { index: store.page, size: pageSize(), total: all.length },
         ...(onScreen.length ? { selected: onScreen } : {}),
         ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
-        note: notes.join(". "),
+        ...(store.selected.size > onScreen.length
+          ? {
+              note:
+                "a commit verb acts on the whole selection, not just the rows on this page",
+            }
+          : {}),
       };
     },
 
@@ -388,15 +426,17 @@ export function createApp(onChange = () => {}) {
       const open = openContact();
       if (!open) {
         return {
-          where: `contact ${store.route.id} — no such contact`,
+          screen: "contact",
+          where: `no such contact — nothing here has the id \`${store.route.id}\``,
           rev: store.rev,
-          note: `there is no contact with id \`${store.route.id}\`. ${MAP}`,
+          note: `there is no contact with id \`${store.route.id}\`.`,
         };
       }
       const events = historyFor(open.id);
       return {
+        screen: "contact",
         where:
-          `contact ${open.id} — ${open.name}, ${open.title} at ${open.company}; ` +
+          `${open.name} (${open.id}), ${open.title} at ${open.company}; ` +
           `status ${open.status}; owner ${open.owner}; ${open.email}; ` +
           `added ${open.added}; deal value ${open.value}`,
         rev: store.rev,
@@ -404,19 +444,19 @@ export function createApp(onChange = () => {}) {
         ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
         note:
           "the rows above are this contact's activity history, oldest first — they are not " +
-          "contacts. `set-status` and `assign-owner` act on this record and take no id. " +
+          "contacts. `set-status` and `assign-owner` act on this record and take no id." +
           (store.selected.size
-            ? `${store.selected.size} contacts are selected elsewhere; a commit verb acting on ` +
-              "the selection would not touch this record unless it is one of them. "
-            : "") +
-          MAP,
+            ? ` ${store.selected.size} contacts are selected elsewhere; a commit verb acting ` +
+              "on the selection would not touch this record unless it is one of them."
+            : ""),
       };
     },
 
     /** The companies list. Eight rows, no paging, sortable. */
     companies() {
       return {
-        where: `companies list (${store.companies.length} rows), sorted by ${store.sortBy}`,
+        screen: "companies",
+        where: `the companies list, ${store.companies.length} rows sorted by ${store.sortBy}`,
         rev: store.rev,
         rows: sortedCompanies().map((c) => ({
           id: c.id,
@@ -430,12 +470,11 @@ export function createApp(onChange = () => {}) {
         ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
         note:
           "`id` is the company's slug, which is what the URL uses; `open-company` takes the " +
-          "`name`. " +
+          "`name`." +
           (store.selected.size
-            ? `${store.selected.size} contacts are selected on another screen and a commit verb ` +
-              "would act on them from here. "
-            : "") +
-          MAP,
+            ? ` ${store.selected.size} contacts are selected on another screen and a commit ` +
+              "verb would act on them from here."
+            : ""),
       };
     },
 
@@ -453,9 +492,10 @@ export function createApp(onChange = () => {}) {
       const open = openCompany();
       if (!open) {
         return {
-          where: `company ${store.route.id} — no such company`,
+          screen: "company",
+          where: `no such company — nothing here has the slug \`${store.route.id}\``,
           rev: store.rev,
-          note: `there is no company with slug \`${store.route.id}\`. ${MAP}`,
+          note: `there is no company with slug \`${store.route.id}\`.`,
         };
       }
       const all = companyRows();
@@ -463,8 +503,9 @@ export function createApp(onChange = () => {}) {
       const onScreen = visibleRows.filter((r) => store.selected.has(r.id)).map((r) => r.id);
 
       return {
+        screen: "company",
         where:
-          `company ${open.name} — ${open.tier}, ${open.region}, lead ${open.lead}; ` +
+          `${open.name} — ${open.tier}, ${open.region}, lead ${open.lead}; ` +
           `${open.contacts} contacts (${open.new} new, ${open.pending} pending, ` +
           `${open.accepted} accepted, ${open.declined} declined); ` +
           `showing the ${store.statusTab} ones`,
@@ -482,12 +523,11 @@ export function createApp(onChange = () => {}) {
         note:
           "the rows are this company's contacts under the current status tab. " +
           "`select-pending-here` selects every pending contact at this company in one call and " +
-          "reports the count. " +
+          "reports the count." +
           (store.selected.size > onScreen.length
-            ? "a commit verb acts on the whole selection, which reaches past this page and past " +
-              "this company. "
-            : "") +
-          MAP,
+            ? " a commit verb acts on the whole selection, which reaches past this page and " +
+              "past this company."
+            : ""),
       };
     },
 
@@ -505,7 +545,8 @@ export function createApp(onChange = () => {}) {
     settings() {
       const s = store.settings;
       return {
-        where: "settings",
+        screen: "settings",
+        where: "the settings form: four inputs, each with its current value",
         rev: store.rev,
         rows: [
           {
@@ -537,8 +578,7 @@ export function createApp(onChange = () => {}) {
         note:
           "this screen is a form, not a table: each row is one input, `id` is the setting to " +
           "pass to `set-setting`, `value` is what the box says now and `accepts` is what it " +
-          "will take. " +
-          MAP,
+          "will take.",
       };
     },
   };
@@ -551,41 +591,24 @@ export function createApp(onChange = () => {}) {
 
   // ---- the verbs ---------------------------------------------------------
 
-  /**
-   * The guard every screen-scoped verb starts with.
-   *
-   * Returns a refusal, or null when the verb is on its own screen. The hint
-   * names the verb that would get the agent to the right place, because
-   * `wrong-screen` on its own is a dead end: the manifest is one flat list
-   * with no screen on any entry, so an agent has no structural way to know
-   * which screen a verb belongs to until it has been refused once.
-   *
-   * @param {{ refuse: (reason: string, hint?: string) => any }} ctx
-   * @param {string[]} want
-   * @param {string} fix
-   */
-  function here(ctx, want, fix) {
-    if (want.includes(store.route.screen)) return null;
-    return ctx.refuse(
-      "wrong-screen",
-      `you are on the ${store.route.screen} screen; this verb works on ${want.join(" or ")}. ${fix}`,
-    );
-  }
-
   const driver = mount({
     app: "Northwind CRM",
+    // Said once, in the cached half, and read by both ways in. See
+    // `INSTRUCTIONS` for why it is no longer pasted into every snapshot.
+    instructions: INSTRUCTIONS,
     visible,
     verbs: [
       // ---- getting about ------------------------------------------------
       {
         name: "go",
-        // `read` under protest. The three kinds are read / describe / commit
-        // and navigation is none of them: it changes no data, so it is not a
-        // commit, and it reports no count, so it is not a describe — but it is
-        // emphatically not "changes nothing", which is what `read` promises in
-        // the cached half. It moves the person's screen out from under them.
-        // See the report: the ladder needs a fourth rung, or `read` has to
-        // stop claiming that nothing changes.
+        // `read`, and no longer under protest. This verb is why `read` was
+        // reworded: it changes no data and reports no count, which is what the
+        // kind now promises, but it emphatically does not "change nothing" —
+        // it moves the person's screen out from under them, which is the most
+        // visible thing an agent can do to somebody who is watching. The
+        // ladder is about what a wrong call COSTS, and a wrong navigation
+        // costs exactly what a wrong read costs: the person has to look
+        // somewhere else.
         kind: "read",
         describe:
           "go to one of the app's main screens, the way clicking the left-hand nav does. " +
@@ -662,16 +685,16 @@ export function createApp(onChange = () => {}) {
       // ---- the contacts list --------------------------------------------
       {
         name: "search",
-        // `read`, and the ladder is genuinely ambiguous about it: the doc
-        // comment on `VerbKind` says `describe` is for a verb that "changes
-        // what is SELECTED or FILTERED", which this does. It is `read` because
-        // the rest of what `describe` means does not apply — there is no count
-        // a commit decision turns on, and nothing is left pending afterwards.
-        // Both readings are defensible, which is the problem. See the report.
+        // `read`, unambiguously now. `describe` used to say it was for a verb
+        // that changes what is "SELECTED or FILTERED", and by that sentence
+        // this was a `describe` — while none of the rest of what `describe`
+        // means applied: it reports no count, so there is no number a
+        // following commit turns on, and the count/commit pair is the whole
+        // safety mechanism. The two words came apart and `read` is the honest
+        // one: it narrows a list and leaves nothing pending.
         kind: "read",
-        describe:
-          "filter the contacts list by a search term, the way typing in the search box does. " +
-          "Only on the contacts list.",
+        screen: "contacts",
+        describe: "filter the contacts list by a search term, the way typing in the box does",
         at: "#q",
         args: {
           q: {
@@ -681,10 +704,7 @@ export function createApp(onChange = () => {}) {
               "Pass an empty string to clear the search.",
           },
         },
-        refuses: ["wrong-screen"],
-        run: ({ q }, ctx) => {
-          const no = here(ctx, ["contacts"], "`go` with screen `contacts` first.");
-          if (no) return no;
+        run: ({ q }) => {
           store.query = q;
           store.page = 0;
           bump();
@@ -694,16 +714,24 @@ export function createApp(onChange = () => {}) {
       {
         name: "next-page",
         kind: "read",
-        describe: "show the next page of whichever list you are on",
-        refuses: ["at-last-page", "wrong-screen"],
+        // BOTH the screens that page, which is the shape `Verb.screen` grew
+        // for. This verb used to declare no screen and refuse an invented
+        // `no-pages-here`, because one string could not say "the contacts list
+        // and a company's contact list" and naming either would have refused a
+        // call on a screen still publishing a `page` block. Now the mapping is
+        // in the cached half where an agent reads it before calling, and the
+        // core's `wrong-screen` names the live screen and both of these.
+        //
+        // The app's own predicate went with the slug, and it could because the
+        // two questions turned out to have the same answer here: the screens
+        // that page are exactly these two, so "does this list page" was only
+        // ever "are you on one of them" spelled in the app's words.
+        screen: ["contacts", "company"],
+        describe:
+          "show the next page of whichever list you are on. The contacts list and a " +
+          "company's contact list have pages; no other screen does.",
+        refuses: ["at-last-page"],
         run: (_args, ctx) => {
-          const no = here(
-            ctx,
-            ["contacts", "company"],
-            "only the contacts list and a company's contact list have pages: `go` with screen " +
-              "`contacts`, or `open-company`.",
-          );
-          if (no) return no;
           if (store.page >= pageCount() - 1) {
             return ctx.refuse(
               "at-last-page",
@@ -718,16 +746,13 @@ export function createApp(onChange = () => {}) {
       {
         name: "prev-page",
         kind: "read",
-        describe: "show the previous page of whichever list you are on",
-        refuses: ["at-first-page", "wrong-screen"],
+        // Both screens, for the reason on `next-page` above.
+        screen: ["contacts", "company"],
+        describe:
+          "show the previous page of whichever list you are on. The contacts list and a " +
+          "company's contact list have pages; no other screen does.",
+        refuses: ["at-first-page"],
         run: (_args, ctx) => {
-          const no = here(
-            ctx,
-            ["contacts", "company"],
-            "only the contacts list and a company's contact list have pages: `go` with screen " +
-              "`contacts`, or `open-company`.",
-          );
-          if (no) return no;
           if (store.page === 0) {
             return ctx.refuse("at-first-page", "this is already the first page");
           }
@@ -740,6 +765,7 @@ export function createApp(onChange = () => {}) {
       {
         name: "sort-companies",
         kind: "read",
+        screen: "companies",
         describe: "reorder the companies list",
         at: ".table",
         args: {
@@ -749,10 +775,7 @@ export function createApp(onChange = () => {}) {
             oneOf: ["name", "contacts", "new", "pending", "accepted"],
           },
         },
-        refuses: ["wrong-screen"],
-        run: ({ by }, ctx) => {
-          const no = here(ctx, ["companies"], "`go` with screen `companies` first.");
-          if (no) return no;
+        run: ({ by }) => {
           store.sortBy = by;
           bump();
         },
@@ -761,7 +784,8 @@ export function createApp(onChange = () => {}) {
       {
         name: "show-status",
         kind: "read",
-        describe: "on a company's screen, switch which status tab of its contacts is listed",
+        screen: "company",
+        describe: "switch which status tab of a company's contacts is listed",
         args: {
           status: {
             type: "string",
@@ -769,10 +793,7 @@ export function createApp(onChange = () => {}) {
             oneOf: [...STATUSES, "all"],
           },
         },
-        refuses: ["wrong-screen"],
-        run: ({ status }, ctx) => {
-          const no = here(ctx, ["company"], "`open-company` first.");
-          if (no) return no;
+        run: ({ status }) => {
           store.statusTab = status;
           store.page = 0;
           bump();
@@ -858,13 +879,12 @@ export function createApp(onChange = () => {}) {
       {
         name: "select-pending-here",
         kind: "describe",
+        screen: "company",
         describe:
-          "on a company's screen, select every pending contact at THIS company in one call and " +
-          "report how many. The company is the one whose screen you are on.",
-        refuses: ["wrong-screen", "nothing-pending"],
+          "select every pending contact at THIS company in one call and report how many. The " +
+          "company is the one whose screen you are on.",
+        refuses: ["nothing-pending"],
         run: (_args, ctx) => {
-          const no = here(ctx, ["company"], "`open-company` first.");
-          if (no) return no;
           const open = openCompany();
           const pending = store.rows.filter(
             (r) => r.company === open.name && r.status === "pending",
@@ -1014,13 +1034,21 @@ export function createApp(onChange = () => {}) {
       // ---- the form -----------------------------------------------------
       {
         name: "set-setting",
-        // `commit`, because it changes stored state that outlives the screen —
-        // and the ladder has nothing weaker to say about a change that is one
-        // click to undo. Calling it `describe` would be a lie about what it
-        // touches; calling it `commit` makes the widget stop and ask a person
-        // before the app changes its own page size, which is a question nobody
-        // needs. The report says what the third rung is missing.
+        // `commit`, because it changes stored state that outlives the screen,
+        // and `reversible` because every one of the four settings is one call
+        // to put back: `set-setting` with the old value, which the settings
+        // screen reports in each row's `value`. Nothing is written anywhere
+        // else and nothing else depends on the previous value.
+        //
+        // This verb is the motivating example for the flag. It and accepting
+        // 3,412 contacts were both just `commit`, so both were shouted about
+        // in identical capitals — and a banner that fires on a page-size
+        // change is a banner a model learns to read past, the same way a
+        // person learns to click Yes without reading. `reversible` is a claim
+        // that there is a way back, not that nobody minds: the page size still
+        // changes and the person still sees it.
         kind: "commit",
+        reversible: true,
         describe:
           "change one setting on the settings screen. The settings screen lists each setting's " +
           "name, its current value and what it accepts.",

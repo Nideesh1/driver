@@ -43,4 +43,7 @@ export interface CallFrame {
   name: string;
   args?: Record<string, Scalar>;
   rev?: number;
+  /** The agent's claim about which screen it read, handed to the driver as
+   *  `CallOptions.screen` and checked there before `rev`. */
+  screen?: string;
 }

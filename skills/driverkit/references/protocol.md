@@ -93,8 +93,12 @@ the connection closes**, because there is no position at which to start reading 
 
 ## Reserved refusals, and the three that mean "unknown"
 
-Reserved: `stale`, `unknown-verb`, `bad-argument`, `unmounted`, `threw` (the core), `no-such-tab`,
-`tab-went-away`, `timeout` (the relay), `declined-by-user` (a confirmation gate). An app may not name a verb or its
+Reserved: `stale`, `wrong-screen`, `unknown-verb`, `bad-argument`, `unmounted`, `threw` (the core),
+`no-such-tab`, `tab-went-away`, `timeout` (the relay), `declined-by-user` (a confirmation gate). `wrong-screen` is
+the core's answer to a call aimed at a screen the app is not on — either the verb declared a `screen` of its own,
+or the call carried a `screen` that no longer matches — and it was an app's own invention before it was the
+core's, which is exactly why it is reserved: the next app would have spelled it differently
+([screens.md](screens.md)). An app may not name a verb or its
 own refusal any of these: an agent must be able to tell "your app said no, phrase it differently" from "your call
 never landed, reconnect or pick another tab", and if `timeout` can mean either it can tell neither. `mount()`
 throws on a reserved verb name or a reserved declared refusal; a reserved slug returned at runtime is reported as

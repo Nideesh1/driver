@@ -17,7 +17,7 @@ import type { Think, ThinkInput } from "../../agent/src/types.ts";
 import { runControls } from "../../agent/src/control.ts";
 import type { RunControlsOptions } from "../../agent/src/control.ts";
 import type { RunControls } from "../../agent/src/types.ts";
-import { mountWidget, settingsKey, storageKey } from "../src/index.ts";
+import { COMMIT_ASK_ABOVE, mountWidget, settingsKey, storageKey } from "../src/index.ts";
 import type { Position, WidgetOptions } from "../src/index.ts";
 import { FakeClock, FakeDocument, FakeNode, FakeStorage, FakeWindow, GAP, hide, instant } from "./fake-dom.ts";
 
@@ -319,6 +319,288 @@ test("confirmCommits false opts out, for an app whose commits are all small", as
 
   assert.equal(host.find("dk-ask").length, 0, "a question was asked after opting out");
   assert.equal(app.accepted(), 5);
+  widget.unmount();
+});
+
+/**
+ * An app with both kinds of `commit`: `set-page-size`, which declares that it
+ * can be undone, and `accept-selected`, which makes no such claim.
+ *
+ * Two verbs rather than one with a flag flipped, because the pair is the
+ * failure `Verb.reversible` was added for: these two were getting the same
+ * dialog, and a modal on a page-size change is how somebody learns to click
+ * Yes without reading the one about three thousand rows. `selection` is
+ * whatever `visible()` should claim is selected, so a test can put the gate's
+ * size check on either side of the line.
+ */
+function undoable(selection: { selectedCount?: number; selected?: string[] } = {}) {
+  let rev = 1;
+  const ran: string[] = [];
+  const driver = mount({
+    app: "Contacts",
+    visible: (): Snapshot => ({ where: "contacts", rev, rows: [{ id: "c-0" }], ...selection }),
+    verbs: [
+      {
+        name: "set-page-size",
+        kind: "commit",
+        reversible: true,
+        describe: "change how many rows a page shows",
+        args: { size: { type: "number", describe: "rows per page" } },
+        run: () => {
+          ran.push("set-page-size");
+          rev++;
+        },
+      },
+      {
+        name: "accept-selected",
+        kind: "commit",
+        describe: "accept the current selection",
+        run: () => {
+          ran.push("accept-selected");
+          rev++;
+        },
+      },
+    ],
+  });
+  return { driver, ran };
+}
+
+type GateOptions = Omit<Partial<WidgetOptions>, "think" | "document" | "clock">;
+
+/** A panel over an arbitrary driver, with the clock that does not sleep. */
+function panel(driver: Driver, script: unknown[], o: GateOptions = {}) {
+  const doc = new FakeDocument();
+  const s = scripted(script);
+  const widget = mountWidget(driver, {
+    think: s.think,
+    document: doc,
+    clock: instant,
+    open: true,
+    ...o,
+  });
+  return { widget, host: doc.host(), s };
+}
+
+/** One call to the named verb and then a sentence, which is the shape of every
+ *  run in the gate tests below. */
+function oneCall(name: string, args: Record<string, unknown> = {}): unknown[] {
+  return [{ calls: [{ id: "a", name, args }] }, { text: "done" }];
+}
+
+test("a commit the app says it can undo runs without a dialog", async () => {
+  // The exact failure `Verb.reversible` was added to name. A page-size change
+  // and accepting 3,412 contacts were both `commit`, so both stopped to ask a
+  // person — and a modal on something trivial is how people learn to click Yes
+  // without reading. The next modal they skip is the bulk accept.
+  const app = undoable();
+  const { widget, host } = panel(app.driver, oneCall("set-page-size", { size: 50 }));
+
+  await ask(host, "show fifty rows a page");
+
+  assert.equal(host.find("dk-ask").length, 0, "a reversible commit was put behind a dialog");
+  assert.deepEqual(app.ran, ["set-page-size"]);
+  // It is still in the transcript, and still marked as a commit: running
+  // without a question is not the same as running unseen. `reversible` means
+  // there is a way back, not that nobody minds.
+  assert.equal(host.find("dk-step-commit").length, 1);
+  widget.unmount();
+});
+
+test("a commit that has not said it can be undone is still gated", async () => {
+  // Absent `reversible` makes no claim, and the two wrong defaults do not cost
+  // the same thing: letting an unclaimed commit through is a bulk accept
+  // nobody saw, and the field would be useless if not filling it in were the
+  // safe option.
+  const app = undoable({ selectedCount: 3 });
+  const { widget, host } = panel(app.driver, oneCall("accept-selected"));
+
+  await ask(host, "accept them");
+
+  assert.equal(host.find("dk-ask").length, 1, "an unclaimed commit ran unasked");
+  assert.deepEqual(app.ran, []);
+  await allow(host);
+  assert.deepEqual(app.ran, ["accept-selected"]);
+  widget.unmount();
+});
+
+test("a reversible commit on a large selection is asked about anyway", async () => {
+  // "Undo" over three thousand rows is a promise an app may not be able to
+  // keep at that size, whatever it declared — a buffer sized for one row, a
+  // half-applied batch, a server that gave up partway. `reversible` is a claim
+  // about the kind of change and not about its volume, so the volume is
+  // checked separately and the flag does not answer for it.
+  const app = undoable({ selectedCount: 3412 });
+  const { widget, host } = panel(app.driver, oneCall("set-page-size", { size: 50 }));
+
+  await ask(host, "change the page size");
+
+  assert.equal(host.find("dk-ask").length, 1, "a large reversible commit ran unasked");
+  assert.equal(host.one("dk-ask-q").textContent, "change how many rows a page shows — 3,412 rows?");
+  assert.deepEqual(app.ran, []);
+  await allow(host);
+  assert.deepEqual(app.ran, ["set-page-size"]);
+  widget.unmount();
+});
+
+test("the size that triggers it can be counted from the ids on screen", async () => {
+  // `Snapshot.selected` carries only the ids a person can see, so it is the
+  // true size of the selection exactly when the whole selection is on screen —
+  // which is the case an app with no `selectedCount` leaves as the only
+  // evidence there is. Believed as a floor rather than ignored.
+  const app = undoable({ selected: Array.from({ length: 40 }, (_, i) => `c-${i}`) });
+  const { widget, host } = panel(app.driver, oneCall("set-page-size", { size: 50 }));
+
+  await ask(host, "change the page size");
+
+  assert.equal(host.find("dk-ask").length, 1, "forty selected rows did not reach the gate");
+  assert.equal(host.one("dk-ask-q").textContent, "change how many rows a page shows — 40 rows?");
+  host.one("dk-no").dispatch("click");
+  await settle();
+  widget.unmount();
+});
+
+test("the two dialogs do not read alike: one says there is a way back and one does not", async () => {
+  // Two dialogs that read identically are one dialog as far as a person's
+  // attention is concerned — which would reintroduce the exact failure this
+  // whole gate change exists to avoid, one level down. So the reversible one
+  // says so, and says why it is being asked about at all when the only reason
+  // is the size.
+  const undo = undoable({ selectedCount: 3412 });
+  const a = panel(undo.driver, oneCall("set-page-size", { size: 50 }));
+  await ask(a.host, "change the page size");
+  const reversible = a.host.one("dk-ask-why").textContent!;
+  assert.match(reversible, /this can be undone/);
+  assert.doesNotMatch(reversible, /irreversible/);
+  // And the reason it was asked at all, because "you said this was undoable
+  // and you are asking me anyway" is otherwise a contradiction.
+  assert.match(reversible, /a promise an app may not be able to keep/);
+  a.host.one("dk-no").dispatch("click");
+  await settle();
+  a.widget.unmount();
+
+  const plain = undoable({ selectedCount: 3412 });
+  const b = panel(plain.driver, oneCall("accept-selected"));
+  await ask(b.host, "accept them");
+  const irreversible = b.host.one("dk-ask-why").textContent!;
+  assert.match(irreversible, /changes data and may be irreversible/);
+  assert.doesNotMatch(irreversible, /can be undone/);
+  b.host.one("dk-no").dispatch("click");
+  await settle();
+  b.widget.unmount();
+});
+
+test("commitAskAbove moves the line, because the number is a judgement and not a fact", async () => {
+  // One number for every app is wrong for some of them: where an app's own
+  // undo stops being credible is something its author knows and this library
+  // does not. `COMMIT_ASK_ABOVE` is the default and this is the override.
+  const strict = undoable({ selectedCount: 2 });
+  const a = panel(strict.driver, oneCall("set-page-size", { size: 50 }), { commitAskAbove: 1 });
+  await ask(a.host, "change the page size");
+  assert.equal(a.host.find("dk-ask").length, 1, "the lowered threshold was not read");
+  a.host.one("dk-no").dispatch("click");
+  await settle();
+  a.widget.unmount();
+
+  // And the other way: an app confident in its undo at any size.
+  const loose = undoable({ selectedCount: 3412 });
+  const b = panel(loose.driver, oneCall("set-page-size", { size: 50 }), {
+    commitAskAbove: Number.POSITIVE_INFINITY,
+  });
+  await ask(b.host, "change the page size");
+  assert.equal(b.host.find("dk-ask").length, 0, "the raised threshold was not read");
+  assert.deepEqual(loose.ran, ["set-page-size"]);
+  b.widget.unmount();
+
+  // The default is a shipped number and not a private one: a host replacing it
+  // should be able to say in its own help text what it replaced.
+  assert.equal(COMMIT_ASK_ABOVE, 25);
+  const atLine = undoable({ selectedCount: COMMIT_ASK_ABOVE });
+  const c = panel(atLine.driver, oneCall("set-page-size", { size: 50 }));
+  await ask(c.host, "change the page size");
+  // "Above" means above, so a selection exactly on the line goes through.
+  assert.equal(c.host.find("dk-ask").length, 0);
+  c.widget.unmount();
+});
+
+test("confirmEveryCommit brings back the question on every commit, for an app that wants it", async () => {
+  // An app whose "undo" is a toast that vanishes in five seconds, or one under
+  // a rule that a person signs for every write. Those are decisions about the
+  // app and the app gets to make them; what they are not is the right default
+  // for everybody.
+  const app = undoable();
+  const { widget, host } = panel(app.driver, oneCall("set-page-size", { size: 50 }), {
+    confirmEveryCommit: true,
+  });
+
+  await ask(host, "change the page size");
+
+  assert.equal(host.find("dk-ask").length, 1, "the forced question did not appear");
+  // Still the reversible wording: the host asked to be asked, it did not ask
+  // to be misled about what the verb does.
+  assert.match(host.one("dk-ask-why").textContent!, /this can be undone/);
+  // And nothing about the size, because the size is not why this was asked.
+  assert.doesNotMatch(host.one("dk-ask-why").textContent!, /a promise an app may not be able/);
+  await allow(host);
+  assert.deepEqual(app.ran, ["set-page-size"]);
+  widget.unmount();
+});
+
+test("confirmCommits false still beats everything, reversible or not", async () => {
+  // The switch a person reached for in the settings view is about whether they
+  // are asked at all, and it is above both of the finer rules.
+  const app = undoable({ selectedCount: 3412 });
+  const { widget, host } = panel(app.driver, oneCall("accept-selected"), {
+    confirmCommits: false,
+    confirmEveryCommit: true,
+  });
+
+  await ask(host, "accept them");
+
+  assert.equal(host.find("dk-ask").length, 0);
+  assert.deepEqual(app.ran, ["accept-selected"]);
+  widget.unmount();
+});
+
+test("a host onBeforeCommit is called for a reversible commit too, and nothing else is", async () => {
+  // It overrides rather than stacks, and that has to hold in the direction the
+  // built-in gate now stays quiet in: a host that supplied its own question is
+  // asking about every commit, and silently skipping the reversible ones would
+  // be the panel overruling a policy it was handed.
+  const app = undoable();
+  const seen: string[] = [];
+  const { widget, host } = panel(app.driver, oneCall("set-page-size", { size: 50 }), {
+    onBeforeCommit: ({ name }) => {
+      seen.push(name);
+      return "the operator has not signed off on this";
+    },
+  });
+
+  await ask(host, "change the page size");
+
+  assert.deepEqual(seen, ["set-page-size"]);
+  assert.deepEqual(app.ran, [], "the host's veto was not obeyed");
+  assert.equal(host.find("dk-ask").length, 0, "the built-in question was asked as well");
+  assert.match(host.find("dk-step")[0]!.textContent!, /refused: declined-by-user/);
+  widget.unmount();
+});
+
+test("saying no to a large reversible commit still refuses as declined-by-user", async () => {
+  // The veto reaches the model as an ordinary refusal whichever dialog asked,
+  // so it adapts rather than retrying — and the slug is the one every client
+  // already knows.
+  const app = undoable({ selectedCount: 3412 });
+  const { widget, host } = panel(app.driver, [
+    { calls: [{ id: "a", name: "set-page-size", args: { size: 50 } }] },
+    { text: "Understood, I have not changed it." },
+  ]);
+
+  await ask(host, "change the page size");
+  host.one("dk-no").dispatch("click");
+  await settle();
+
+  assert.deepEqual(app.ran, []);
+  assert.match(host.one("dk-ask-said").textContent!, /You said no/);
+  assert.match(host.find("dk-step")[0]!.textContent!, /refused: declined-by-user/);
   widget.unmount();
 });
 

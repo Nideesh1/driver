@@ -24,7 +24,7 @@ talks to the relay over MCP). Packages: `driverkit` (core `mount()`), `@driverki
 - **Never used on a real app.** The only integration that exists is `examples/contacts`, written by the author.
   Expect to be the first person to hit any given edge.
 - **Proven:** both paths driven end to end — the widget against a live Anthropic model in a real browser, and the
-  relay path from another process — plus ~215 TS tests and the Python suite, with the two relay implementations
+  relay path from another process — plus 462 TS tests and the Python suite, with the two relay implementations
   (TS and Python) tested against each other.
 - **Not proven:** `driverkit.fastmcp_server` (MCP over HTTP) **has never been executed once** — its own docstring
   lists the five things a human must check. Auth is unit-tested but has never run in a multi-user deployment.
@@ -37,6 +37,7 @@ talks to the relay over MCP). Packages: `driverkit` (core `mount()`), `@driverki
 | **write or review a verb list for their app** (the hard part) | read the repo, then draft verbs | [authoring-verbs.md](references/authoring-verbs.md) |
 | see that procedure run on a messy app | a worked draft, verb by verb, with the `kind` reasoning | [worked-example.md](references/worked-example.md) |
 | write `visible()` honestly (`rev`, `page`, `selected`) | the snapshot contract and its three `page` states | [snapshot.md](references/snapshot.md) |
+| **adopt an app with more than one screen** | `Verb.screen`, `Snapshot.screen`, `CallOptions.screen`, `instructions` | [screens.md](references/screens.md) |
 | a chat panel inside their own app (case 1) | `mountWidget(driver, { think: backendThink("/api/chat") })` + that endpoint | [widget.md](references/widget.md) |
 | drive the app from another process, a voice assistant, Claude Desktop (case 2) | relay (standalone or ASGI-mounted) + `driverkit-mcp` | [relay-mcp.md](references/relay-mcp.md) |
 | deploy for more than one person | signed tab tokens the app's backend mints; anonymous visitors | [auth.md](references/auth.md) |
@@ -57,8 +58,10 @@ getting it wrong is what costs them. In short, and at length in [authoring-verbs
 2. **Name them as intents in the user's vocabulary**, not as wrappers over internals: `park`, not `setLane`. An
    illegal move should be **inexpressible**, not refused.
 3. **Declare `kind` on every verb**, and get `commit` right. A `commit` mislabelled `read` tells an agent an
-   irreversible call is free to try. Pair `describe` (takes the predicate, reports a `count`) with `commit` (takes
-   no predicate, acts on the selection) so a number is always seen before data moves.
+   irreversible call is free to try. `read` means changes no data and reports no count — navigation is a read —
+   and `describe` is about what is **selected**, not what is filtered. Pair `describe` (takes the predicate,
+   reports a `count`) with `commit` (takes no predicate, acts on the selection) so a number is always seen before
+   data moves, and mark a `commit` the app can undo `reversible: true` so the capitals go on meaning something.
 4. **Bulk work takes a predicate, never a repeated id.** `select-where({ company })`, not `select(id)` ×1000.
 5. **`visible()` returns the real on-screen window** — same filters, same page, with `page` and `selectedCount`,
    and never more rows than the person can see.
@@ -71,10 +74,15 @@ getting it wrong is what costs them. In short, and at length in [authoring-verbs
   person and already holds the key. A `widget` option that took a key would be a widget that leaks one.
 - Nothing per-user or per-screen may go in the static half (`app`, verb `describe`, `instructions`, the backend's
   `system`). One user-specific string there busts the prompt cache for everybody and the library stops being cheap.
+- **The tool list must not vary with the live screen.** Declare the mapping statically with `Verb.screen` and let
+  the core refuse `wrong-screen`; a verb list that changed on navigation would bust the prefix every time the
+  person moved. The app's own briefing goes in `MountOptions.instructions`, never in every snapshot's `note`.
 - Keep the snapshot to a screenful. A snapshot near the relay's 1 MiB body limit is a bug in `visible()`.
 - Never fill `Snapshot.selected` with every selected id — on-screen ids only, with `selectedCount` for the size.
-- A verb may not be named — or refuse with — a reserved slug: `stale`, `unknown-verb`, `bad-argument`, `unmounted`,
-  `threw`, `no-such-tab`, `tab-went-away`, `timeout`, `declined-by-user`. `mount()` throws on the first two cases.
+- A verb may not be named — or refuse with — a reserved slug: `stale`, `wrong-screen`, `unknown-verb`,
+  `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`, `declined-by-user`. `mount()`
+  throws on a reserved verb name or a reserved declared refusal. `wrong-screen` is the one an app is most likely to
+  have invented for itself; `Verb.screen` replaces that guard — [screens.md](references/screens.md).
 - A tab id is a capability. Do not log it, print it in the UI, or paste it into a chat.
 - `allow_remote` without `auth=` or `resolve_principal=` refuses to start. That is deliberate; do not work around it.
 - `timeout` and `tab-went-away` on a `commit` mean the outcome is **unknown**. Read the screen before retrying.
@@ -100,7 +108,8 @@ const driver = mount({
       run: (_, ctx) => store.selected.size ? store.accept() : ctx.refuse("nothing-selected") },
   ],
   visible: () => ({
-    where: "contacts", rev: store.rev, rows: store.onScreen(),
+    screen: "contacts",                     // the stable id; `where` is the prose about it
+    where: "the contacts list", rev: store.rev, rows: store.onScreen(),
     page: { index: store.page, size: 20, total: store.total },
     selected: store.visibleSelection(), selectedCount: store.selected.size,
   }),

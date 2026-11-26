@@ -1,4 +1,7 @@
-export { mountWidget } from "./widget.ts";
+// `COMMIT_ASK_ABOVE` as well as `mountWidget`, because a host overriding
+// `commitAskAbove` is making a judgement about its own undo and should be able
+// to see — and name in its own help text — the number it is replacing.
+export { COMMIT_ASK_ABOVE, mountWidget } from "./widget.ts";
 export type { RunControlsFactory, Widget, WidgetOptions } from "./widget.ts";
 export { CSS, SPOT_CSS } from "./css.ts";
 // `settingsKey` for the same reason as `storageKey`: a host app offering a

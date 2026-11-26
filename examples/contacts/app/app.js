@@ -139,20 +139,22 @@ mountWidget(driver, {
   greeting:
     "Ask me to do things in Northwind. Try: “open Grayson Robotics, how many of its " +
     "contacts are pending, then accept them”.",
-  // Static, and cached with the system prompt. The app-shaped briefing that
-  // belongs in the manifest and has nowhere to live there: the screens, how to
-  // move between them, and what a drill-down means. An agent arriving over the
-  // relay never sees a word of this, which is why `visible()` repeats the
-  // screen list in every snapshot's `note`.
-  instructions:
-    "This is a CRM with six screens: a dashboard, a contacts list, one screen per contact, " +
-    "a companies list, one screen per company, and settings. `go` reaches the four main " +
-    "screens; `open-contact` and `open-company` drill into one record and replace the screen " +
-    "you are on. Several verbs only work on one screen and refuse `wrong-screen` elsewhere, " +
-    "with the fix in the hint — read it rather than retrying. A contact's status moves " +
-    "new → pending → accepted or declined. The selection is global: it survives navigation, " +
-    "so a commit verb can act on rows that are not on the screen in front of you, and " +
-    "`selectedCount` is the honest size of it.",
+  // NO `instructions` HERE, AND THAT IS THE POINT. The briefing this used to
+  // carry — six screens, how to move between them, what a drill-down means,
+  // how the selection behaves — is the APP talking about itself, so it now
+  // lives in `MountOptions.instructions` over in `store.js`, where it reaches
+  // `Manifest.instructions` and therefore both ways in: this widget's cached
+  // system prompt, and an agent arriving over the relay or MCP. A copy here
+  // would be visible to one of the two paths and not the other, which is the
+  // gap that field was added to close — and two copies of one briefing is how
+  // they drift apart.
+  //
+  // `WidgetOptions.instructions` has not gone away and is not the same field.
+  // It is THIS HOST's voice: a house tone, a rule about this deployment,
+  // whatever the embedding wants said that the app itself would not say. It is
+  // folded into the system prompt AFTER the app's own, which makes it the one
+  // a model follows when the two disagree. This page is the app's own page, so
+  // it has nothing of its own to add.
   onError: (err) => console.error("driverkit widget:", err),
 });
 

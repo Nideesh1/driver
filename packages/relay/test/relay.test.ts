@@ -223,6 +223,53 @@ test("a call with no rev arrives with no rev, so omitting it still opts out of t
   assert.ok(!("rev" in got), "the relay invented a rev the agent never claimed");
 });
 
+test("`screen` is forwarded untouched, on exactly the same terms as `rev`", async (t) => {
+  // The relay does not know which screen a tab is on, does not compare one, and
+  // does not refuse one. `screen` is the agent's claim and the driver's check,
+  // and a relay that had an opinion about it would be a second set of rules
+  // beside the core's -- which is the one thing this file's header says a relay
+  // must never grow.
+  const { url } = await up(t);
+  const one = await tab(url, "t1");
+  await one.hello();
+
+  const frame = one.es.next("call");
+  const pending = call(url, "t1", { name: "next-page", screen: "contacts" });
+  const got = (await frame) as { screen?: string; id: string };
+  assert.equal(got.screen, "contacts");
+
+  const refused: Result = {
+    ok: false,
+    refused: "wrong-screen",
+    hint: "you believed you were on the `contacts` screen but the app is on `settings`",
+    snapshot: { where: "settings", screen: "settings", rev: 9 },
+  };
+  await one.answer(got.id, refused);
+  // Byte for byte again, `snapshot.screen` included: the screen the agent is
+  // actually on is the whole fix, and a hop that dropped it would cost a round
+  // trip to rediscover.
+  assert.deepEqual((await pending).body, refused);
+});
+
+test("a call with no screen, or an empty one, arrives with none", async (t) => {
+  const { url } = await up(t);
+  const one = await tab(url, "t1");
+
+  const first = one.es.next("call");
+  void call(url, "t1", { name: "goto" });
+  assert.ok(
+    !("screen" in ((await first) as Record<string, unknown>)),
+    "the relay invented a screen the agent never claimed",
+  );
+
+  // An empty string is dropped rather than forwarded: it is the id of no
+  // screen, and no app should be asked to refuse a call over a field a caller
+  // left blank.
+  const second = one.es.next("call");
+  void call(url, "t1", { name: "goto", screen: "" });
+  assert.ok(!("screen" in ((await second) as Record<string, unknown>)));
+});
+
 test("a tab leaves the registry when its stream closes", async (t) => {
   const { url, relay } = await up(t);
   const one = await tab(url, "going");

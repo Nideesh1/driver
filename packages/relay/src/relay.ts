@@ -506,7 +506,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
   function dispatch(
     who: Principal,
     tabId: string,
-    body: { name?: unknown; args?: unknown; rev?: unknown },
+    body: { name?: unknown; args?: unknown; rev?: unknown; screen?: unknown },
   ): Promise<WireResult> | null {
     // Null means "this was never a call", and the caller answers non-2xx. A
     // body with no `name` is malformed, not refused: there is no verb to have
@@ -539,6 +539,13 @@ export function createRelay(options: RelayOptions = {}): Relay {
       // opt an agent into a staleness check it did not ask for; dropping it
       // would silently opt it out of one it did. Neither is the relay's call.
       ...(typeof body.rev === "number" ? { rev: body.rev } : {}),
+      // `screen` on exactly the same terms, and with the same restraint: the
+      // relay does not know which screen the tab is on, does not compare it,
+      // and does not refuse it. It is the agent's claim and the driver's check.
+      // An empty string is dropped rather than forwarded, because it is not the
+      // id of any screen and no app should be asked to refuse a call over a
+      // field left blank.
+      ...(typeof body.screen === "string" && body.screen ? { screen: body.screen } : {}),
     };
 
     return new Promise<WireResult>((resolve) => {

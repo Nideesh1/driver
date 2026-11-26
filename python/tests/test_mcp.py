@@ -23,6 +23,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from driverkit import Driverkit, Manifest
+from driverkit.types import VerbSpec
 from driverkit.mcp_server import (
     LIST_TABS,
     PROTOCOL_VERSION,
@@ -162,6 +163,119 @@ class Translation(unittest.TestCase):
         self.assertEqual(schema["properties"]["rev"]["description"], "a git rev")
         self.assertEqual(schema["required"], ["rev"])
 
+    def test_screen_is_hoisted_into_every_verb_schema_like_rev(self):
+        # `screen` is a field of the call frame, not an app argument, so a model
+        # has nowhere to put it unless the schema offers it. It catches what
+        # `rev` does not: a call that lands on a screen the agent never saw and
+        # answers `ok`, which is a different mistake from "the number moved" and
+        # has a different fix.
+        schema = tool(self.tools, "goto")["inputSchema"]
+        self.assertEqual(schema["properties"]["screen"]["type"], "string")
+        self.assertNotIn("screen", schema["required"])
+        self.assertIn("wrong-screen", schema["properties"]["screen"]["description"])
+
+    def test_an_apps_own_screen_argument_wins_over_the_hoisted_one(self):
+        # `go(screen)` is the navigation verb of a real app, so this is the one
+        # place where taking the name would break an app's own vocabulary. The
+        # same rule as `rev`: the app's meaning wins.
+        manifest = Manifest.from_dict(
+            {
+                "version": "v",
+                "app": "nav",
+                "verbs": [
+                    {
+                        "name": "go",
+                        "describe": "go to one of the app's screens",
+                        "args": {
+                            "screen": {
+                                "type": "string",
+                                "describe": "which screen",
+                                "oneOf": ["contacts", "settings"],
+                            }
+                        },
+                    }
+                ],
+            }
+        )
+        schema = tool(tools_for(manifest), "go")["inputSchema"]
+        self.assertEqual(schema["properties"]["screen"]["enum"], ["contacts", "settings"])
+        self.assertEqual(schema["required"], ["screen"])
+
+    def test_a_verbs_screen_is_in_its_description_so_the_call_is_never_made(self):
+        # The same argument `refuses` is in the description for: the point of
+        # declaring where a verb lives is that a well-briefed model does not
+        # call it from somewhere else and then have to recover. The tool list
+        # itself does NOT vary with the live screen — that would bust the prompt
+        # prefix on every navigation, which is the cost argument.
+        manifest = Manifest.from_dict(
+            {
+                "version": "v",
+                "app": "scoped",
+                "verbs": [
+                    {"name": "next-page", "kind": "read", "describe": "page", "screen": "contacts"},
+                    {"name": "clear", "kind": "describe", "describe": "deselect everything"},
+                ],
+            }
+        )
+        tools = tools_for(manifest)
+        self.assertIn("ONLY ON THE `contacts` SCREEN", tool(tools, "next-page")["description"])
+        self.assertIn("refused as `wrong-screen`", tool(tools, "next-page")["description"])
+        # A verb that works anywhere says nothing about screens: "works
+        # everywhere" on twelve of eighteen verbs is prose nobody reads.
+        self.assertNotIn("SCREEN", tool(tools, "clear")["description"])
+        # And both verbs are offered, whatever screen the app is on.
+        self.assertEqual([t["name"] for t in tools][:2], ["next-page", "clear"])
+
+    def test_a_reversible_commit_reads_differently_from_one_that_cannot_be_undone(self):
+        # The failure this exists for: changing a page size and accepting 3,412
+        # contacts were both getting *** THIS CHANGES DATA AND MAY BE
+        # IRREVERSIBLE ***, and a banner that shows up on a page-size change is
+        # a banner a model learns to read past — the same way a person learns to
+        # click Yes without reading.
+        manifest = Manifest.from_dict(
+            {
+                "version": "v",
+                "app": "scoped",
+                "verbs": [
+                    {
+                        "name": "set-setting",
+                        "kind": "commit",
+                        "reversible": True,
+                        "describe": "turn dense rows on",
+                    },
+                    {"name": "accept", "kind": "commit", "describe": "accept the selection"},
+                ],
+            }
+        )
+        tools = tools_for(manifest)
+        undoable = tool(tools, "set-setting")["description"]
+        self.assertIn("COMMIT (reversible): this changes data", undoable)
+        self.assertIn("can be undone", undoable)
+        self.assertNotIn("MAY BE IRREVERSIBLE", undoable)
+        # It still says the data changes and the person still sees it:
+        # reversible is a claim that there is a way back, not that nobody minds.
+        self.assertIn("a change the person will see", undoable)
+        # And the irreversible one keeps every asterisk.
+        self.assertIn(
+            "*** COMMIT: THIS CHANGES DATA AND MAY BE IRREVERSIBLE. ***",
+            tool(tools, "accept")["description"],
+        )
+
+    def test_reversible_changes_the_description_and_nothing_else(self):
+        # Scoped deliberately narrowly: the flag is a sentence in the cached
+        # half and an input to a host's confirmation gate. It is not an
+        # argument, not a refusal, and it does not touch the schema — a commit
+        # is still a commit. On a verb that changes no data it says nothing at
+        # all, because there it is a claim about nothing.
+        plain = verb_tool(VerbSpec(name="act", describe="act", kind="commit"))
+        undoable = verb_tool(VerbSpec(name="act", describe="act", kind="commit", reversible=True))
+        self.assertEqual(undoable["inputSchema"], plain["inputSchema"])
+        self.assertNotEqual(undoable["description"], plain["description"])
+
+        read = verb_tool(VerbSpec(name="look", describe="look", kind="read", reversible=True))
+        self.assertNotIn("reversible", read["description"])
+        self.assertIn("READ-ONLY", read["description"])
+
     def test_the_two_fixed_tools_are_present_and_are_not_verbs(self):
         # read_screen and list_tabs are the protocol's own reads, not app
         # features. No app should have to declare them to be drivable.
@@ -276,6 +390,24 @@ class Serving(unittest.TestCase):
         # — a verb handed an argument it never declared would ignore it and the
         # staleness check would silently never happen.
         self.assertEqual(body["rev"], 1)
+        self.assertEqual(body["args"], {"id": "01b7"})
+
+    def test_screen_is_pulled_out_of_the_arguments_and_sent_as_the_screen_claim(self):
+        # It travels in the call frame, beside `name`, `args` and `rev`, never
+        # inside `args` — a verb handed an argument it never declared would
+        # ignore it, and the check would silently never happen. Junk is dropped
+        # rather than sent: a number is not a screen id, and this path has no
+        # screen in hand to quote back at the model.
+        self.call(
+            "tools/call", {"name": "goto", "arguments": {"id": "01b7", "screen": "descents"}}
+        )
+        body = self.relay.last_body or {}
+        self.assertEqual(body["screen"], "descents")
+        self.assertEqual(body["args"], {"id": "01b7"})
+
+        self.call("tools/call", {"name": "goto", "arguments": {"id": "01b7", "screen": 7}})
+        body = self.relay.last_body or {}
+        self.assertNotIn("screen", body)
         self.assertEqual(body["args"], {"id": "01b7"})
 
     def test_a_stale_rev_from_the_model_comes_back_as_a_refusal_it_can_read(self):
@@ -394,7 +526,10 @@ class Kinds(unittest.TestCase):
         # scrolling stops reading the questions.
         description = tool(self.tools, "scroll")["description"]
         self.assertIn("READ-ONLY", description)
-        self.assertIn("changes nothing", description)
+        # No DATA and no COUNT, and deliberately not "changes nothing": a
+        # `read` may move the person's screen, which `scroll` does.
+        self.assertIn("changes no data and reports no count", description)
+        self.assertIn("navigating is a read", description)
         self.assertNotIn("COMMIT", description)
 
     def test_a_describe_verb_points_at_the_count_it_returns(self):
@@ -614,6 +749,124 @@ class SharedCore(unittest.TestCase):
         server = McpServer(Driverkit(relay.url), TAB)
         reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         self.assertEqual(reply["result"]["instructions"], instructions_for(manifest))
+
+    def test_the_apps_own_briefing_reaches_the_mcp_instructions_after_the_safety_rules(self):
+        # The gap this closes is the one place the two halves of driverkit
+        # disagreed. A widget could be handed `instructions` through `drive()`;
+        # an agent arriving here could not. So an app with something to say
+        # about itself — "this app has screens, and `go` reaches those" — had to
+        # repeat it in every snapshot's `note`, in the uncached half, paid for
+        # on every turn, for a sentence that never changes.
+        from driverkit.mcp_core import instructions_for
+
+        briefed = Manifest.from_dict(
+            dict(MANIFEST, instructions="this app has screens: descents and lanes.")
+        )
+        text = instructions_for(briefed)
+        self.assertIn("this app has screens: descents and lanes.", text)
+        # Last, not first: an app's own note is an addition to the safety rules
+        # and not a replacement for them, and a client prepending this text has
+        # a model read it in order.
+        self.assertLess(
+            text.index("Never commit on a selection"), text.index("this app has screens")
+        )
+        # And an app that says nothing gets exactly the text it got before the
+        # field existed.
+        self.assertEqual(instructions_for(Manifest.from_dict(MANIFEST)), text.rsplit("\n\n", 1)[0])
+
+    def test_the_briefing_is_static_and_survives_a_round_trip_as_the_manifest(self):
+        # It is in the cached half because it never changes. The wire name is
+        # the contract, and an absent one is omitted rather than sent as null —
+        # the TS core fingerprints a shape that leaves it out, and a round trip
+        # through this class must not turn "the app said nothing" into a field.
+        briefed = Manifest.from_dict(dict(MANIFEST, instructions="two screens"))
+        self.assertEqual(briefed.to_dict()["instructions"], "two screens")
+        self.assertNotIn("instructions", Manifest.from_dict(MANIFEST).to_dict())
+        # The verb→screen mapping is static too and round-trips beside it;
+        # which screen is LIVE is on the snapshot and must never be in here.
+        verb = VerbSpec.from_dict(
+            {"name": "page", "describe": "page", "screen": "contacts", "reversible": True}
+        )
+        self.assertEqual(verb.screen, "contacts")
+        self.assertEqual(verb.to_dict()["screen"], "contacts")
+        self.assertEqual(verb.to_dict()["reversible"], True)
+        plain = VerbSpec.from_dict({"name": "page", "describe": "page"})
+        self.assertIsNone(plain.screen)
+        self.assertIsNone(plain.reversible)
+        self.assertNotIn("screen", plain.to_dict())
+        self.assertNotIn("reversible", plain.to_dict())
+
+    def test_a_verb_on_several_screens_round_trips_in_the_shape_it_was_sent_in(self):
+        # Both shapes, and the shape is preserved rather than normalised. The
+        # manifest is the cached half and its bytes are what `version`
+        # fingerprints, so turning "contacts" into ["contacts"] on a round trip
+        # would move the version of every app that names one screen — and tell
+        # every agent holding a cached copy it had gone stale when nothing about
+        # the app had changed.
+        two = VerbSpec.from_dict(
+            {"name": "page", "describe": "page", "screen": ["contacts", "company"]}
+        )
+        self.assertEqual(two.screen, ("contacts", "company"))
+        self.assertEqual(two.to_dict()["screen"], ["contacts", "company"])
+        one = VerbSpec.from_dict({"name": "page", "describe": "page", "screen": "contacts"})
+        self.assertEqual(one.to_dict()["screen"], "contacts")
+        # A tuple and not a list, for the reason `refuses` is one: the dataclass
+        # is frozen and therefore hashable, and one mutable field takes that
+        # away.
+        self.assertIsInstance(two.screen, tuple)
+        # A list the wire left empty becomes "the app said nothing", because the
+        # core refuses `screen: []` where the app mounts precisely on the
+        # grounds that "works nowhere" is nobody's intention — so a reader that
+        # met one anyway would be inventing a claim out of a mistake. Entries
+        # that are not screen ids go the same way rather than being coerced:
+        # `str(None)` is the screen id "None", which is a screen no app has.
+        for sent in ([], [None, 3], "", ["", None]):
+            empty = VerbSpec.from_dict({"name": "page", "describe": "page", "screen": sent})
+            self.assertIsNone(empty.screen, sent)
+            self.assertNotIn("screen", empty.to_dict())
+
+    def test_a_verb_on_several_screens_names_them_all_in_its_description(self):
+        # Naming one of two is worse than naming none: a model told `next-page`
+        # is ONLY ON THE `contacts` SCREEN navigates away from the company list
+        # it was already standing on, to do something it could have done where
+        # it was. Byte-identical with the TS half, which has the same test.
+        manifest = Manifest.from_dict(
+            {
+                "version": "v",
+                "app": "two-list",
+                "verbs": [
+                    {
+                        "name": "next-page",
+                        "kind": "read",
+                        "describe": "page",
+                        "screen": ["contacts", "company"],
+                    },
+                    {
+                        "name": "sort",
+                        "kind": "read",
+                        "describe": "sort",
+                        "screen": ["contacts", "company", "companies"],
+                    },
+                    # The single-string wording must not acquire a comma or a
+                    # plural because the field can now hold a list: this is the
+                    # sentence every existing app's cached prefix contains.
+                    {"name": "search", "kind": "read", "describe": "find", "screen": "contacts"},
+                ],
+            }
+        )
+        tools = tools_for(manifest)
+        self.assertIn(
+            "ONLY ON THE `contacts` AND `company` SCREENS.", tool(tools, "next-page")["description"]
+        )
+        self.assertIn(
+            "ONLY ON THE `contacts`, `company` AND `companies` SCREENS.",
+            tool(tools, "sort")["description"],
+        )
+        self.assertIn("ONLY ON THE `contacts` SCREEN.", tool(tools, "search")["description"])
+        # What follows the first sentence is mechanics and not a claim about
+        # this verb, so it is the same sentence in all three.
+        for name in ("next-page", "sort", "search"):
+            self.assertIn("refused as `wrong-screen`", tool(tools, name)["description"])
 
 
 class FastMcpOptional(unittest.TestCase):

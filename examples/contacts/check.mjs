@@ -145,16 +145,75 @@ await check("the manifest lists eighteen verbs with a kind on every one", () => 
   );
 });
 
-await check("every verb in the flat manifest is offered on every screen", () => {
-  // Not a feature: a fact worth pinning, because it is the gap the report
-  // leads with. `Manifest.verbs` has no screen on it, so `sort-companies` is
-  // in the cached tool list while the person is on the settings form, and the
-  // only way an agent finds out is the `wrong-screen` refusal below.
+await check("the scoped verbs carry a screen, and no app verb refuses wrong-screen", () => {
+  // Both halves of the migration, pinned. The verb→screen mapping is in the
+  // CACHED half, so a well-briefed agent reads it before calling rather than
+  // discovering it by being refused — the same argument `refuses` is in there
+  // for. And `wrong-screen` is the core's slug now: an app that declares it
+  // cannot mount at all, so finding it here would mean the guard came back.
   const m = driver.manifest();
-  for (const v of m.verbs) assert.equal("screen" in v, false, `${v.name} carries a screen`);
-  const scoped = m.verbs.filter((v) => (v.refuses || []).includes("wrong-screen"));
-  assert.equal(scoped.length, 6);
-  notes.push(`screen-scoped verbs that must refuse wrong-screen: ${scoped.map((v) => v.name).join(" ")}`);
+  const scoped = Object.fromEntries(
+    m.verbs.filter((v) => v.screen).map((v) => [v.name, v.screen]),
+  );
+  assert.deepEqual(scoped, {
+    search: "contacts",
+    "sort-companies": "companies",
+    "show-status": "company",
+    "select-pending-here": "company",
+    // The two pagers, which is what `Verb.screen` taking a list bought: these
+    // genuinely work on two screens, and the single string that used to be the
+    // only shape forced this app to declare neither and invent a refusal.
+    "next-page": ["contacts", "company"],
+    "prev-page": ["contacts", "company"],
+  });
+  for (const v of m.verbs) {
+    assert.equal(
+      (v.refuses || []).includes("wrong-screen"),
+      false,
+      `${v.name} declares the core's own refusal`,
+    );
+  }
+  // And the invented slug is gone with the gap it covered. `no-pages-here` was
+  // this app's own word for "you are not on a screen that pages", which is
+  // what `wrong-screen` says now — and an app-invented word for it is exactly
+  // what the reserved list exists to stop, because the next app would have
+  // picked another one.
+  for (const v of m.verbs) {
+    assert.equal(
+      (v.refuses || []).includes("no-pages-here"),
+      false,
+      `${v.name} still refuses the hand-rolled no-pages-here`,
+    );
+  }
+  notes.push(
+    `verb→screen in the cached half: ${Object.entries(scoped)
+      .map(([n, s]) => `${n}→${Array.isArray(s) ? s.join("+") : s}`)
+      .join(" ")}`,
+  );
+});
+
+await check("the app's own briefing is in the manifest, not in every snapshot", () => {
+  // The 130-character screen map used to be pasted into all six screens'
+  // `note` — the uncached half, paid for on every single turn, for a sentence
+  // that never changes. `MountOptions.instructions` is cached once and read by
+  // both paths; the relay's copy of it is asserted further down.
+  const m = driver.manifest();
+  assert.equal(typeof m.instructions, "string");
+  assert.match(m.instructions, /six screens/);
+  // Static means static: nothing per-user, per-screen or per-minute in it.
+  assert.ok(!/\bc-\d{4}\b/.test(m.instructions), "a contact id is in the cached half");
+  assert.ok(!/\brev\b/.test(m.instructions), "the briefing talks about the uncached half");
+  // And it is in the system prompt, which is where the in-page path reads it.
+  assert.ok(systemPrompt(m).includes(m.instructions));
+
+  for (const name of Object.keys(app.screens)) {
+    const note = app.screens[name]().note ?? "";
+    assert.ok(
+      !note.includes("this app has screens") && !note.includes("`go` reaches"),
+      `the screen map is still in ${name}'s note`,
+    );
+  }
+  notes.push(`Manifest.instructions: ${m.instructions.length} chars, said once`);
 });
 
 await check("select-where takes named fields with oneOf, not a predicate string", () => {
@@ -186,7 +245,8 @@ await check("the table is 3,412 rows and the same 3,412 rows every time", () => 
 
 await check("the app opens on the dashboard, which is not a table", () => {
   const s = visible();
-  assert.equal(s.where, "dashboard");
+  assert.equal(s.screen, "dashboard");
+  assert.match(s.where, /^the dashboard/);
   assert.equal(s.page, undefined, "a dashboard must not claim to be a window onto more");
   // The compromise, pinned so it cannot be quietly forgotten: seven metric
   // tiles leave as `rows`, because `Snapshot` has no other shape to put them
@@ -197,21 +257,28 @@ await check("the app opens on the dashboard, which is not a table", () => {
   assert.match(s.note, /not a table/);
 });
 
-await check("every screen's visible() names where it is and carries a rev", () => {
+await check("every screen names itself in `screen` and describes itself in `where`", () => {
   // Driven through the store's own screen table rather than by navigating, so
   // one missing field in one screen cannot hide behind another.
   const names = Object.keys(app.screens);
   assert.deepEqual(names.sort(), ["companies", "company", "contact", "contacts", "dashboard", "settings"]);
   for (const name of names) {
     const s = app.screens[name]();
+    // `screen` is the identity and is the key of the table it came from, so a
+    // `Verb.screen` is checked against the same string the router uses.
+    assert.equal(s.screen, name, `${name} reports the wrong screen id`);
     assert.equal(typeof s.where, "string", `${name} has no where`);
     assert.ok(s.where.length > 0, `${name} has an empty where`);
     assert.equal(typeof s.rev, "number", `${name} has no rev`);
-    // The screen has to be identifiable from the sentence alone: it is the
-    // only thing in a snapshot that says which of the six you are looking at.
+    // `where` is prose for a human now and must NOT be the id again: the two
+    // fields answer different questions, and a `where` that is just the screen
+    // name is a screen that has stopped saying what the person can see.
+    assert.notEqual(s.where, name, `${name}'s where is only its own id`);
+    // `screen` renders above the prose, so a model diffing two reads sees the
+    // navigation on its own line.
     assert.ok(
-      renderSnapshot(s).startsWith(`where: ${s.where}`),
-      `${name} does not render its own where first`,
+      renderSnapshot(s).startsWith(`screen: ${name}\nwhere: ${s.where}`),
+      `${name} does not render its screen above its where`,
     );
   }
 });
@@ -222,7 +289,8 @@ await check("the contacts list is a twenty-row window with a real page block", a
   const s = visible();
   assert.equal(s.rows.length, 20);
   assert.deepEqual(s.page, { index: 0, size: 20, total: TOTAL });
-  assert.match(s.where, /^contacts list/);
+  assert.equal(s.screen, "contacts");
+  assert.match(s.where, /^the contacts list/);
   assert.equal(typeof s.rev, "number");
   assert.match(renderSnapshot(s), /more rows exist off screen/);
 });
@@ -246,6 +314,7 @@ await check("read verbs page and search, and rev moves on every one", async () =
   assert.equal(search.ok, true);
   assert.ok(search.snapshot.page.total < TOTAL && search.snapshot.page.total > 0);
   assert.match(search.snapshot.where, /filtered to/);
+  assert.equal(search.snapshot.screen, "contacts");
   await driver.call("search", { q: "" });
 });
 
@@ -262,7 +331,8 @@ await check("a drill-down carries the record in `where` and its history in `rows
   const s = out.snapshot;
   // The second compromise, pinned: there is no field for "the record I am on",
   // so the fields ride in the sentence documented as a location.
-  assert.match(s.where, /^contact c-0184 — /);
+  assert.equal(s.screen, "contact");
+  assert.match(s.where, /^Quentin Grunwald \(c-0184\), Finance Partner at Fairmont Dental; /);
   assert.match(s.where, /status \w+/);
   assert.match(s.where, /@fairmont-dental\.example/);
   assert.equal(s.page, undefined, "a record's history is complete, so there is no page block");
@@ -326,18 +396,15 @@ await check("navigation moves `where`, bumps `rev`, and `back` walks the trail",
   await driver.call("go", { screen: "dashboard" });
   const start = visible().rev;
 
-  const opening = {
-    dashboard: "dashboard",
-    contacts: "contacts list",
-    companies: "companies list",
-    settings: "settings",
-  };
   for (const screen of LANDINGS) {
     const out = await driver.call("go", { screen });
     assert.equal(out.ok, true, `go ${screen} refused`);
-    assert.ok(
-      out.snapshot.where.startsWith(opening[screen]),
-      `go ${screen} landed on ${JSON.stringify(out.snapshot.where)}`,
+    // Where it landed is a string equality now rather than a prefix match on
+    // prose. That is `Snapshot.screen`'s whole job.
+    assert.equal(
+      out.snapshot.screen,
+      screen,
+      `go ${screen} landed on ${JSON.stringify(out.snapshot.screen)}`,
     );
   }
   assert.ok(visible().rev > start, "navigating did not move rev");
@@ -363,22 +430,58 @@ await check("navigation moves `where`, bumps `rev`, and `back` walks the trail",
   assert.equal(last.refused, "nothing-to-go-back-to");
 });
 
-await check("a screen-scoped verb refuses wrong-screen with the fix in the hint", async () => {
+await check("the core refuses a scoped verb off its screen, naming BOTH screens", async () => {
+  // The hand-rolled guard named one screen and left the agent to guess the
+  // other. The core names where you are AND where the verb lives, which is the
+  // difference between a dead end and a next move.
   await driver.call("go", { screen: "settings" });
-  for (const [name, args] of [
-    ["search", { q: "Ada" }],
-    ["next-page", {}],
-    ["prev-page", {}],
-    ["sort-companies", { by: "pending" }],
-    ["show-status", { status: "all" }],
-    ["select-pending-here", {}],
+  for (const [name, wants, args] of [
+    ["search", "contacts", { q: "Ada" }],
+    ["sort-companies", "companies", { by: "pending" }],
+    ["show-status", "company", { status: "all" }],
+    ["select-pending-here", "company", {}],
   ]) {
     const out = await driver.call(name, args);
     assert.equal(out.ok, false, `${name} worked on the settings screen`);
     assert.equal(out.refused, "wrong-screen", `${name} refused ${out.refused}`);
-    assert.match(out.hint, /settings screen/);
-    assert.ok(out.hint.includes("`"), `${name}'s hint names no verb to call instead`);
+    assert.match(out.hint, /you are on the `settings` screen/);
+    assert.ok(
+      out.hint.includes(`\`${wants}\` screen`),
+      `${name}'s hint does not name the screen it wants: ${JSON.stringify(out.hint)}`,
+    );
+    // And the screen it refused from still comes back, so the agent need not
+    // read again to find out where it is.
+    assert.equal(out.snapshot.screen, "settings");
   }
+  notes.push("wrong-screen from the core names the live screen and the verb's own");
+});
+
+await check("the two pagers are refused by the core on a screen with no pages, naming both of theirs", async () => {
+  // The workaround this replaced: these two verbs work on two screens, and
+  // while `Verb.screen` was one string they declared neither and refused an
+  // `no-pages-here` of the app's own invention. The core answers it now, and
+  // the hint names every screen they do work on rather than sending an agent
+  // to the first of them.
+  for (const screen of ["settings", "dashboard"]) {
+    await driver.call("go", { screen });
+    for (const name of ["next-page", "prev-page"]) {
+      const out = await driver.call(name);
+      assert.equal(out.ok, false, `${name} worked on the ${screen} screen`);
+      assert.equal(out.refused, "wrong-screen", `${name} refused ${out.refused}`);
+      assert.match(out.hint, new RegExp(`you are on the \`${screen}\` screen`));
+      assert.match(out.hint, /`contacts` and `company` screens/);
+      assert.match(out.hint, /Go to one of those first/);
+    }
+  }
+  // And they really do work on both of the screens that page.
+  await driver.call("go", { screen: "contacts" });
+  assert.equal((await driver.call("next-page")).snapshot.page.index, 1);
+  await driver.call("open-company", { company: "Grayson Robotics" });
+  const paged = await driver.call("next-page");
+  assert.equal(paged.ok, true, "a company's contact list stopped paging");
+  assert.equal(paged.snapshot.screen, "company");
+  assert.equal(paged.snapshot.page.index, 1);
+  await driver.call("go", { screen: "contacts" });
 });
 
 await check("the companies list rolls up from the same rows the contacts list shows", async () => {
@@ -406,7 +509,8 @@ await check("the cross-screen job: find a company, open it, accept its pending",
 
   const opened = await driver.call("open-company", { company: "Berenson Health" });
   assert.equal(opened.ok, true);
-  assert.match(opened.snapshot.where, /^company Berenson Health — /);
+  assert.equal(opened.snapshot.screen, "company");
+  assert.match(opened.snapshot.where, /^Berenson Health — /);
   // The drill-down lands on the pending tab, so the rows in front of the
   // person are the ones the job is about.
   assert.match(opened.snapshot.where, /showing the pending ones/);
@@ -512,7 +616,8 @@ await check("a deep link straight to a record renders that record", async () => 
   const deep = createApp();
   deep.navigate(parse("#/contacts/c-0184"), { record: false });
   const s = deep.visible();
-  assert.match(s.where, /^contact c-0184 — /);
+  assert.equal(s.screen, "contact");
+  assert.match(s.where, /\(c-0184\)/);
   assert.ok(s.rows.length >= 3);
   // Seeded from the id alone, so a cold deep link shows the same history as
   // clicking through to it.
@@ -520,7 +625,8 @@ await check("a deep link straight to a record renders that record", async () => 
 
   const missing = createApp();
   missing.navigate(parse("#/contacts/c-9999"), { record: false });
-  assert.match(missing.visible().where, /no such contact/);
+  assert.equal(missing.visible().screen, "contact");
+  assert.match(missing.visible().where, /^no such contact/);
   assert.equal(missing.visible().rows, undefined);
   assert.match(renderSnapshot(missing.visible()), /this screen reports no rows/);
 });
@@ -573,33 +679,44 @@ await check("a stale rev is refused rather than applied", async () => {
   await driver.call("search", { q: "" });
 });
 
-await check("a call aimed at one screen lands on another unless it quotes rev", async () => {
-  // What happens to a pending call when the user navigates mid-run, which is
-  // the question the report asks and this is the whole answer: `rev` or
-  // nothing. There is no screen identity in a call, so a verb that is valid on
-  // both screens simply runs on whichever one is there when it arrives.
+await check("a call that says which screen it meant is refused when the person moved", async () => {
+  // The live bug this used to VERIFY: `next-page` sent with no `rev`, after
+  // the person clicked away, paged a different company's contact list and
+  // answered `ok`. Both screens page, so nothing about the call was wrong —
+  // the call simply never said which list it was for. `CallOptions.screen` is
+  // how it says so, and it needs no `Verb.screen` to work.
   await driver.call("go", { screen: "contacts" });
   await driver.call("next-page");
   const read = visible();
-  assert.match(read.where, /^contacts list/);
+  assert.equal(read.screen, "contacts");
 
   // The person clicks away while the agent is thinking.
   await driver.call("open-company", { company: "Cordova Logistics" });
 
-  // Quoting the rev it read is the only defence, and it works.
-  const guarded = await driver.call("next-page", {}, { rev: read.rev });
-  assert.equal(guarded.ok, false);
-  assert.equal(guarded.refused, "stale");
+  // Naming the screen it read is the better defence: it says what is actually
+  // wrong, and the fix it implies is "navigate back", not "read again".
+  const aimed = await driver.call("next-page", {}, { screen: read.screen });
+  assert.equal(aimed.ok, false, "the call paged a list the agent had never seen");
+  assert.equal(aimed.refused, "wrong-screen");
+  assert.match(aimed.hint, /you believed you were on the `contacts` screen/);
+  assert.match(aimed.hint, /the app is on `company`/);
+  assert.equal(aimed.snapshot.page.index, 0, "the refused call paged anyway");
 
-  // Without it, the same call pages a list the agent has never seen — a
-  // different company's contacts — and reports success. Nothing in the
-  // library can tell these two apart, because the call never said which
-  // screen it was for.
+  // Quoting the rev still works and is a different answer: the number moved.
+  // Checked AFTER the screen, so an agent that is in the wrong place is told
+  // that rather than sent to re-read a screen it should be leaving.
+  const guarded = await driver.call("next-page", {}, { rev: read.rev });
+  assert.equal(guarded.refused, "stale");
+  const both = await driver.call("next-page", {}, { screen: read.screen, rev: read.rev });
+  assert.equal(both.refused, "wrong-screen", "the wider mistake must win");
+
+  // With neither, it still pages whatever it arrived at. That is the opt-out,
+  // and it is the behaviour every call had before these two fields existed.
   const unguarded = await driver.call("next-page");
-  assert.equal(unguarded.ok, true, "the call was refused for some other reason");
-  assert.match(unguarded.snapshot.where, /^company Cordova Logistics/);
+  assert.equal(unguarded.ok, true);
+  assert.equal(unguarded.snapshot.screen, "company");
   assert.equal(unguarded.snapshot.page.index, 1);
-  notes.push("next-page with no rev, after a navigation, paged the screen it arrived at");
+  notes.push("next-page aimed at `contacts` after a navigation: wrong-screen, naming both");
 
   await driver.call("go", { screen: "contacts" });
   await driver.call("search", { q: "" });
@@ -681,16 +798,37 @@ await check("the tool list carries the commit banner and read_screen", () => {
   assert.equal(describe.inputSchema.properties.rev.type, "integer");
   assert.ok(systemPrompt(driver.manifest()).includes("Northwind CRM"));
 
-  // The gap the per-snapshot screen map exists to paper over: the static half
-  // has no field for the app's own briefing, so there is nowhere in the
-  // manifest to say that this app HAS six screens or how they relate. A
-  // relay-driven agent never sees the widget's `instructions` either, which is
-  // why `visible()` repeats the screen list in every note. See the report.
+  // The reversible commit is not shouted at, and the irreversible one still
+  // is. That distinction is the whole point of the flag: a banner that fires
+  // on a page-size change is a banner a model learns to read past.
+  const setting = tools.find((t) => t.name === "set-setting");
+  assert.match(setting.description, /COMMIT \(reversible\)/);
+  assert.ok(
+    !/THIS CHANGES DATA AND MAY BE IRREVERSIBLE/.test(setting.description),
+    "a reversible commit is still being shouted about",
+  );
+  // And a scoped verb says where it works in the CACHED half, so a
+  // well-briefed agent never makes the call that would be refused.
+  const scoped = tools.find((t) => t.name === "select-pending-here");
+  assert.match(scoped.description, /ONLY ON THE `company` SCREEN/);
+  // A verb on two screens names both, in the same cached half. Naming one of
+  // two would be worse than naming none: a model told `next-page` is only on
+  // the contacts list navigates off the company list it was already standing
+  // on to do something it could have done where it was.
+  const pager = tools.find((t) => t.name === "next-page");
+  assert.match(pager.description, /ONLY ON THE `contacts` AND `company` SCREENS/);
+  // `screen` is hoisted onto every verb that has not claimed the name itself,
+  // exactly as `rev` is. `go` has claimed it, so `go` keeps its own.
+  assert.equal(scoped.inputSchema.properties.screen.type, "string");
+  assert.deepEqual(tools.find((t) => t.name === "go").inputSchema.required, ["screen"]);
+
+  // The manifest's shape, pinned so a new field cannot arrive unnoticed.
   const manifest = driver.manifest();
-  assert.deepEqual(Object.keys(manifest).sort(), ["app", "verbs", "version"]);
+  assert.deepEqual(Object.keys(manifest).sort(), ["app", "instructions", "verbs", "version"]);
+  const allowed = ["name", "describe", "kind", "at", "screen", "reversible", "args", "refuses"];
   for (const verb of manifest.verbs) {
     assert.deepEqual(
-      Object.keys(verb).filter((k) => !["name", "describe", "kind", "at", "args", "refuses"].includes(k)),
+      Object.keys(verb).filter((k) => !allowed.includes(k)),
       [],
       `${verb.name} carries a field the manifest type does not have`,
     );
@@ -851,6 +989,15 @@ await check("a tab connects to /dk and the relay lists it with a manifest", asyn
   const manifest = await getJson(`${BASE}/dk/tabs/${tabId}/manifest`);
   assert.equal(manifest.status, 200);
   assert.equal(manifest.body.verbs.length, 18);
+  // The other half of the briefing argument, over the wire: an agent that
+  // arrives here and never sees the widget still reads the app's own words,
+  // and reads them once rather than in every snapshot.
+  assert.match(manifest.body.instructions, /six screens/);
+  assert.equal(
+    manifest.body.verbs.find((v) => v.name === "select-pending-here").screen,
+    "company",
+  );
+  assert.equal(manifest.body.verbs.find((v) => v.name === "set-setting").reversible, true);
 
   // The URL the relay is listing is the one `hello` carried, and `hello` is
   // sent on connect and on reconnect only. Navigating does not resend it, so
@@ -879,7 +1026,8 @@ await check("an outside agent can walk screens and read where it is", async () =
   }
   const snap = await getJson(`${BASE}/dk/tabs/${tabId}/snapshot`);
   assert.equal(snap.status, 200);
-  assert.equal(snap.body.where, "settings");
+  assert.equal(snap.body.screen, "settings");
+  assert.ok(snap.body.where.length > 0, "a screen id is not a substitute for the prose");
 });
 
 await check("the cross-screen job runs over the relay too", async () => {
@@ -915,9 +1063,26 @@ await check("a verb called from the wrong screen refuses, over the relay, with a
   assert.equal(out.status, 200, "a wrong-screen refusal is still a 200");
   assert.equal(out.body.ok, false);
   assert.equal(out.body.refused, "wrong-screen");
-  assert.match(out.body.hint, /dashboard screen/);
+  assert.match(out.body.hint, /you are on the `dashboard` screen/);
+  assert.match(out.body.hint, /`contacts` screen/);
   assert.ok(out.body.snapshot, "a refusal must still carry the screen");
-  assert.equal(out.body.snapshot.where, "dashboard");
+  assert.equal(out.body.snapshot.screen, "dashboard");
+});
+
+await check("a call that names a stale screen is refused over the relay too", async () => {
+  // `screen` on the wire, which is the field that makes the in-page defence
+  // reachable from outside: the agent sends the `screen` it last read and the
+  // core answers before it looks at `rev` or the arguments.
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "contacts" } });
+  const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "next-page",
+    screen: "company",
+  });
+  assert.equal(out.status, 200);
+  assert.equal(out.body.ok, false);
+  assert.equal(out.body.refused, "wrong-screen");
+  assert.match(out.body.hint, /you believed you were on the `company` screen/);
+  assert.equal(out.body.snapshot.page.index, 0, "the refused call paged anyway");
 });
 
 await check("an outside call runs the verb and comes back with the count", async () => {

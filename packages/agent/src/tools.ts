@@ -58,11 +58,20 @@ const REFUSAL_NOTE =
  * Verbatim from the Python half, including the asterisks around the commit
  * banner. It looks shouty in a source file and it is the one place in this
  * library where shouting is the correct engineering decision.
+ *
+ * `read` says "changes no data and reports no count" and no longer says
+ * "changes nothing", because `go`, `open-contact` and `back` are reads and they
+ * move the person's screen out from under them. The two things the sentence
+ * must get right are the ones that decide whether the next call is safe; "the
+ * person will see it" is said as well, because they will.
  */
 const KIND_NOTE: Record<string, string> = {
-  read: "READ-ONLY: this changes nothing. Free to call, free to get wrong.",
+  read:
+    "READ-ONLY: this changes no data and reports no count. Free to call, free to get " +
+    "wrong. It may still move what the person is looking at — navigating is a read — " +
+    "so they will see you do it.",
   describe:
-    "DESCRIBE: this changes what is SELECTED or FILTERED and changes no data. " +
+    "DESCRIBE: this changes what is SELECTED and changes no data. " +
     "Safe to call — the worst outcome is the wrong rows highlighted. It reports a " +
     "`count` of what it matched; read that count before you commit to anything.",
   commit:
@@ -71,6 +80,55 @@ const KIND_NOTE: Record<string, string> = {
     "app's `describe` verb first, check the `count` it reports is the number you " +
     "expect, and only then commit.",
 };
+
+/**
+ * The commit banner for a commit the app says it can undo.
+ *
+ * A separate string rather than a sentence appended to the shouted one, and the
+ * difference is the point. `set-setting("dense-rows", "true")` and accepting
+ * 3,412 contacts were both getting THIS CHANGES DATA AND MAY BE IRREVERSIBLE,
+ * and a banner that appears on a page-size change is a banner a model learns to
+ * read past — the same way a person learns to click Yes without reading. So the
+ * reversible one is not shouted, and the irreversible one keeps its asterisks
+ * and its capitals and goes on meaning something.
+ *
+ * It still says the data changes, because it does. `reversible` is a claim
+ * about there being a way back, not that nobody minds.
+ */
+const COMMIT_REVERSIBLE_NOTE =
+  "COMMIT (reversible): this changes data, and the app says the change can be undone. " +
+  "Still a change the person will see, so do not call it to find out what it does; if it " +
+  "acts on a selection, read the `count` from the app's `describe` verb first.";
+
+/**
+ * `screen` folded into the description.
+ *
+ * The tool list is the same on every screen — a verb list that changed with the
+ * screen would bust the prompt prefix on every navigation, which is the cost
+ * argument — so this sentence is how a model learns, in the cached half, that a
+ * verb it can see will not work where it is standing. Exactly the argument for
+ * putting `refuses` in here: the point is that the call is never made.
+ *
+ * A verb on several screens names them all, because naming one of three is
+ * worse than naming none: a model told `next-page` is "ONLY ON THE `contacts`
+ * SCREEN" will navigate away from the company list it was already standing on
+ * to do something it could have done where it was. The one-screen wording is
+ * byte-for-byte what it was before this could be a list, so no app's cached
+ * prefix moved for a feature it does not use.
+ */
+function screenNote(screen: string | string[]): string {
+  const screens = Array.isArray(screen) ? screen : [screen];
+  const quoted = screens.map((s) => `\`${s}\``);
+  const where =
+    quoted.length > 1
+      ? `ONLY ON THE ${quoted.slice(0, -1).join(", ")} AND ${quoted[quoted.length - 1]} SCREENS.`
+      : `ONLY ON THE ${quoted[0]} SCREEN.`;
+  return (
+    `${where} The screen you are on is the \`screen\` line of ` +
+    "every screen you read. Called from anywhere else this is refused as `wrong-screen`, " +
+    "and the refusal names where you are and where the verb lives."
+  );
+}
 
 /**
  * One `ArgSpec` as one JSON Schema property.
@@ -128,8 +186,33 @@ export function verbTool(verb: Manifest["verbs"][number]): ToolSpec {
     };
   }
 
+  // Hoisted exactly as `rev` is, and for a failure `rev` does not catch: a
+  // paging call sent with no rev once landed on a screen the agent had never
+  // seen, paged a different company's list and answered `ok`. "You are
+  // somewhere else" and "the number moved" are different mistakes with
+  // different fixes, so they are different claims and different refusals.
+  //
+  // A verb with its own `screen` argument keeps it and does not get this one —
+  // `go(screen)` is a real verb in a real app — because the app's meaning wins
+  // over ours. The same rule as `rev`.
+  if (!("screen" in properties)) {
+    properties.screen = {
+      type: "string",
+      description:
+        "Optional. The `screen` from the last screen you read. If the app is on " +
+        "another screen now, the call is refused as `wrong-screen` instead of acting " +
+        "on a screen you never saw. Omit it to skip that check.",
+    };
+  }
+
   const description = [verb.describe];
-  if (verb.kind && KIND_NOTE[verb.kind]) {
+  if (verb.kind === "commit" && verb.reversible) {
+    // Checked before the table, so a reversible commit reads differently from
+    // an irreversible one. `reversible` is read only here, on a `commit`: on a
+    // `read` or a `describe` it is a claim about nothing, and the app has
+    // already said no data moves.
+    description.push(COMMIT_REVERSIBLE_NOTE);
+  } else if (verb.kind && KIND_NOTE[verb.kind]) {
     // Second, straight after what the verb does and ahead of the mechanical
     // notes, so a model skimming the first two lines of a description cannot
     // miss that a verb commits. An unknown or absent kind adds nothing: this
@@ -137,6 +220,9 @@ export function verbTool(verb: Manifest["verbs"][number]): ToolSpec {
     // either direction.
     description.push(KIND_NOTE[verb.kind]!);
   }
+  // Third: what a verb does to the world outranks where it works, and both
+  // outrank the mechanics.
+  if (verb.screen) description.push(screenNote(verb.screen));
   description.push(RESULT_NOTE);
   if (verb.refuses && verb.refuses.length) {
     // In the description rather than only in the error path, because this is
@@ -184,8 +270,9 @@ export function toolsFor(manifest: Manifest): ToolSpec[] {
 }
 
 /**
- * The system prompt. A pure function of the manifest and the host's static
- * `instructions`, and of nothing else.
+ * The system prompt. A pure function of the manifest — including the app's own
+ * `Manifest.instructions` — and the host's static `instructions`, and of
+ * nothing else.
  *
  * Mirrors the MCP server's `initialize` instructions, with the differences
  * that are actually true in-page: there is no relay, no tab to pick, and the
@@ -210,9 +297,11 @@ export function systemPrompt(manifest: Manifest, instructions?: string): string 
       "clicks something while you are thinking you get a `stale` refusal instead of " +
       "changing a row you never saw.",
 
-    "Every verb says what it does to the world. READ-ONLY changes nothing. DESCRIBE " +
-      "changes only what is selected or filtered and reports a `count` of what it " +
-      "matched. COMMIT changes data and may be irreversible.\n\n" +
+    "Every verb says what it does to the world. READ-ONLY changes no data and reports " +
+      "no count — moving to another screen is a read, and the person watching will see " +
+      "it. DESCRIBE changes what is selected and reports a `count` of what it matched. " +
+      "COMMIT changes data; it may be irreversible, and a COMMIT that says it is " +
+      "reversible can be undone but is still a change they will see.\n\n" +
       "Never commit on a selection whose count you have not read. The pairing is: run " +
       "the app's `describe` verb with the predicate, read the `count` it reports, check " +
       "that count is the number the person asked for, and only then run the `commit` " +
@@ -237,10 +326,17 @@ export function systemPrompt(manifest: Manifest, instructions?: string): string 
       "the corner of the person's screen.",
   ];
 
-  // Last, not first: a host's app-specific note is an addition to these rules
-  // and not a replacement for them, and a model reading in order should meet
-  // the safety rules before the local colour. Static, like the rest — see
-  // `DriveOptions.instructions`.
+  // The app's own briefing, then the host's. Both last, not first: an
+  // app-specific note is an addition to these rules and not a replacement for
+  // them, and a model reading in order should meet the safety rules before the
+  // local colour. Both static — see `Manifest.instructions`, which is where an
+  // app says the thing it needs BOTH paths to hear, and `DriveOptions
+  // .instructions`, which is this host's own and reaches only this path.
+  //
+  // The app's goes first of the two because the host embedding the app is the
+  // more specific voice, and whichever is last is the one a model follows when
+  // they disagree.
+  if (manifest.instructions) parts.push(manifest.instructions);
   if (instructions) parts.push(instructions);
 
   return parts.join("\n\n");

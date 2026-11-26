@@ -374,11 +374,19 @@ export interface DriveOptions extends DriveEvents {
    *  session concept. */
   history?: Turn[];
   /**
-   * Extra app-specific guidance, folded into the system prompt.
+   * Extra guidance from THIS HOST, folded into the system prompt after the
+   * app's own `Manifest.instructions`.
    *
    * Static, like everything else in there. A per-user or per-screen string
    * here is the one mistake that makes the whole prefix uncacheable **across
    * users**, which is where most of the saving actually lives.
+   *
+   * What belongs here is what this embedding wants said and the app itself
+   * would not say — a house tone, a rule about this deployment. What the APP
+   * has to say about itself belongs in `MountOptions.instructions`, which
+   * reaches an agent arriving over the relay as well as this one; a briefing
+   * put here is visible to one of driverkit's two paths and not the other,
+   * which is the gap that field exists to close.
    */
   instructions?: string;
   /**

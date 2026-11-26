@@ -38,7 +38,7 @@ Stdlib only, like everything that must run.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .client import Driverkit
 from .render import render_result, render_snapshot
@@ -78,10 +78,21 @@ _REFUSAL_NOTE = (
 #: the tool definition can express that. Asked to "select the top 1000 and bulk
 #: accept", a model that cannot tell `select` from `accept` finds out by doing
 #: it, and the finding out costs a thousand accepted rows.
+#:
+#: ``read`` says "changes no data and reports no count" and no longer says
+#: "changes nothing", because `go`, `open-contact` and `back` are reads and they
+#: move the person's screen out from under them. The two things the sentence
+#: must get right are the ones that decide whether the next call is safe; "the
+#: person will see it" is said as well, because they will. Verbatim from the TS
+#: half.
 _KIND_NOTE = {
-    "read": "READ-ONLY: this changes nothing. Free to call, free to get wrong.",
+    "read": (
+        "READ-ONLY: this changes no data and reports no count. Free to call, free to get "
+        "wrong. It may still move what the person is looking at \u2014 navigating is a read "
+        "\u2014 so they will see you do it."
+    ),
     "describe": (
-        "DESCRIBE: this changes what is SELECTED or FILTERED and changes no data. "
+        "DESCRIBE: this changes what is SELECTED and changes no data. "
         "Safe to call \u2014 the worst outcome is the wrong rows highlighted. It reports a "
         "`count` of what it matched; read that count before you commit to anything."
     ),
@@ -92,6 +103,59 @@ _KIND_NOTE = {
         "expect, and only then commit."
     ),
 }
+
+#: The commit banner for a commit the app says it can undo.
+#:
+#: A separate string rather than a sentence appended to the shouted one, and the
+#: difference is the point. ``set-setting("dense-rows", "true")`` and accepting
+#: 3,412 contacts were both getting THIS CHANGES DATA AND MAY BE IRREVERSIBLE,
+#: and a banner that appears on a page-size change is a banner a model learns to
+#: read past — the same way a person learns to click Yes without reading. So
+#: the reversible one is not shouted, and the irreversible one keeps its
+#: asterisks and goes on meaning something.
+#:
+#: It still says the data changes, because it does. ``reversible`` is a claim
+#: that there is a way back, not that nobody minds. Verbatim from the TS half.
+_COMMIT_REVERSIBLE_NOTE = (
+    "COMMIT (reversible): this changes data, and the app says the change can be undone. "
+    "Still a change the person will see, so do not call it to find out what it does; if it "
+    "acts on a selection, read the `count` from the app's `describe` verb first."
+)
+
+
+def _screen_note(screen: str | Sequence[str]) -> str:
+    """``screen`` folded into the description.
+
+    The tool list is the same on every screen — a verb list that changed
+    with the screen would bust the prompt prefix on every navigation, which is
+    the cost argument — so this sentence is how a model learns, in the
+    cached half, that a verb it can see will not work where it is standing.
+    Exactly the argument for putting ``refuses`` in here: the point is that the
+    call is never made.
+
+    A verb on several screens names them all, because naming one of three is
+    worse than naming none: a model told ``next-page`` is "ONLY ON THE
+    `contacts` SCREEN" will navigate away from the company list it was already
+    standing on to do something it could have done where it was. The one-screen
+    wording is byte-for-byte what it was before this could be a list, so no
+    app's cached prefix moved for a feature it does not use. Verbatim from the
+    TS half.
+    """
+    # A string is one screen and anything else is a sequence of them. Tested
+    # that way round rather than with `isinstance(..., list)`, because a string
+    # IS a sequence of characters and a tuple is what ``VerbSpec`` holds — the
+    # list check passes a tuple straight through and prints it.
+    screens = [screen] if isinstance(screen, str) else list(screen)
+    quoted = [f"`{s}`" for s in screens]
+    if len(quoted) > 1:
+        where = f"ONLY ON THE {', '.join(quoted[:-1])} AND {quoted[-1]} SCREENS."
+    else:
+        where = f"ONLY ON THE {quoted[0]} SCREEN."
+    return (
+        f"{where} The screen you are on is the `screen` line of "
+        "every screen you read. Called from anywhere else this is refused as `wrong-screen`, "
+        "and the refusal names where you are and where the verb lives."
+    )
 
 
 # ---- manifest → tools ----------------------------------------------------
@@ -142,14 +206,41 @@ def verb_tool(verb: VerbSpec) -> dict[str, Any]:
             ),
         }
 
+    # Hoisted exactly as `rev` is, and for a failure `rev` does not catch: a
+    # paging call sent with no rev once landed on a screen the agent had never
+    # seen, paged a different company's list and answered `ok`. "You are
+    # somewhere else" and "the number moved" are different mistakes with
+    # different fixes, so they are different claims and different refusals. A
+    # verb with its own `screen` argument keeps it, because the app's meaning
+    # wins over ours — the same rule as `rev`.
+    if "screen" not in properties:
+        properties["screen"] = {
+            "type": "string",
+            "description": (
+                "Optional. The `screen` from the last screen you read. If the app is on "
+                "another screen now, the call is refused as `wrong-screen` instead of "
+                "acting on a screen you never saw. Omit it to skip that check."
+            ),
+        }
+
     description = [verb.describe]
-    if verb.kind in _KIND_NOTE:
+    if verb.kind == "commit" and verb.reversible:
+        # Checked before the table, so a reversible commit reads differently
+        # from an irreversible one. `reversible` is read only here, on a
+        # `commit`: on a `read` or a `describe` it is a claim about nothing,
+        # since the app has already said no data moves.
+        description.append(_COMMIT_REVERSIBLE_NOTE)
+    elif verb.kind in _KIND_NOTE:
         # Second, straight after what the verb does and ahead of the mechanical
         # notes, so a model skimming the first two lines of a description
         # cannot miss that a verb commits. An unknown or absent kind adds
         # nothing: this server does not manufacture a safety claim the app did
         # not make, in either direction.
         description.append(_KIND_NOTE[verb.kind])
+    # Third: what a verb does to the world outranks where it works, and both
+    # outrank the mechanics.
+    if verb.screen:
+        description.append(_screen_note(verb.screen))
     description.append(_RESULT_NOTE)
     if verb.refuses:
         # In the description rather than only in the error path, because this is
@@ -232,16 +323,28 @@ def instructions_for(manifest: Manifest) -> str:
     different safety stories, and the one that drifts is the one nobody is
     reading when it matters.
     """
-    return (
+    parts = [
         f"You are driving a live {manifest.app} tab that a person has open. "
         f"Call {READ_SCREEN} before acting so you know what they are looking at, "
         "then quote that screen's `rev` back when you act. Every verb returns the "
         "screen after it ran, so acting and looking are one step. You can do exactly "
-        "what that person could do, and nothing more.\n\n"
-        "Every verb says what it does to the world: READ-ONLY changes nothing, DESCRIBE "
-        "changes only what is selected and reports a count, COMMIT changes data and may "
-        "be irreversible. Never commit on a selection whose count you have not read."
-    )
+        "what that person could do, and nothing more.",
+        "Every verb says what it does to the world: READ-ONLY changes no data and reports "
+        "no count \u2014 moving to another screen is a read, and the person watching will "
+        "see it \u2014 DESCRIBE changes what is selected and reports a count, COMMIT "
+        "changes data and may be irreversible. Never commit on a selection whose count you "
+        "have not read.",
+    ]
+    # The app's own briefing, last. This is the field that closes the one gap
+    # where driverkit's two paths disagreed: a widget could be handed
+    # `instructions` through `drive()` and an agent arriving here could not, so
+    # an app with something to say about itself — "this app has screens, and
+    # `go` reaches those" — had to repeat it in every snapshot's `note`, in
+    # the uncached half, paid for on every turn. It is static, so it goes in
+    # the half a client prepends once.
+    if manifest.instructions:
+        parts.append(manifest.instructions)
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
@@ -337,5 +440,17 @@ class TabTools:
             elif isinstance(raw_rev, (int, float)):
                 rev = int(raw_rev)
 
-        result = self.client.call(self.tab, verb.name, args, rev=rev)
+        # And so is `screen`, by the same rule: the app keeps the name if it
+        # declared one, because `go(screen)` is a real verb in a real app.
+        # Anything that is not a non-empty string is dropped rather than sent;
+        # a number is not a screen id, and the relay would refuse the frame
+        # anyway. The in-page loop refuses it instead of dropping it, and the
+        # difference is that it has the screen in hand to quote back.
+        screen = None
+        if "screen" not in verb.args:
+            raw_screen = args.pop("screen", None)
+            if isinstance(raw_screen, str) and raw_screen.strip():
+                screen = raw_screen.strip()
+
+        result = self.client.call(self.tab, verb.name, args, rev=rev, screen=screen)
         return ToolOutcome(render_result(result, verb.kind), is_error=not result.landed)

@@ -89,9 +89,20 @@ So a verb declares what it does to the world:
 
 | kind | means |
 |---|---|
-| `read` | changes nothing |
-| `describe` | changes what is selected or filtered, reports a `count` |
-| `commit` | changes data, may be irreversible |
+| `read` | changes no data and reports no count. Navigation is a read |
+| `describe` | changes what is **selected**, changes no data, reports a `count` |
+| `commit` | changes data. `reversible: true` says the app can undo it |
+
+`read` does not promise that nothing changes, because the commonest verb in a
+multi-screen app moves the person's screen out from under them. The two
+promises worth making are the ones that decide whether the next call is safe —
+no data moved, and no count left pending — and both are true of a navigation.
+
+`describe` is about selection and not about filtering. A search box changes
+what is filtered and reports no count, so none of what makes `describe` safe
+applies to it: the count is the number a following `commit` turns on, and the
+pair is the safety mechanism. A verb that narrows a list and leaves nothing
+pending is a `read`.
 
 A `describe` verb takes a predicate and resolves it **inside the app**, where
 the rows already are, and returns how many matched. A `commit` verb takes no
@@ -101,6 +112,12 @@ rather than a thousand.
 
 The widget asks before every commit, and shows the count the `describe`
 reported. One commit is one question, however many rows it covers.
+
+A `commit` the app can put back says `reversible: true`, and is told to the
+model in plain words rather than capitals. Changing a page size and accepting
+3,412 contacts were both just `commit`, so both got the same shouted banner —
+and a banner that fires on a page size is a banner a model learns to read past,
+the same way a person learns to click Yes without reading.
 
 ## What the agent sees
 
@@ -112,6 +129,37 @@ a hundred or a million.
 
 Every call returns the screen *after* it ran, so acting and observing are one
 round trip instead of two.
+
+## Apps with more than one screen
+
+The verb list must **not** change with the screen: one that did would bust the
+cached prompt prefix on every navigation, which is the whole cost argument. So
+every verb is offered everywhere, and the mapping is declared once in the half
+that gets cached.
+
+```ts
+{ name: "sort-companies", kind: "read", screen: "companies", … }
+
+visible: () => ({
+  screen: "contacts",                                   // the stable id, compared with ===
+  where: "the contacts list, filtered to “Acme”",       // prose, for a human
+  rev: store.rev,
+})
+```
+
+A call made off a verb's screen is refused as `wrong-screen`, naming the screen
+you are on *and* the one the verb wants. An agent can also say which screen it
+believed it was on — `driver.call("next-page", {}, { screen: "contacts" })` —
+and get the same refusal when the person has clicked away mid-run; a paging
+call with no such claim used to page a different list and answer `ok`.
+`wrong-screen` is reserved, so an app may not name a verb or a refusal of its
+own that, and `mount()` says so.
+
+The app's own briefing goes in `MountOptions.instructions`, which reaches
+`Manifest.instructions` and therefore both ways in — the in-page system prompt
+and an agent arriving over the relay or MCP. A host embedding the app can add
+its own `instructions` to `drive()` or the widget; the app's is folded in
+first, so the host's is the one a model follows if they disagree.
 
 ## Apps that are not tidy
 

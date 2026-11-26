@@ -67,6 +67,12 @@ export interface CallFrame {
   /** The agent's claim about what it was looking at. Forwarded untouched: the
    *  relay has no opinion about staleness, the driver does. */
   rev?: number;
+  /** The agent's claim about WHICH SCREEN it was looking at, checked by the
+   *  driver before `rev` and refused as `wrong-screen`. Forwarded untouched for
+   *  the same reason `rev` is: the relay does not know which screen a tab is
+   *  on, and a relay that compared screens would be a second set of rules
+   *  beside the core's. See `CallOptions.screen`. */
+  screen?: string;
 }
 
 export type UpFrame = HelloFrame | ResultFrame | SnapshotFrame;

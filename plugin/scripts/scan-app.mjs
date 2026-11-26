@@ -263,7 +263,9 @@ say(`- A verb that acts on many rows takes a PREDICATE, never an id called a tho
 say(`- Split every bulk action: a \`describe\` verb that selects and reports \`count\`, a \`commit\` verb that takes no predicate.`);
 say(`- \`refuses\` is the field people skip; list the slugs the agent can avoid calling into.`);
 say(`- \`visible()\` returns only what the person can see: same filter, same page.`);
-say(`- Reserved slugs (mount throws): stale, unknown-verb, bad-argument, unmounted, threw, no-such-tab,`);
-say(`  tab-went-away, timeout, declined-by-user.`);
+say(`- Reserved slugs (mount throws): stale, wrong-screen, unknown-verb, bad-argument, unmounted, threw,`);
+say(`  no-such-tab, tab-went-away, timeout, declined-by-user.`);
+say(`- More than one screen? \`screen\` on the verb, \`screen\` in visible(), and the core writes wrong-screen.`);
+say(`- The app's own briefing goes in \`instructions\` on mount(), not in every snapshot's note.`);
 
 console.log(out.join("\n"));

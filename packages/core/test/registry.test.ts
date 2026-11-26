@@ -635,3 +635,456 @@ test("selectedCount reports the size of a selection larger than the window", asy
   // the ids resolve "this one", the count decides whether a commit is safe.
   assert.deepEqual(out.snapshot.selected, ["c-0", "c-1", "c-2"]);
 });
+
+// ---- screens -------------------------------------------------------------
+
+/**
+ * A two-screen app: a list that pages, and a form that does not.
+ *
+ * `screen` is on the verbs that only make sense somewhere — `next-page` on the
+ * list, `set-setting` on the form — and absent from the ones that work from
+ * anywhere, which is the common case and must stay the default.
+ */
+function screens() {
+  let screen = "contacts";
+  let page = 0;
+  let dense = false;
+
+  const driver = mount({
+    app: "two-screen",
+    instructions: "this app has two screens: contacts and settings. `go` reaches both.",
+    visible: () => ({
+      where: screen === "contacts" ? `contacts list, page ${page + 1}` : "settings",
+      screen,
+      rev: page + (dense ? 100 : 0) + 1,
+      rows: screen === "contacts" ? [{ id: "c-1" }] : [{ id: "dense-rows", value: String(dense) }],
+    }),
+    verbs: [
+      {
+        name: "go",
+        kind: "read",
+        describe: "go to one of the app's screens",
+        // The app's own `screen` ARGUMENT, which is not `Verb.screen`: this
+        // verb works from anywhere and takes the destination as an argument.
+        // Both spellings in one verb on purpose — the hoisted `screen` must not
+        // steal the name, exactly like `rev`.
+        args: { screen: { type: "string", describe: "which screen", oneOf: ["contacts", "settings"] } },
+        run: ({ screen: to }: { screen: string }) => {
+          screen = to;
+          page = 0;
+        },
+      },
+      {
+        name: "next-page",
+        kind: "read",
+        describe: "show the next page of contacts",
+        screen: "contacts",
+        run: () => {
+          page++;
+        },
+      },
+      {
+        name: "set-setting",
+        kind: "commit",
+        // One click to undo, so it is a commit that says so. See `reversible`.
+        reversible: true,
+        describe: "turn dense rows on or off",
+        screen: "settings",
+        args: { value: { type: "boolean", describe: "on or off" } },
+        run: ({ value }: { value: boolean }) => {
+          dense = value;
+        },
+      },
+      {
+        name: "clear-selection",
+        kind: "describe",
+        describe: "deselect everything, from any screen",
+        run: () => ({ count: 0 }),
+      },
+    ],
+  });
+
+  return { driver, at: () => screen };
+}
+
+test("a screen-scoped verb is refused off its screen, and the hint names both screens", async () => {
+  // The whole point of declaring the mapping rather than guarding by hand. A
+  // bare `wrong-screen` is a dead end: an agent that is told no and not told
+  // where to go guesses, and the guess is another refused call. So the refusal
+  // carries the screen the caller is ON and the screen the verb WANTS, which is
+  // everything needed to fix it in one turn.
+  const { driver } = screens();
+  await driver.call("go", { screen: "settings" });
+
+  const out = await driver.call("next-page");
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.refused, "wrong-screen");
+  assert.match(out.hint!, /you are on the `settings` screen/);
+  assert.match(out.hint!, /`next-page` works on the `contacts` screen/);
+  // And the refused call did nothing: the screen under it has not moved.
+  assert.equal(out.snapshot.screen, "settings");
+});
+
+test("the same verb works on its own screen", async () => {
+  // The other half of the check, which is the half a wrong guard breaks.
+  const { driver } = screens();
+  const out = await driver.call("next-page");
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+  assert.equal(out.snapshot.screen, "contacts");
+  assert.match(out.snapshot.where, /page 2/);
+});
+
+/**
+ * Three screens, and a verb that works on two of them.
+ *
+ * The shape `Verb.screen` grew a list for, and it was found honestly: the
+ * library's own demo pages both a contacts list and a company's contact list,
+ * and one string meant declaring either screen would refuse a call on a screen
+ * that is still publishing a `page` block. The demo wrote a refusal slug of its
+ * own instead, which is the pattern `wrong-screen` was reserved to end.
+ */
+function threeScreens() {
+  let screen = "contacts";
+  let paged = 0;
+
+  const driver = mount({
+    app: "three-screen",
+    visible: (): Snapshot => ({ where: screen, screen, rev: paged + 1 }),
+    verbs: [
+      {
+        name: "go",
+        kind: "read",
+        describe: "go to a screen",
+        args: { to: { type: "string", describe: "which screen" } },
+        run: ({ to }: { to: string }) => {
+          screen = to;
+        },
+      },
+      {
+        name: "next-page",
+        kind: "read",
+        describe: "page whichever list you are on",
+        screen: ["contacts", "company"],
+        run: () => {
+          paged++;
+        },
+      },
+    ],
+  });
+
+  return { driver, paged: () => paged };
+}
+
+test("a verb on two screens works on both of them", async () => {
+  // The half a single string could not express. Declaring one of the two would
+  // have refused a call on a screen that is still publishing a `page` block --
+  // a lie in the cached half, which is worse than no claim at all.
+  const { driver, paged } = threeScreens();
+  for (const to of ["contacts", "company"]) {
+    await driver.call("go", { to });
+    const out = await driver.call("next-page");
+    assert.equal(out.ok, true, `next-page was refused on ${to}`);
+  }
+  assert.equal(paged(), 2);
+});
+
+test("a verb on two screens is refused on a third with ALL of its screens named", async () => {
+  // Naming one of two is a subtler dead end than naming none: an agent told
+  // `next-page` lives on the contacts list navigates there from the company
+  // list it was already standing on, to do something it could have done where
+  // it was. So every screen the verb works on is in the hint, and the sentence
+  // reads for a list -- "Go to one of those" rather than "Go there".
+  const { driver, paged } = threeScreens();
+  await driver.call("go", { to: "dashboard" });
+
+  const out = await driver.call("next-page");
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.refused, "wrong-screen");
+  assert.match(out.hint!, /you are on the `dashboard` screen/);
+  assert.match(out.hint!, /`next-page` works on the `contacts` and `company` screens/);
+  assert.match(out.hint!, /Go to one of those first, then call it again/);
+  assert.equal(paged(), 0, "the refused call paged anyway");
+});
+
+test("a one-element array behaves as the string it is, phrasing and all", async () => {
+  // The list must not acquire a comma, an "and", or a plural for a verb that
+  // names one screen -- a model and a person both read this hint, and the
+  // single-screen wording is the one every existing app's agent has seen.
+  const driver = mount({
+    app: "one",
+    visible: (): Snapshot => ({ where: "settings", screen: "settings", rev: 1 }),
+    verbs: [
+      { name: "page", kind: "read", describe: "page", screen: ["contacts"], run: () => {} },
+    ],
+  });
+
+  const out = await driver.call("page");
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.hint, "you are on the `settings` screen; `page` works on the `contacts` screen. Go there first, then call it again.");
+});
+
+test("`screen: []` is refused at mount, the way a duplicate name is", () => {
+  // It says the verb works on no screen at all, which no author means: it is
+  // what an empty `.filter()` over a list of screens produces, or what a config
+  // file hands over when a key is missing. Guessing either way is wrong --
+  // "anywhere" silently makes a scoped verb global, "nowhere" leaves a verb in
+  // everybody's cached prefix that can only ever be refused -- so it is said at
+  // startup, where it costs one stack trace and a running app nothing.
+  assert.throws(
+    () =>
+      mount({
+        app: "nowhere",
+        visible: (): Snapshot => ({ where: "x", screen: "x", rev: 1 }),
+        verbs: [{ name: "page", kind: "read", describe: "page", screen: [], run: () => {} }],
+      }),
+    /works on \s*no screen at all[\s\S]*Omit `screen`/,
+  );
+});
+
+test("a second screen on a verb moves the manifest version, and the manifest says both", () => {
+  // The same argument `screen` is in the fingerprint for at all: a verb that
+  // now ALSO works on a company's contact list is a verb whose cached
+  // description was wrong about where it can be called, and an agent holding
+  // the old copy would go on refusing to try it there.
+  const base = {
+    app: "v",
+    visible: (): Snapshot => ({ where: "x", screen: "contacts", rev: 1 }),
+  };
+  const verb = { name: "page", kind: "read" as const, describe: "page", run: () => {} };
+
+  const one = mount({ ...base, verbs: [{ ...verb, screen: "contacts" }] }).manifest();
+  const two = mount({ ...base, verbs: [{ ...verb, screen: ["contacts", "company"] }] }).manifest();
+  const listed = mount({ ...base, verbs: [{ ...verb, screen: ["contacts"] }] }).manifest();
+
+  assert.notEqual(one.version, two.version);
+  // The DECLARED shape is what is hashed, so `"contacts"` and `["contacts"]`
+  // are different versions. They are different bytes in the manifest and a
+  // client caching it would hold a different document, so a fingerprint that
+  // hid the difference would be claiming two copies read the same when they do
+  // not.
+  assert.notEqual(one.version, listed.version);
+
+  // And the manifest carries the shape through untouched, because every client
+  // reading `verbs[].screen` today reads it as a string.
+  assert.equal(one.verbs[0]!.screen, "contacts");
+  assert.deepEqual(two.verbs[0]!.screen, ["contacts", "company"]);
+});
+
+test("a verb with no screen applies anywhere, which is the default and must stay it", async () => {
+  // Absent means absent. An app that never heard of `screen` keeps every verb
+  // it had, on every screen it had them on, and a verb that genuinely works
+  // from anywhere -- `clear-selection`, `select-contact` -- does not have to
+  // enumerate the screens it is allowed on.
+  const { driver } = screens();
+  for (const to of ["contacts", "settings"]) {
+    await driver.call("go", { screen: to });
+    const out = await driver.call("clear-selection");
+    assert.equal(out.ok, true, `clear-selection was refused on ${to}`);
+  }
+});
+
+test("a verb that names a screen in an app whose snapshot has none is not refused", async () => {
+  // The honest reading of a half-adopted field. The core has nothing to compare
+  // against, and treating absent as "not that screen" would refuse every
+  // screen-scoped verb in an app that has declared the mapping and not yet
+  // filled in `Snapshot.screen` -- turning an additive field into a breaking
+  // one. It warns instead; see `warn`.
+  const driver = mount({
+    app: "half",
+    visible: () => ({ where: "somewhere", rev: 1 }),
+    verbs: [{ name: "page", describe: "page", screen: "list", run: () => {} }],
+  });
+
+  const out = await driver.call("page");
+  assert.equal(out.ok, true);
+});
+
+test("CallOptions.screen is checked before a stale rev, because they are different mistakes", async () => {
+  // The live bug, pinned. A paging call sent with no `rev` landed on a screen
+  // the agent had never seen, paged a different list and answered `ok`. With
+  // both claims wrong, the useful answer is the wider one: "you are somewhere
+  // else" sends an agent to navigate, "the number moved" sends it to re-read a
+  // screen it is not even on.
+  const { driver } = screens();
+  const read = driver.snapshot();
+  assert.equal(read.screen, "contacts");
+
+  // The person clicks away while the agent is thinking, and the rev moves too.
+  await driver.call("go", { screen: "settings" });
+  await driver.call("set-setting", { value: true });
+  assert.notEqual(driver.snapshot().rev, read.rev);
+
+  const out = await driver.call("clear-selection", {}, { screen: read.screen, rev: read.rev });
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.refused, "wrong-screen", "a stale rev answered a question about the screen");
+  assert.match(out.hint!, /you believed you were on the `contacts` screen/);
+  assert.match(out.hint!, /the app is on `settings`/);
+});
+
+test("CallOptions.screen that matches lets the rev check do its own job", async () => {
+  // Checked first does not mean instead. With the screen right and the rev
+  // stale, the answer is `stale` -- the two checks are about two different
+  // claims and each one still has to be able to fail on its own.
+  const { driver } = screens();
+  const read = driver.snapshot();
+  await driver.call("next-page");
+
+  const out = await driver.call("clear-selection", {}, { screen: "contacts", rev: read.rev });
+  assert.equal(out.ok, false);
+  if (out.ok) return;
+  assert.equal(out.refused, "stale");
+});
+
+test("omitting screen opts out of the check, exactly as omitting rev does", async () => {
+  const { driver } = screens();
+  await driver.call("go", { screen: "settings" });
+  // No claim made, so no claim checked: the verb works from anywhere and the
+  // call lands.
+  const out = await driver.call("clear-selection", {}, { rev: driver.snapshot().rev });
+  assert.equal(out.ok, true);
+});
+
+test("a screen claim against an app that declares no screen makes no claim", async () => {
+  // Same restraint as the verb case, from the other direction: an agent may be
+  // quoting a `screen` it read from another app, and the app in front of it
+  // does not describe its screens. There is nothing to compare, so the call
+  // runs rather than being refused over a field this app never filled in.
+  const driver = mount({
+    app: "screenless",
+    visible: () => ({ where: "somewhere", rev: 1 }),
+    verbs: [{ name: "poke", describe: "poke", run: () => {} }],
+  });
+  const out = await driver.call("poke", {}, { screen: "whatever" });
+  assert.equal(out.ok, true);
+});
+
+test("wrong-screen is reserved, and an app that was refusing it by hand is told what to do", () => {
+  // The slug was an app's invention before it was the core's: an app with six
+  // screens wrote the check by hand and had to name it, the next one would have
+  // picked `not-on-this-screen`, and an agent that learned one would not
+  // recognise the other. It says where a call stopped, so it is reserved -- and
+  // this is the one reserved slug an app may already be declaring, so the error
+  // names the replacement rather than only the rule.
+  assert.throws(
+    () =>
+      mount({
+        app: "toy",
+        visible: () => ({ where: "x", rev: 1 }),
+        verbs: [{ name: "page", describe: "page", refuses: ["wrong-screen"], run: () => {} }],
+      }),
+    /declares the reserved refusal `wrong-screen`[\s\S]*put `screen:/,
+  );
+});
+
+test("screen, reversible and instructions are in the fingerprint, where they belong", () => {
+  // The same argument `kind` is in it for. Moving a verb to another screen
+  // changes where a cached manifest says it works; dropping `reversible`
+  // changes whether an agent was told there is a way back; `instructions` is
+  // rendered straight into the system prompt, so an old copy briefs a model in
+  // the app's old words. None of the three changes a name or an argument, so
+  // without this the version would not move and nobody would re-fetch.
+  const base = {
+    app: "v",
+    visible: (): Snapshot => ({ where: "x", screen: "a", rev: 1 }),
+  };
+  const verb = { name: "act", kind: "commit" as const, describe: "act", run: () => {} };
+
+  const plain = mount({ ...base, verbs: [verb] }).manifest().version;
+  const scoped = mount({ ...base, verbs: [{ ...verb, screen: "a" }] }).manifest().version;
+  const elsewhere = mount({ ...base, verbs: [{ ...verb, screen: "b" }] }).manifest().version;
+  const undoable = mount({ ...base, verbs: [{ ...verb, reversible: true as const }] }).manifest().version;
+  const briefed = mount({ ...base, verbs: [verb], instructions: "two screens" }).manifest().version;
+
+  assert.equal(new Set([plain, scoped, elsewhere, undoable, briefed]).size, 5);
+});
+
+test("the manifest version of an app that uses none of the new fields has not moved", () => {
+  // The backward-compatibility claim, as a number rather than a promise. Every
+  // stored `Manifest.version` out there was computed before `screen`,
+  // `reversible` and `instructions` existed, and an upgrade of this library that
+  // moved them all would tell every agent its cached manifest had gone stale
+  // when nothing about the app had changed. So the three are appended to the
+  // hashed shape, and only when the app actually used them.
+  const driver = mount({
+    app: "toy",
+    visible: () => ({ where: "x", rev: 1 }),
+    verbs: [
+      {
+        name: "goto",
+        describe: "open a descent",
+        args: { id: { type: "string", describe: "descent id" } },
+        refuses: ["no-such-descent"],
+        run: () => {},
+      },
+      { name: "scroll", kind: "read", describe: "show the next page of rows", at: ".table", run: () => {} },
+      { name: "accept", kind: "commit", describe: "accept the selection", run: () => {} },
+    ],
+  });
+  assert.equal(driver.manifest().version, "7d165f135f77");
+});
+
+test("the app's own briefing is in the manifest, and the data still is not", async () => {
+  // `instructions` is static by definition -- it is the sentence an app says
+  // about itself, identical for every user forever -- so it belongs in the half
+  // that is cached once. Before it, an app that needed both the widget and an
+  // MCP client to hear it had to repeat it in `Snapshot.note`, in the uncached
+  // half, paid for on every single turn.
+  const { driver } = screens();
+  const m = driver.manifest();
+  assert.match(m.instructions!, /two screens/);
+
+  // And the rule that field had to survive: nothing per-user, per-screen or
+  // per-minute got in with it.
+  const json = JSON.stringify(m);
+  assert.ok(!json.includes("c-1"), "a row id leaked into the manifest");
+  assert.ok(!json.includes("page 1"), "the live screen leaked into the manifest");
+  assert.equal("screen" in m, false, "which screen is live is not a static fact");
+
+  // The verb→screen mapping IS static and is in there, which is the whole
+  // point: an agent reads it in the cached half instead of discovering it by
+  // being refused once.
+  const byName = Object.fromEntries(m.verbs.map((v) => [v.name, v]));
+  assert.equal(byName["next-page"]!.screen, "contacts");
+  assert.equal(byName["set-setting"]!.screen, "settings");
+  assert.equal(byName["set-setting"]!.reversible, true);
+  assert.equal("screen" in byName["clear-selection"]!, false, "anywhere was spelled as a screen");
+  assert.equal("reversible" in byName["next-page"]!, false, "a read claimed to be reversible");
+});
+
+test("the manifest of a screen app is byte-identical across two mounts of it", async () => {
+  // The rule all of this had to be additive to. Drive one copy somewhere else
+  // entirely and its manifest must still match a fresh one, because that is
+  // what makes the prefix cacheable ACROSS USERS -- and `screen` is exactly the
+  // field that would have broken it if it had gone in the manifest as "where
+  // the person is now" rather than as "where this verb lives".
+  const a = screens();
+  await a.driver.call("next-page");
+  await a.driver.call("go", { screen: "settings" });
+  await a.driver.call("set-setting", { value: true });
+
+  assert.equal(
+    JSON.stringify(a.driver.manifest()),
+    JSON.stringify(screens().driver.manifest()),
+  );
+  assert.notEqual(a.driver.snapshot().screen, screens().driver.snapshot().screen);
+});
+
+test("the snapshot says which screen is live, beside the prose that says what else is on it", async () => {
+  // The split, in one assertion. `where` carries the filter and the page and
+  // moves for reasons that are not navigation; `screen` is the word that
+  // changes if and only if the person went somewhere.
+  const { driver } = screens();
+  const first = driver.snapshot();
+  await driver.call("next-page");
+  const paged = driver.snapshot();
+  assert.notEqual(paged.where, first.where, "paging did not change the prose");
+  assert.equal(paged.screen, first.screen, "paging was reported as a navigation");
+
+  await driver.call("go", { screen: "settings" });
+  assert.notEqual(driver.snapshot().screen, first.screen);
+});

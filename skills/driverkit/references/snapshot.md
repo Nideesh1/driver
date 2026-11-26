@@ -8,6 +8,7 @@ and it is what makes "park that one" resolvable without a query.
 
 ```ts
 visible: () => ({
+  screen: "contacts",                        // the stable kebab-case id, compared with ===
   where: "contacts, filtered to “Acme”",     // where the user is, in their words
   rev: store.rev,                            // monotonic, moves on EVERY change
   rows: store.onScreen(),                    // only what is rendered. Row.id is what verbs take
@@ -17,6 +18,14 @@ visible: () => ({
   note: "contact c-8821 is open in the detail panel",   // short; this is the uncached half
 })
 ```
+
+## `screen` and `where` answer different questions
+
+`where` is prose for a human and carries the filter, the sort and a drill-down's record, so it changes constantly
+for reasons that are not navigation — which is why "did I navigate?" cannot be answered by diffing it. `screen` is
+a stable kebab-case id, compared with string equality, and that is its whole job. It is also what `Verb.screen` and
+`CallOptions.screen` are checked against. Omitting it is not a claim to have one screen: it means the app does not
+describe its screens, and the core then makes no claim rather than inventing one. [screens.md](screens.md).
 
 ## `rev` is a promise, so route every mutation through one place
 

@@ -13,14 +13,16 @@ Six screens over 3,412 seeded contacts and the eight companies they work for:
 
 One URL per screen, browser Back and Forward, and a deep link straight to a
 record. Eighteen verbs, each with a `kind`, and a `visible()` per screen that
-says which of the six you are on. Drivable two ways at once — the widget in the
-corner, and the relay at `/dk` for an agent in another process.
+fills in both `screen` — the stable id, compared with `===` — and `where`, the
+prose about what the person can actually see. Drivable two ways at once: the
+widget in the corner, and the relay at `/dk` for an agent in another process.
 
 The multi-step path the whole thing exists to exercise: **find a company, open
 it, look at its pending contacts, accept them.** `go(companies)` →
 `sort-companies(pending)` → `open-company(Acme Industrial)` →
 `select-pending-here` (reports 112) → `accept-selected`. Two of those verbs
-refuse on any other screen, and the commit takes no filter.
+declare a `screen` and the core refuses them anywhere else — naming the screen
+you are on and the screen the verb wants — and the commit takes no filter.
 
 ## Run it
 
@@ -45,15 +47,17 @@ does not, and it says so in its transcript rather than going quiet.
 ## Check it
 
 ```sh
-python3 examples/contacts/verify_strip.py                            # the stripper, against the library's own 215 tests
+python3 examples/contacts/verify_strip.py                            # the stripper, against the library's own 462 tests
 python3 examples/contacts/verify_app.py  http://127.0.0.1:8770       # the demo, fetched over HTTP and driven for real
 node --experimental-strip-types examples/contacts/check.mjs http://127.0.0.1:8770   # the same checks, straight off disk
 python3 examples/contacts/verify_chat.py                             # the Anthropic translation, against a fake endpoint
 ```
 
-`check.mjs` is 45 checks and walks all six screens: every screen's `visible()`,
-the drill-downs, the router's URLs, the `wrong-screen` refusals, the
-cross-screen accept, and the same job again from outside through the relay.
+`check.mjs` is 48 checks and walks all six screens: every screen's `visible()`,
+the drill-downs, the router's URLs, the core's `wrong-screen` refusals both
+ways round (a verb off its screen, and a call that named a screen the person
+has left), the cross-screen accept, and the same job again from outside through
+the relay.
 
 ## What is where
 
@@ -84,17 +88,44 @@ call '{"name":"select-pending-here"}'          # describe: reports the count
 call '{"name":"accept-selected"}'              # commit: takes no filter
 ```
 
-Two things to notice in what comes back. `snapshot.where` is the only thing
-that says which of the six screens the call landed on, and `selectedCount` is
-the honest size of the selection — `selected` carries just the ids on the page,
-because `select-where` can select three thousand rows and a snapshot that
-listed them all would be mostly ids, in the half that is never cached.
+Three things to notice in what comes back. `snapshot.screen` is the screen id
+and `snapshot.where` is the sentence about it — one is for comparing, the other
+for reading. `selectedCount` is the honest size of the selection; `selected`
+carries just the ids on the page, because `select-where` can select three
+thousand rows and a snapshot that listed them all would be mostly ids, in the
+half that is never cached. And `GET /dk/tabs/<tab>/manifest` carries
+`instructions` — the app's briefing, fetched once — plus a `screen` on each
+scoped verb, so an agent out here is told where a verb works before it calls.
 
-## Where driverkit made this awkward
+## Where driverkit still makes this awkward
 
-Kept out of this file on purpose — the report that came with this work has the
-list, with what was wanted, what had to be written instead, and what the
-library should do about each. The short version is that `Snapshot` has no field
-for which screen you are on, `Manifest` has no place for the app's own
-briefing, and a flat verb list cannot say that `select-pending-here` only
-exists on one of six screens.
+Kept short on purpose; the report that came with this work has the full list.
+Five of the sharpest gaps are closed: `Snapshot.screen` says which screen you
+are on, `MountOptions.instructions` is where the app's own briefing goes,
+`Verb.screen` puts the verb→screen mapping in the cached half so the core
+writes the `wrong-screen` refusal instead of the app inventing a slug for it,
+that field now takes a LIST of screens, and the widget's commit gate reads
+`reversible`.
+
+The list of screens is the one this demo asked for. `next-page` and `prev-page`
+page both the contacts list and a company's contact list; while `Verb.screen`
+was one string, naming either would have made the verb refuse on a screen that
+is still publishing a `page` block, so they declared no screen at all and
+refused an invented `no-pages-here` instead. They now declare
+`screen: ["contacts", "company"]`, the core names every screen they work on in
+the refusal, and both the slug and the `pages()` predicate behind it are gone —
+the two questions turned out to have one answer in this app, because the screens
+that page are exactly the two the verbs name.
+
+And the commit gate: `set-setting` is `reversible: true`, so the person is no
+longer asked the same question about a page-size change as about accepting 3,412
+rows — the gate fires on commits that are not reversible, plus any commit acting
+on more rows than a person can check by eye, whatever it claimed.
+
+What is left over in this demo:
+
+- **A dashboard's tiles and a settings form are still `rows`.** `Snapshot` has
+  no shape for either, so `id` names a tile or an input rather than a record,
+  and only the `note` says so.
+- **`/dk/tabs` still lists the URL from `hello`.** There is no frame that says
+  "I navigated", so the listed URL is stale the moment the tab moves.
