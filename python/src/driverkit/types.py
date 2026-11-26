@@ -36,6 +36,9 @@ __all__ = [
     "UNKNOWN_OUTCOME",
     "ArgSpec",
     "VerbSpec",
+    "ScreenSpec",
+    "FlowStep",
+    "FlowSpec",
     "Manifest",
     "Row",
     "Page",
@@ -61,12 +64,31 @@ VERB_KINDS = ("read", "describe", "commit")
 #: closed set. A client has to be able to tell "your app said no", which means
 #: rephrase and retry, from "your call never landed", which means reconnect or
 #: pick another tab. These three are reserved, along with the core's own
-#: ``stale``, ``wrong-screen``, ``unknown-verb``, ``bad-argument``,
-#: ``unmounted`` and ``threw``:
+#: ``stale``, ``wrong-screen``, ``stale-plan``, ``unknown-verb``,
+#: ``bad-argument``, ``unmounted`` and ``threw``:
 #: an app that names one of its verb refusals the same thing takes that
 #: distinction away, and if ``timeout`` can mean either then it means neither.
 #: See ``RelayRefusal`` and PROTOCOL.md, "When a call never reaches a tab".
 RELAY_REFUSALS = ("no-such-tab", "tab-went-away", "timeout")
+
+#: Refusals that come from the approval gate in the core's ``call()`` rather
+#: than from an app's verb. Reserved like the rest, and listed here so a client
+#: can tell them apart from the relay's.
+#:
+#: ``declined-by-user`` is a person saying no to a ``commit`` before it ran.
+#: ``approval-pending`` is a call that arrived while somebody was being asked
+#: about another one — nothing ran, and it is a refusal rather than a queue
+#: because the call an agent is most likely to make in that window is the
+#: Approve button of the dialog asking it (webmachinelearning/webmcp#288).
+#:
+#: ``approval-timeout`` must never be folded into the relay's ``timeout``, and
+#: that is the whole reason it is a separate slug. The relay's means the call
+#: was accepted and no answer came back, so the outcome is **unknown** and a
+#: commit may already have run; this one means nobody answered the question, so
+#: the verb was never reached and nothing changed. Opposite next moves: read
+#: the screen before touching anything, versus ask a person and call again.
+#: Which is why it is deliberately absent from :data:`UNKNOWN_OUTCOME`.
+APPROVAL_REFUSALS = ("declined-by-user", "approval-pending", "approval-timeout")
 
 #: The relay refusals that leave the outcome **unknown** rather than failed.
 #:
@@ -196,6 +218,18 @@ class VerbSpec:
     #: the dangerous kind, which is a warning on everything. Only read for
     #: ``commit``; see ``Verb.reversible``.
     reversible: bool | None = None
+    #: ``"plan"`` on a ``commit`` that may only be called with the token the
+    #: ``describe`` verb returned beside its ``count``, else None.
+    #:
+    #: The field that turns the describe/commit pairing from advice into a
+    #: guarantee. "A commit takes no predicate and acts on the current
+    #: selection" re-reads the selection at call time, so between the two calls
+    #: a person can tick a row or a websocket can land, and then the count that
+    #: was read and approved is not provably the set that moved. With this, the
+    #: core refuses the commit as ``stale-plan`` instead, naming both counts.
+    #: Absent makes no claim and the verb may be called bare, which is what
+    #: every commit written before this field does. See ``Verb.consumes``.
+    consumes: str | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "VerbSpec":
@@ -228,6 +262,14 @@ class VerbSpec:
             # an app getting it wrong, and the safe reading of a garbled
             # "you can undo this" is that nobody said it.
             reversible=True if reversible is True else None,
+            # Only the one value the core mints, for the reason an unrecognised
+            # `kind` is dropped: a word this code does not know is a manifest
+            # from a newer core, and the safe reading is that this client cannot
+            # satisfy the requirement rather than that it can. Dropping it means
+            # the tool is rendered without a `plan` property and the call comes
+            # back refused — which is visible — where honouring an unknown token
+            # name would have this client hoist a field nothing ever fills.
+            consumes="plan" if d.get("consumes") == "plan" else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -238,11 +280,121 @@ class VerbSpec:
             out["screen"] = self.screen if isinstance(self.screen, str) else list(self.screen)
         if self.reversible:
             out["reversible"] = True
+        if self.consumes is not None:
+            out["consumes"] = self.consumes
         if self.args:
             out["args"] = {k: v.to_dict() for k, v in self.args.items()}
         if self.refuses:
             out["refuses"] = list(self.refuses)
         return out
+
+
+
+@dataclass(frozen=True)
+class ScreenSpec:
+    """One entry of ``Manifest.screens``: a screen the app has.
+
+    Mirrors ``ScreenSpec``, whose comment carries the argument. The short
+    version: ``Snapshot.screen`` says which screen is live and ``Verb.screen``
+    says where a verb works, and between them an agent still could not learn
+    that a screen *exists* without standing on it — so the map is declared
+    once, in the cached half, because the names of an app's screens are the
+    same for every user forever.
+
+    The rule a reader should not have to go and look up: this is every screen
+    the APP has, never the screens the current user may reach. A list filtered
+    by role or plan is a per-user list in the cached half, which busts the
+    prompt prefix for everybody, and an absence is unfalsifiable — an agent
+    that meets one concludes the feature does not exist. "You may not open
+    that" is a refusal at the moment of the call.
+    """
+
+    id: str
+    describe: str = ""
+    #: An RFC 6570 URI template, or None for a screen with no address. Absent
+    #: is not a defect: a modal, a wizard step and the whole of a router-less
+    #: app are screens, and ``goto`` reaches them by id like any other.
+    url: str | None = None
+    #: What the template takes, by its own variable names. Typed so a wrong
+    #: value is refused before anybody navigates.
+    args: dict[str, ArgSpec] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "ScreenSpec":
+        url = d.get("url")
+        return cls(
+            id=str(d["id"]),
+            describe=str(d.get("describe", "")),
+            url=str(url) if isinstance(url, str) and url else None,
+            args={k: ArgSpec.from_dict(v) for k, v in (d.get("args") or {}).items()},
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"id": self.id, "describe": self.describe}
+        if self.url is not None:
+            out["url"] = self.url
+        if self.args:
+            out["args"] = {k: v.to_dict() for k, v in self.args.items()}
+        return out
+
+
+@dataclass(frozen=True)
+class FlowStep:
+    """One step of a flow: a verb, and a line about using it here.
+
+    The shape is webmachinelearning/webmcp#340's ``steps[].{section, tool,
+    hint}``, with ``tool`` spelled ``verb`` because that is what this library
+    calls the thing. Mirrors ``FlowStep``.
+    """
+
+    verb: str
+    hint: str = ""
+    section: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "FlowStep":
+        section = d.get("section")
+        return cls(
+            verb=str(d.get("verb", "")),
+            hint=str(d.get("hint", "")),
+            section=str(section) if isinstance(section, str) and section else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {"verb": self.verb, "hint": self.hint}
+        if self.section is not None:
+            out["section"] = self.section
+        return out
+
+
+@dataclass(frozen=True)
+class FlowSpec:
+    """One entry of ``Manifest.flows``: a declared, static, readable recipe.
+
+    **The agent reads it and follows it with ordinary verbs. Nothing calls
+    it**, and there is no tool that runs one — see ``FlowSpec`` in the TS
+    types for why that is the design and not a missing feature. ``describe``
+    is the field a model selects on, which is why it is bounded to one line.
+    """
+
+    id: str
+    describe: str = ""
+    steps: tuple[FlowStep, ...] = ()
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> "FlowSpec":
+        return cls(
+            id=str(d["id"]),
+            describe=str(d.get("describe", "")),
+            steps=tuple(FlowStep.from_dict(s) for s in d.get("steps") or ()),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "describe": self.describe,
+            "steps": [s.to_dict() for s in self.steps],
+        }
 
 
 @dataclass(frozen=True)
@@ -262,6 +414,13 @@ class Manifest:
     #: could not, so an app that had something to say about itself to both had
     #: to repeat it in ``Snapshot.note`` and pay for it on every turn.
     instructions: str | None = None
+    #: Every screen the app has, with an optional RFC 6570 url template each.
+    #: Static, cached once, and empty for an app that does not describe its
+    #: screens — which is not a claim that it has one. See :class:`ScreenSpec`.
+    screens: tuple[ScreenSpec, ...] = ()
+    #: The app's multi-step recipes, for an agent to read and follow. Nothing
+    #: executes them. See :class:`FlowSpec`.
+    flows: tuple[FlowSpec, ...] = ()
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Manifest":
@@ -271,6 +430,15 @@ class Manifest:
             app=d.get("app", ""),
             verbs=tuple(VerbSpec.from_dict(v) for v in d.get("verbs") or ()),
             instructions=str(instructions) if instructions else None,
+            # A screen with no `id` is dropped rather than coerced: the id is
+            # the string `Verb.screen` and `Snapshot.screen` are compared
+            # against, and a screen that cannot be matched is worse than a
+            # screen that is not listed. The core refuses one at mount, so a
+            # reader that meets one is reading a hand-rolled manifest.
+            screens=tuple(
+                ScreenSpec.from_dict(s) for s in d.get("screens") or () if s.get("id")
+            ),
+            flows=tuple(FlowSpec.from_dict(f) for f in d.get("flows") or () if f.get("id")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -285,7 +453,27 @@ class Manifest:
         # "the app said nothing" into a field.
         if self.instructions is not None:
             out["instructions"] = self.instructions
+        # Omitted when empty, for the reason `instructions` is: the TS core
+        # fingerprints a shape that leaves them out, and a round trip through
+        # this class must not turn "the app does not describe its screens" into
+        # an empty list that says it has none.
+        if self.screens:
+            out["screens"] = [s.to_dict() for s in self.screens]
+        if self.flows:
+            out["flows"] = [f.to_dict() for f in self.flows]
         return out
+
+    def screen(self, screen_id: str) -> "ScreenSpec | None":
+        for s in self.screens:
+            if s.id == screen_id:
+                return s
+        return None
+
+    def flow(self, flow_id: str) -> "FlowSpec | None":
+        for f in self.flows:
+            if f.id == flow_id:
+                return f
+        return None
 
     def verb(self, name: str) -> VerbSpec | None:
         for v in self.verbs:
@@ -416,6 +604,19 @@ class Snapshot:
     #: rows)`` — written against yesterday's version — as a screen id. New
     #: fields go on the end here, whatever order they are documented in.
     screen: str | None = None
+    #: An opaque fingerprint of the WHOLE current selection, off-screen rows
+    #: included: the one input the core's plan token is built from.
+    #:
+    #: Equal when the selection has not changed and different when it has,
+    #: including when one row was swapped for another — which is the case
+    #: ``selected_count`` cannot see and ``selected``, which by design holds
+    #: only the ids on screen, cannot identify. Nothing parses it, nothing
+    #: orders it and no model is shown it. See ``Snapshot.selectionId``.
+    #:
+    #: On the end, like ``screen`` and for the same reason: every field of this
+    #: dataclass is positional, so a field inserted in the middle silently
+    #: reinterprets a ``Snapshot(...)`` written against an earlier version.
+    selection_id: str | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Snapshot":
@@ -433,6 +634,11 @@ class Snapshot:
             selected=tuple(str(s) for s in selected) if selected is not None else None,
             selected_count=int(count) if count is not None else None,
             note=d.get("note"),
+            # Carried through as a string and never interpreted. It is the
+            # app's own fingerprint and only the core that minted a token
+            # against it compares it, so a client that read anything out of it
+            # would be inventing a second opinion about staleness.
+            selection_id=str(d["selectionId"]) if d.get("selectionId") else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -449,6 +655,8 @@ class Snapshot:
             # Spelled `selectedCount` going out, because the wire name is the
             # contract and `selected_count` is only how Python spells it.
             out["selectedCount"] = self.selected_count
+        if self.selection_id is not None:
+            out["selectionId"] = self.selection_id
         if self.note is not None:
             out["note"] = self.note
         return out
@@ -490,6 +698,15 @@ class Result:
     snapshot: Snapshot | None = None
     note: str | None = None  # ok=True only
     count: int | None = None  # ok=True only, and only from a `describe` verb
+    #: The plan token the core minted for the selection this call left behind:
+    #: ok=True only, and only from a ``describe`` in an app that has a verb
+    #: consuming them. Pass it back as ``call(..., plan=...)``.
+    #:
+    #: It travels beside ``count`` because it means nothing without it — the
+    #: count is the number a person approves, and this is what binds that number
+    #: to the set the next commit touches. Opaque: stored and forwarded, never
+    #: parsed.
+    plan: str | None = None  # ok=True only
     refused: str | None = None  # ok=False only
     hint: str | None = None  # ok=False only
 
@@ -498,11 +715,13 @@ class Result:
         snapshot = d.get("snapshot")
         ok = bool(d.get("ok"))
         count = d.get("count")
+        plan = d.get("plan")
         return cls(
             ok=ok,
             snapshot=Snapshot.from_dict(snapshot) if isinstance(snapshot, Mapping) else None,
             note=d.get("note") if ok else None,
             count=int(count) if ok and isinstance(count, (int, float)) and not isinstance(count, bool) else None,
+            plan=str(plan) if ok and isinstance(plan, str) and plan else None,
             refused=None if ok else str(d.get("refused", "unknown")),
             hint=d.get("hint") if not ok else None,
         )
@@ -514,6 +733,8 @@ class Result:
                 out["note"] = self.note
             if self.count is not None:
                 out["count"] = self.count
+            if self.plan is not None:
+                out["plan"] = self.plan
         else:
             out["refused"] = self.refused
             if self.hint is not None:

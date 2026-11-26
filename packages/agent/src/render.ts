@@ -39,6 +39,24 @@ const COUNT_NOTE =
   "Check it is the number you expect before committing.";
 
 /**
+ * The line that carries a plan token to the model.
+ *
+ * Rendered directly under the count, because it is the count's receipt and
+ * means nothing apart from it. Without this line the token exists in the
+ * `Result` and the model never sees it, so every commit that requires one is
+ * refused — the field would be plumbing that reaches everywhere except the one
+ * reader that has to use it.
+ *
+ * Verbatim with `render.py`. The two renderers say the same words to the same
+ * model and a difference between them is a difference in what an agent is told
+ * depending on how it connected.
+ */
+const PLAN_NOTE =
+  "Pass this `plan` back to the commit verb that acts on this selection. It is the receipt " +
+  "for the count above: if anything moves the selection first the commit is refused as " +
+  "`stale-plan` rather than acting on rows nobody counted. One commit per plan.";
+
+/**
  * The screen as a short text block.
  *
  * ```
@@ -162,8 +180,28 @@ export function renderSnapshot(snapshot: Snapshot): string {
  * that read the tool description recognises the word and generally knows the
  * fix; wrapping it in alarm language mostly teaches a model to retry the same
  * call unchanged.
+ *
+ * Byte-identical to what `render_result` produces in the Python half, which is
+ * why the join lives here and not only where the loop needs the halves apart.
+ * `drive` composes the same two pieces with a seam of its own between them —
+ * see `renderOutcome` — but this exported renderer, the one an MCP client's
+ * agent reads, goes on saying exactly what the Python one says.
  */
 export function renderResult(result: Result): string {
+  return renderOutcome(result) + "\n\n" + renderSnapshot(result.snapshot);
+}
+
+/**
+ * The outcome half of a `Result`: `ok`, the count, or the refusal and its hint.
+ *
+ * Split out because the two halves of a tool result age at different rates, and
+ * only something that can hold them apart can act on that. The screen below is
+ * current for exactly one turn. THIS half stays true forever: it is the answer
+ * to "what did my third call actually do", and it is a line or two rather than
+ * a table. The loop keeps it and drops the screen from older tool turns — see
+ * `pruneScreens`.
+ */
+export function renderOutcome(result: Result): string {
   let head: string;
 
   if (result.ok) {
@@ -177,12 +215,15 @@ export function renderResult(result: Result): string {
       // the mistake that costs the most.
       head += `\ncount: ${commas(result.count)} matched\n${COUNT_NOTE}`;
     }
+    if (result.plan !== undefined) {
+      head += `\nplan: ${result.plan}\n${PLAN_NOTE}`;
+    }
   } else {
     head = `refused: ${result.refused}`;
     if (result.hint) head += `\nhint: ${result.hint}`;
   }
 
-  return head + "\n\n" + renderSnapshot(result.snapshot);
+  return head;
 }
 
 /**

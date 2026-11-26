@@ -1,0 +1,47 @@
+{
+  "name": "@driverkit/eval",
+  "version": "0.0.0",
+  "description": "Replay plain-English asks against a verb list and a real model. Four numbers, and a false commit is not one of the other three.",
+  "license": "MIT",
+  "type": "module",
+  "//exports": [
+    "Source, not `dist`, and it is the one package in the repository that does that.",
+    "This is a development tool: it is run out of a checkout with",
+    "`node --experimental-strip-types` against case files on the same disk, nobody installs",
+    "it, and nothing imports it at runtime. A build step would be ceremony. It is therefore",
+    "also absent from `tsconfig.build.json`, which answers `what does each package publish`;",
+    "the repo-wide `tsconfig.json` globs `packages/*/src` and typechecks it with everything else."
+  ],
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "bin": {
+    "driverkit-eval": "./src/cli.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "eval": "node --experimental-strip-types src/cli.ts",
+    "//test": "Run from the repository root with the rest: packages/*/test/*.test.ts"
+  },
+  "dependencies": {
+    "driverkit": "0.0.0",
+    "@driverkit/agent": "0.0.0"
+  },
+  "keywords": [
+    "eval",
+    "agent",
+    "llm",
+    "harness",
+    "automation"
+  ],
+  "sideEffects": false
+}

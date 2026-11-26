@@ -73,7 +73,7 @@ The `tab` id is minted by the tab, not the relay, so a reconnect can resume the
 same identity. `title` and `url` exist only so a human can tell two tabs apart
 when asked "which one?".
 
-The manifest is the static half and carries three optional fields a relay only
+The manifest is the static half and carries five optional fields a relay only
 forwards, all of them cacheable for the life of the app:
 
 - `instructions` — the app's own briefing, in its own words ("this app has
@@ -109,13 +109,106 @@ forwards, all of them cacheable for the life of the app:
   thousand contacts were both `commit`, so both were shouted about and both
   stopped to ask a person — and a confirmation dialog on a page-size change is
   how people learn to click Yes without reading.
+- `screens` — **the app's map**: every screen it has, as
+  `{ id, describe, url?, args? }`. The `id` is the same string `verbs[].screen`
+  and `snapshot.screen` are compared against; `url` is an **RFC 6570** template
+  (`"#/companies/{slug}"`, not `":slug"`), and `args` types its variables so a
+  wrong value is refused before anybody navigates. A screen with no `url` is
+  ordinary and not defective: a modal, a wizard step and a router-less app are
+  all screens with no address.
+
+  It is here because the names of an app's screens are the same for every user
+  forever, which is the same argument `verbs[].screen` is static for. Before it,
+  an agent could learn where it was and where it was not, and could not learn
+  that a screen EXISTED without standing on it — so apps pasted a prose
+  screen-map into `instructions`, which is the route table written a second time
+  in English with nothing checking that the two agree.
+
+  **A tab must send every screen the app has, never the screens the current user
+  can reach.** A list narrowed by role, plan or feature flag is a per-user list
+  in the cached half, which busts the prompt prefix for everybody — and an
+  absence is unfalsifiable, so an agent that meets one concludes the feature does
+  not exist and stops asking. "You may not open that" is a refusal at the moment
+  of the call, with a reason.
+
+  A tab that declares a map and can navigate also offers the reserved verb
+  **`goto`**, whose one fixed argument is `screen` (an enum of the declared ids)
+  plus every screen's own arguments, all optional. It is a `read`: it changes no
+  data and reports no count, and what it does do — move the person's screen — is
+  what `read` says out loud a read may do. `goto` is reserved in the weak sense
+  only: an app that declares a verb of its own by that name keeps it, the same
+  rule as the hoisted `rev` and `screen` call arguments. A client must not assume
+  `goto` exists; a tab with no map does not have one.
+- `flows` — **the app's recipes**: the multi-step jobs its verbs are usually
+  combined into, as `{ id, describe, steps[] }` with each step
+  `{ verb, hint, section? }`. `verb` names a verb in the same manifest, and a
+  flow naming one that does not exist is refused where the app mounts.
+
+  **A flow is read and followed by the agent. Nothing calls it, and a client
+  must not turn one into a tool.** That is the design and not a missing feature:
+  a flow that executed internally could not adapt when step three found the
+  record already accepted, and the agent would get back an `ok` that told it
+  nothing. The sequence it could not adapt is exactly the one worth adapting, so
+  the recipe goes to the party with the judgement. A client renders flows into
+  the instructions it prepends — it is static, so it costs nothing per turn.
+
+  Both of these carry a documented size budget, copied from Apple's app skills
+  because our `instructions` had none and the honest answer to "how much may I
+  write?" was "nobody has said": a `describe` is one line of at most 1024
+  characters, a flow's steps at most 10,000 characters together, and
+  `instructions` at most 10,000. Everything in the cached half competes with the
+  verb list for a model's attention, which is the cost a number guards.
+- `verbs[].consumes` — `"plan"` on a `commit` that may only be called with the
+  token the `describe` verb returned beside its `count`. Absent means it may be
+  called bare, which is what every commit written before this field does.
+
+  It exists because the pairing rule was advertised as a guarantee and was not
+  one. "A `describe` takes the predicate and reports the count, a `commit` takes
+  no predicate and acts on the current selection" re-reads that selection at
+  call time, so between the two calls a person can tick a row, the list can
+  page, or a `snapshot` frame can land — and then the count the agent read, and
+  a person approved, is not provably the set the commit touched. Django shipped
+  exactly this for fifteen years: `select_across` silently lost, so a confirmed
+  bulk action ran on page one only. Chrome's WebMCP best practices state the
+  requirement in one line — confirmation must recompute the current state and
+  reject stale work — and the model for the fix is Terraform's saved plan, which
+  applies exactly the steps it holds and is valid only while the state has not
+  moved.
+
+  In the cached half because a client renders a tool schema and a description
+  from it once: an agent that did not read this calls the commit bare and is
+  refused `stale-plan` on every attempt, with nothing in its cached copy to
+  explain the fix. The core refuses `consumes` on anything but a `commit` where
+  the app mounts — a `describe` is the only thing that mints a token, so a
+  `describe` demanding one could never be called.
+
+  **ALL OR NONE.** If one commit on the selection consumes a plan, every commit
+  on the same selection must, or the gate is advisory. An eval asked the worked
+  example for a job it could not do and the agent improvised: it selected a
+  company and called the one bulk commit that asked for no receipt, and 403 rows
+  changed with no count read and nothing gated. The verb an agent reaches for
+  when it is off its intended path is the least-declared one, which is exactly
+  when the receipt matters most. A verb that NAMES what it acts on — anything
+  taking an id, or changing the one record whose screen is open — needs no plan:
+  the person can see it and the count is 1. A plan is the receipt for a count
+  larger than the screen.
 
 **`result`** — the answer to exactly one `call`.
 
 ```json
 { "t": "result", "tab": "7f3a-...", "id": "c-17",
-  "result": { "ok": true, "snapshot": {...} } }
+  "result": { "ok": true, "count": 3412, "plan": "dkp1.7.1.4c1f8a20b3de",
+              "snapshot": {...} } }
 ```
+
+`result.plan` is the plan token, present only on a `describe` that reported a
+`count`, and only in an app that has a verb declaring `consumes: "plan"`. It is
+the receipt for that count: the token the core minted over the `rev` it was
+taken at, the verb that took it, and the identity of the selection it left
+behind. A client stores it and sends it back on the commit; it is **opaque** and
+nothing but the core that minted it reads anything out of it, which is also why
+no relay can check it. A relay forwards the whole `result` untouched, so nothing
+is required of it here beyond not stripping unknown fields.
 
 **`snapshot`** — the page moved on its own, because a person clicked something.
 
@@ -134,6 +227,27 @@ screens and which verb belongs to which are static and belong in the manifest.
 A tab that does not describe its screens omits it, and that is not a claim that
 it has one. See `Snapshot.screen`.
 
+`snapshot.selectionId` is optional and is an **opaque fingerprint of the whole
+current selection**, off-screen rows included — equal when the selection has not
+changed, different when it has, including when one row has been swapped for
+another. It is the one input the core's plan token is built from, and it exists
+because neither of the two fields that look as though they would do can be it:
+`selected` is by design only the ids on screen, so it cannot identify a
+3,412-row selection, and `selectedCount` is a number, so it reads as the same
+selection when one row has been swapped for another. One short string whatever
+the selection's size, which is why it can be in the uncached half at all.
+Nothing parses it, nothing orders it and no model is ever shown it. Absent means
+the app does not identify its selection, not that nothing is selected: a commit
+that `consumes: "plan"` in such an app still gets a token, which still binds the
+`rev` and the count, and so catches every change the app bumps its `rev` for and
+no change it makes quietly. See `Snapshot.selectionId`.
+
+An app that counts its selection should send `selectedCount: 0` rather than
+omitting it when nothing is selected. An absent one means "I do not count", so
+the core cannot then tell an agent that there is nothing for a plan to be taken
+on — and that is the sentence which stops an agent going off to select something
+so that a bulk commit has rows to run on.
+
 **Every tab→relay frame carries `tab`.** `POST /dk/result` has no path parameter
 and the relay serves many tabs at once, so without it the relay cannot tell who
 is answering — and because a `result` is correlated only by `id`, two tabs with
@@ -149,8 +263,8 @@ is what makes the shared-presence case work: both parties watching one screen.
 **`call`** — run a verb.
 
 ```json
-{ "t": "call", "id": "c-17", "name": "select-where",
-  "args": { "where": "company=Acme" }, "rev": 7, "screen": "contacts" }
+{ "t": "call", "id": "c-17", "name": "accept-selected",
+  "args": {}, "rev": 7, "screen": "contacts", "plan": "dkp1.7.1.4c1f8a20b3de" }
 ```
 
 `id` is echoed back in the `result`. `rev` is optional and is the agent's claim
@@ -166,11 +280,26 @@ are two fields and two slugs rather than more prose on `stale`. A paging call
 sent with neither lands on whatever screen is there when it arrives, pages a
 list the agent never saw, and answers `ok`.
 
-A relay forwards both untouched and compares neither. It does not know which
-screen a tab is on, and a relay that decided would be a second set of rules
-beside the core's. An empty `screen` string is dropped rather than forwarded: it
-is not the id of any screen, and no app should be asked to refuse a call over a
-field a caller left blank. See `CallOptions.screen`.
+`plan` is the third claim and the only one that is not optional where it
+applies: the token from `result.plan`, presented to a verb whose manifest entry
+says `consumes: "plan"`. `rev` and `screen` may be omitted to skip their checks,
+because an agent that makes no claim about what it was looking at has at least
+made no false one. A commit that could be called without a plan would be a
+commit whose count guarantee is advisory, which is the state the field exists to
+leave — so the core refuses the bare call as `stale-plan`, and refuses a token
+that is unknown, was taken at an older `rev`, has already been used by a commit,
+or names a selection that is no longer the one on screen. The hint **names both
+counts** — "you were shown 3,412; the selection is now 3,418" — the way
+`wrong-screen` names both screens.
+
+A relay forwards all three untouched and compares none of them. It does not know
+which screen a tab is on, and a relay that decided would be a second set of rules
+beside the core's. `plan` is stronger still: the token is opaque to everything
+but the core that minted it, so a relay has nothing to compare it against and
+could only get the comparison wrong. An empty `screen` or `plan` string is
+dropped rather than forwarded: neither is the id of anything, and no app should
+be asked to refuse a call over a field a caller left blank. See
+`CallOptions.screen` and `CallOptions.plan`.
 
 **`ping`** — a comment line, every 20s, to keep proxies from closing an idle
 stream. Carries nothing.
@@ -203,7 +332,7 @@ tries to drive it.
 | `GET` | `/dk/tabs/:tab/manifest` | the static half — cache this |
 | `GET` | `/dk/tabs/:tab/snapshot` | the last snapshot the tab pushed |
 | `GET` | `/dk/tabs/:tab/watch` | SSE: `snapshot` frames as they happen |
-| `POST` | `/dk/tabs/:tab/call` | `{name, args?, rev?, screen?}` → a `WireResult` |
+| `POST` | `/dk/tabs/:tab/call` | `{name, args?, rev?, screen?, plan?}` → a `WireResult` |
 
 And the two the tab uses, which an agent never touches:
 
@@ -421,9 +550,10 @@ The relay answers with a `WireResult` whose `snapshot` is **absent** and whose
 | `tab-went-away` | the stream closed between accepting the call and answering |
 | `timeout` | the tab accepted the call and did not answer within the deadline |
 
-These three slugs, plus `stale`, `wrong-screen`, `unknown-verb`,
-`bad-argument`, `unmounted` and `threw` from the core, and `declined-by-user`
-from a confirmation gate, are **reserved**. (`wrong-screen` is the core's answer
+These three slugs, plus `stale`, `wrong-screen`, `stale-plan`, `unknown-verb`,
+`bad-argument`, `unmounted` and `threw` from the core, and `declined-by-user`,
+`approval-pending` and `approval-timeout` from the core's approval gate, are
+**reserved**. (`wrong-screen` is the core's answer
 to a call aimed at a screen the app is not on — either because the verb declared
 a `screen` of its own and the live one is something else, or because the call
 carried a `screen` that no longer matches. It was an app's invention before it
@@ -433,7 +563,36 @@ learned one would not have recognised the other. It says where a call stopped,
 not what an app decided, so it is reserved like the rest.) (`declined-by-user` is not a transport outcome at all — it is a
 person saying no to a `commit` before it ran. It is a refusal rather than an
 error on purpose, so the loop that drives the app treats it as an answer to
-adapt to, and never as a failure to retry.) An app must not name one of its
+adapt to, and never as a failure to retry. `approval-pending` is a call that
+arrived while a person was being asked about another one: nothing ran, and it is
+a refusal rather than a queue because the two calls an agent is most likely to
+make in that window are the Approve button of the dialog asking it and the same
+commit again to race the dialog.)
+
+**`stale-plan` is not `stale`, and an agent that collapses them makes the exact
+mistake the slug exists to prevent.** `stale` says the screen moved and the
+repair is to read it again. `stale-plan` says the SELECTION is not the one whose
+count was read and approved, and the repair is strictly larger: run the
+`describe` again, read the new count, check it is still the number the person
+asked for, and only then commit. An agent told `stale` re-reads and carries
+straight on, which is how 3,418 rows get accepted after a person approved 3,412.
+It carries a `snapshot` and it means the verb was **not reached and nothing
+changed**. The core checks it after `screen` and before `rev`, because every
+stale `rev` is also a stale plan — the token binds the `rev` it was taken at —
+so answering `stale` first would hand back the cheaper instruction for the more
+expensive mistake. A plan is good for **one** commit, and only at the `rev` it
+was taken at; there is no clock, because `rev` is the app's own account of
+something having changed and a wall-clock window is both too long to be safe and
+too short for a person reading three thousand rows before they answer.
+
+**`approval-timeout` is not `timeout` and the difference is the point.** The
+relay's `timeout` means the call was accepted and no answer came back, so the
+outcome is *unknown* and a commit may already have run. `approval-timeout`
+means the question was never answered, so the verb was **not reached and
+nothing changed**. The next move is opposite in each case — read the screen
+before touching anything, versus ask a person and call again — so a relay must
+not report one as the other, and a client must not collapse them. It carries a
+`snapshot`, which is the other signal: a transport refusal has none. An app must not name one of its
 own verb refusals the same thing: an agent needs to tell "your app said no,
 phrase it differently" from "your call never landed, reconnect or pick another
 tab", and if `timeout` can mean either, it can tell neither.
@@ -471,11 +630,66 @@ checks. An agent driving through driverkit can do exactly what the human whose
 tab it is could do, and nothing more — there is no service account, no token
 with its own permissions, nothing to over-scope.
 
-**Everything in this section is about proving *which* person, never about
-granting power.** That distinction is why the mechanism can be this small: it
-decides which hundredth of the relay's registry a caller may see, and the app's
-own session decides what they may do with it. The property above is what makes
-the design simple, and nothing below weakens it.
+**Everything in the rest of this section is about proving *which* person,
+never about granting power.** That distinction is why the mechanism can be this
+small: it decides which hundredth of the relay's registry a caller may see, and
+the app's own session decides what they may do with it. The property above is
+what makes the design simple, and nothing below weakens it.
+
+### Identity is not consent, and both have to be answered
+
+Everything else here answers "which person is this?". It does not answer "did
+that person agree to this?", and the two are different questions with different
+mechanisms. An agent holding a valid token for the right principal, driving the
+right tab, is correctly identified and may still be about to accept 3,412 rows
+nobody asked it to.
+
+**A commit's approval is the app's responsibility on every path, and the relay
+has nothing to do with it.** It cannot: it forwards a verb name and has no idea
+what the verb means, which is the same reason it grants no authority. So the
+gate belongs at the one place every path converges — the driver's `call()`,
+where the in-page loop, a relay frame and a test with no transport all arrive.
+A conforming implementation:
+
+- Takes an **approval hook** at mount, asked before `run` for `commit` verbs.
+  It is async, because a human is on the other end. It answers allow, deny with
+  a reason, or "nobody answered".
+- Turns a denial into **`declined-by-user`** and a lapse into
+  **`approval-timeout`**, identically whichever path the call arrived on. A gate
+  that lives in one consumer — the in-page chat panel, say — is not a gate: it
+  is a property of that consumer, and `declined-by-user` is a slug nothing on
+  the outside path can ever emit.
+- Refuses **every** call while an approval is open, as `approval-pending`.
+  Without that rule the agent being asked can press the page's own Approve
+  button, and the receipt then says a person approved it. That is not
+  hypothetical: it is webmachinelearning/webmcp#288, where a proposal-only tool
+  correctly declined to self-execute and the agent clicked Approve instead. A
+  controls layer that publishes whatever a person could press publishes that
+  button too, so the rule is at the layer that runs calls rather than at the
+  layer that enumerates them.
+- **Requires the policy to be declared before a driver is published.** Driving
+  from inside the page can rely on whatever UI the page has; an agent in another
+  process cannot. So connecting a driver that exposes `commit` verbs which have
+  not declared `reversible`, with no approval policy stated, is a configuration
+  that **must not be reachable by accident** — the page side refuses to open the
+  stream, exactly as a relay with remote access and no way to identify callers
+  refuses to start. The unsafe answer stays available and has to be written
+  down: "commits on this driver run unattended". Three deliberate acts to let an
+  outside agent change data, not one.
+- **Requires every published verb to say what it does.** The gate above fires on
+  `kind: "commit"`, so a verb that declares no `kind` is a verb the gate cannot
+  see — and an app's whole guarantee would then rest on its own declarations
+  being complete, which nothing checked. In-page that leniency is deliberate and
+  stays: an absent `kind` makes no claim in either direction, and a half-written
+  app must still mount. **Publishing is where the claim becomes load-bearing**,
+  so the page side refuses to open the stream for a manifest with an undeclared
+  `kind`, naming the verbs. `"commits run unattended"` satisfies this too: it is
+  the same risk already accepted out loud, and a check an unattended host cannot
+  satisfy is a check that gets deleted rather than met.
+
+Marking a control as human-only, or hiding an approval UI where an enumerator
+cannot reach it, are useful second layers and are not this one. Both depend on
+an author remembering; the `approval-pending` rule does not.
 
 That property is also a real limit: **a relay reachable by someone else is that
 person driving your logged-in session.** Two things follow, and they are

@@ -837,3 +837,57 @@ async function waitFor(check: () => boolean | Promise<boolean>, ms = 2_000): Pro
     await new Promise((r) => setTimeout(r, 5));
   }
 }
+
+test("`plan` is forwarded untouched, and the minted token comes back untouched", async (t) => {
+  // The relay's restraint about `rev` and `screen`, except that here it is not
+  // even a choice: a plan token is opaque to everything but the core that
+  // minted it, so a relay has nothing to compare it against and could only ever
+  // get the comparison wrong. Both directions are pinned, because a token is
+  // useless unless BOTH survive: the describe's `Result.plan` on the way out,
+  // and the commit's claim on the way in.
+  const { url } = await up(t);
+  const one = await tab(url, "t1");
+  await one.hello();
+
+  const described = one.es.next("call");
+  const counting = call(url, "t1", { name: "select-where", args: { company: "Acme" } });
+  const first = (await described) as { id: string };
+  const counted: Result = {
+    ok: true,
+    count: 3412,
+    plan: "dkp1.7.1.4c1f8a20b3de",
+    snapshot: { where: "contacts", rev: 7, selectionId: "2jm-9f1a0c3b4d5e6f70" },
+  };
+  await one.answer(first.id, counted);
+  // Byte for byte on the way back, `plan` and `selectionId` included. A hop
+  // that stripped either would leave the commit permanently uncallable, and the
+  // only symptom would be a `stale-plan` nobody could explain.
+  assert.deepEqual((await counting).body, counted);
+
+  const committed = one.es.next("call");
+  const pending = call(url, "t1", { name: "accept-selected", plan: "dkp1.7.1.4c1f8a20b3de" });
+  const got = (await committed) as { plan?: string; id: string };
+  assert.equal(got.plan, "dkp1.7.1.4c1f8a20b3de");
+  await one.answer(got.id, { ok: true, snapshot: { where: "contacts", rev: 8 } });
+  await pending;
+});
+
+test("a call with no plan, or an empty one, arrives with none", async (t) => {
+  // The same rule as `screen`: defaulting it would opt an agent into a claim it
+  // did not make, and an empty string is not a token — so the core's refusal
+  // names the field the agent actually left out rather than complaining about
+  // a blank one.
+  const { url } = await up(t);
+  const one = await tab(url, "t1");
+
+  const first = one.es.next("call");
+  void call(url, "t1", { name: "goto" });
+  assert.ok(
+    !("plan" in ((await first) as Record<string, unknown>)),
+    "the relay invented a plan the agent never presented",
+  );
+
+  const second = one.es.next("call");
+  void call(url, "t1", { name: "goto", plan: "" });
+  assert.ok(!("plan" in ((await second) as Record<string, unknown>)));
+});

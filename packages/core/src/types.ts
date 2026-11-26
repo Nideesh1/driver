@@ -74,6 +74,20 @@ export interface ArgSpec {
  * on the current selection. Two calls, so a count is always seen before data
  * moves. A verb that both selects and accepts is how fifty thousand rows get
  * accepted because a filter was wider than anybody thought.
+ *
+ * TWO CALLS IS NOT ENOUGH ON ITS OWN, and that is what `Verb.consumes` is for.
+ * "Acts on the current selection" re-reads the selection at call time, so
+ * between the `describe` and the `commit` a person can tick a row, page the
+ * list, or a websocket can land — and then the count the agent read and the
+ * human approved is not provably the set the commit touched. Django has shipped
+ * that exact bug class since 2010, where `select_across` was silently lost and
+ * a confirmed bulk action ran on page one only (tickets 15742, 33083, and 36706
+ * closed wontfix in 2025). Chrome's WebMCP best practices state the requirement
+ * in one line: confirmation must recompute the current state and reject stale
+ * work. So a `commit` may declare `consumes: "plan"`, the `describe` hands back
+ * a token the core minted over the selection it left behind, and the commit has
+ * to present it. See `Verb.consumes`, `Snapshot.selectionId` and
+ * `CallOptions.plan`.
  */
 export type VerbKind = "read" | "describe" | "commit";
 
@@ -201,6 +215,69 @@ export interface Verb<A extends Record<string, Scalar> = Record<string, Scalar>>
    * sees it. It means there is a way back, not that nobody minds.
    */
   reversible?: true;
+  /**
+   * `"plan"` on a `commit` that may only be called with a token from the
+   * `describe` that counted what it is about to touch.
+   *
+   * THE HOLE THIS CLOSES. The pairing rule — a `describe` takes the predicate
+   * and reports a `count`, a `commit` takes no predicate and acts on the
+   * current selection — was advertised as "two calls, so a count is always seen
+   * before data moves". It was not that. `commit` re-reads "the current
+   * selection" at call time, and between the two calls the person can tick a
+   * row, page the list, or a websocket can land. So the count that was read,
+   * and approved, was not provably the set that moved. Django shipped exactly
+   * this for fifteen years: `select_across` silently lost, so a confirmed bulk
+   * action ran on page one only. Chrome's WebMCP best-practices page states the
+   * fix in one line — confirmation must recompute the current state and reject
+   * stale work — and recommends binding the transition to state version and
+   * exact scope, which is what a token here is.
+   *
+   * The model is Terraform's saved plan: applying one performs exactly the
+   * steps in that file, and a saved plan is valid only while the state has not
+   * changed. So a `describe` that leaves a selection behind gets a `plan` token
+   * back beside its `count` (see `Result.plan`), and a `commit` declaring this
+   * must be called with that token in `CallOptions.plan`. The core refuses as
+   * `stale-plan` when the token is missing, was never minted here, was taken at
+   * an older `rev`, or named a selection that is no longer the one on screen —
+   * and names both counts in the hint, the way `wrong-screen` names both
+   * screens.
+   *
+   * **The app does not mint the token and cannot**, which is the point of the
+   * field being this small. An app that computed its own would have to get a
+   * hash right, and a token an app can forge or accidentally reuse is worse
+   * than no token because it still reads as a guarantee. All the app does is
+   * publish `Snapshot.selectionId`; the core does the binding.
+   *
+   * Static, and in `fingerprint()` for the same reason `kind` is: a verb that
+   * has started requiring a token has changed what a cached manifest claims
+   * about how it may be called, and an agent holding the old copy would go on
+   * calling it bare and being refused. An absent one makes NO claim and
+   * changes nothing — a commit written before this field behaves exactly as it
+   * did, which is why this is not the default. A `read` or a `describe` that
+   * declares it is an authoring mistake and is refused at `mount()`: a token
+   * is a claim about data that is about to move, and demanding one for a
+   * highlight teaches an agent to fetch tokens it does not need.
+   *
+   * **ALL OR NONE, AND THIS IS THE RULE THE FIELD IS USELESS WITHOUT.** If one
+   * `commit` that acts on the selection consumes a plan, every commit that acts
+   * on the same selection must, or the gate is advisory. This is not a style
+   * note. An eval asked the worked example for a job it cannot do — "archive
+   * everyone who has not replied in six months" — and the agent improvised:
+   * selected a company, then called the one bulk commit that asked for no
+   * receipt, and 403 rows changed with no count read and nothing gated. The
+   * verb an agent reaches for when it is off its intended path is the
+   * least-declared one, which is exactly when the receipt matters most, so a
+   * guarantee is only as strong as its weakest sibling. `mount()` warns when it
+   * can see this shape; the warning cannot see every case, and the rule is the
+   * thing to remember.
+   *
+   * What does NOT need one: a commit that names what it acts on. A verb that
+   * takes an id, or that changes the one record whose screen is open, is acting
+   * on something the person can see and count, and the count is 1. A plan is
+   * the receipt for a count LARGER THAN THE SCREEN, which is the only case
+   * where a number has to be carried between two calls to mean anything.
+   */
+  consumes?: "plan";
   args?: Record<string, ArgSpec>;
   /**
    * The refusals this verb can return, as short stable slugs.
@@ -251,6 +328,27 @@ export interface Report {
   /** One short line for the agent that the snapshot has nowhere to put. */
   note?: string;
 }
+
+/**
+ * WHY THERE IS NO `plan` FIELD HERE, since this is the first place anybody
+ * looks for one.
+ *
+ * A plan token has to be checkable at the moment the `commit` runs, and the
+ * only thing the core can read then is `visible()`. A verb returns its `Report`
+ * once, at the end of the `describe`, and is never asked again — so an identity
+ * handed back here could be bound into a token and never re-derived, which
+ * makes the check "is this the token I minted" and not "is this still the
+ * selection I counted". That is the difference between a receipt and a
+ * guarantee, and a token that only proves its own provenance is the theatre
+ * this whole mechanism exists to avoid.
+ *
+ * So the identity lives in `Snapshot.selectionId`, which the core reads after
+ * the `describe` and again before the `commit`, and the app states it in one
+ * place instead of two. Two places is the real cost of the alternative: an app
+ * that computed the identity once for the report and once for the screen would
+ * eventually compute them differently, and the token would be minted over one
+ * and checked against the other.
+ */
 
 export interface VerbContext {
   /** Decline, with a reason the agent can act on. See `refuse`. */
@@ -414,6 +512,41 @@ export interface Snapshot {
    */
   selectedCount?: number;
   /**
+   * An opaque fingerprint of the WHOLE current selection, off-screen rows
+   * included. The one input the plan token is built from.
+   *
+   * WHAT IT HAS TO BE. Equal when the selection has not changed, different when
+   * it has — including when one row has been swapped for another, which is the
+   * case a count cannot see. Nothing else is required of it: the core never
+   * parses it, never orders it and never shows it to a model, so an app may use
+   * any string that has that one property. `selectionId([...ids])` from this
+   * package is the one to use unless you have a reason; it is order-independent
+   * and cheap, and the reason it is exported is that an app computing its own
+   * is an app that can get it wrong.
+   *
+   * WHY NOT THE TWO FIELDS ABOVE, which look as though they would do. `selected`
+   * is by design only the ids on screen, so it cannot identify the 3,412-row
+   * selection that `select-where` exists to make — and filling it honestly with
+   * all of them is the token-budget mistake its own comment is about.
+   * `selectedCount` is a number, and a number cannot tell a selection from a
+   * different selection of the same size. Each would have produced a token that
+   * looked like a guarantee and was not.
+   *
+   * It is one short string whatever the selection's size, which is why it can
+   * be in the uncached half at all. An app with a large selection should keep a
+   * running value rather than re-hash a large set inside `visible()`, which
+   * runs on every call.
+   *
+   * Absent means the app does not identify its selection — NOT that nothing is
+   * selected. A `commit` that declares `consumes: "plan"` in an app that omits
+   * this still gets a token, and the token still binds the `rev` and the count,
+   * which catches every change the app bumps its `rev` for. It cannot catch a
+   * change the app made without bumping `rev`, and the core says so once at the
+   * first such call rather than letting the weaker check pass for the stronger
+   * one.
+   */
+  selectionId?: string;
+  /**
    * The controls the screen is offering right now.
    *
    * The second layer: `rows` is what the person can read, this is what they
@@ -447,7 +580,23 @@ export interface Snapshot {
  * for the one case where it can be missing.
  */
 export type Result =
-  | { ok: true; note?: string; count?: number; snapshot: Snapshot }
+  | {
+      ok: true;
+      note?: string;
+      count?: number;
+      /**
+       * The plan token for the selection this call left behind, minted by the
+       * core on a `describe` that reported a `count`. Present only there.
+       *
+       * It travels beside `count` because it means nothing without it: the
+       * count is the number a person approves and this is what binds that
+       * number to the set the next `commit` will touch. Pass it back as
+       * `CallOptions.plan`. Opaque — a client stores it and forwards it, and
+       * nothing outside the core that minted it reads anything out of it.
+       */
+      plan?: string;
+      snapshot: Snapshot;
+    }
   | { ok: false; refused: string; hint?: string; snapshot: Snapshot };
 
 /**
@@ -474,6 +623,230 @@ export type WireResult =
  *  a closed set so a client can tell "your app said no" (retry differently)
  *  from "your call never landed" (reconnect, or pick another tab). */
 export type RelayRefusal = "no-such-tab" | "tab-went-away" | "timeout";
+
+/**
+ * One screen the app has, declared once in the cached half.
+ *
+ * THE GAP THIS CLOSES. `Snapshot.screen` says which screen is live and
+ * `Verb.screen` says which screen a verb lives on, and between them an agent
+ * could learn where it is and be refused where it is not — but it could not
+ * learn that a screen EXISTS before standing on it. The library's own worked
+ * example papered over that by pasting a prose screen-map into
+ * `instructions` ("this is a CRM with six screens: a dashboard, a contacts
+ * list, …"), which is a map written twice: once in the route table the app
+ * already has, and once in English for the model, where nothing checks that
+ * the two agree. So this is the map, as data, in the half that is cached.
+ *
+ * It is static for the same reason `Verb.screen` is, and the argument is the
+ * one the whole library rests on: **the names of an app's screens are the same
+ * for every user forever.** A CRM has a contacts list whether or not you have
+ * any contacts, and whether or not you are allowed to see them. Only *which
+ * screen is live* is per-user and per-minute, and that is `Snapshot.screen`.
+ *
+ * **THE CONSTRAINT THAT MATTERS, and the one an author will be tempted to
+ * break: publish every screen the app has, not the screens THIS user can
+ * reach.** A list filtered by role, by plan, by feature flag or by permission
+ * is a per-user list, and a per-user list in the cached half busts the prompt
+ * prefix for everybody — exactly as a per-screen tool list would, which is the
+ * mistake `Verb.screen` exists to prevent one level down. Two users of the
+ * same app must receive the same bytes here. If a screen is one this person
+ * may not open, that is a REFUSAL from the navigate hook at the moment they
+ * try, with a reason an agent can relay ("admin only"), and not an absence
+ * from everybody's map: an absence is unfalsifiable, so an agent meeting it
+ * concludes the feature does not exist and stops asking — the same failure
+ * `ScreenControl.disabled` is listed rather than hidden to avoid.
+ */
+export interface ScreenSpec {
+  /**
+   * Stable, kebab-case, unique within a mount. **The same string
+   * `Verb.screen` and `Snapshot.screen` compare**, which is the whole reason
+   * this type has an id rather than only a name: three fields that spell the
+   * screen three ways are three fields that disagree after the first rename.
+   */
+  id: string;
+  /** One line for the model, in the user's vocabulary: "the contacts list:
+   *  every contact, searchable, twenty rows at a time". Write it for a reader
+   *  who cannot see your app and has never been to this screen — which is
+   *  precisely the reader this field exists for. At most
+   *  `SIZE_LIMITS.describe` characters; see that constant for why there is a
+   *  bound at all. */
+  describe: string;
+  /**
+   * An **RFC 6570** URI template for the screen, if it has an address:
+   * `"#/contacts"`, `"#/companies/{slug}"`.
+   *
+   * RFC 6570 rather than a placeholder syntax of our own, because a route
+   * table with holes in it is a solved problem with a registered media type
+   * and a dozen implementations, and the alternative is a third dialect of
+   * `:id` versus `{id}` versus `<id>` for every author to get wrong. Only
+   * simple string expansion — `{var}` — is used by the core, which is the
+   * level a route has; the syntax is the spec's so a template can be handed to
+   * `uri-templates` or any other RFC 6570 library unchanged, and the core's
+   * own expansion is tested against one.
+   *
+   * OPTIONAL, and absent is not a defect. A modal, a wizard step, a tab inside
+   * a screen and the whole of a single-page app with no router are all screens
+   * with no address, and a type that demanded one would push those authors
+   * into inventing fake URLs. `goto` reaches an address-less screen exactly as
+   * it reaches any other: the ID is the handle an agent uses, and the url is
+   * what the app can use to get there, plus the one thing a person can paste
+   * into a browser.
+   */
+  url?: string;
+  /**
+   * What the url template takes, by the template's own variable names.
+   *
+   * Typed, so the core can check `goto("company", { slug: 7 })` before any
+   * navigation happens and refuse it as `bad-argument` the way every other
+   * mistyped argument is refused — rather than expanding `7` into a URL and
+   * landing the person on a screen with no record on it. `ArgSpec` rather than
+   * a list of names for the reason verbs take `ArgSpec`: `oneOf` is cheaper
+   * and safer than prose, and the refusal lists the accepted set.
+   *
+   * A screen whose template has a variable with no entry here still expands —
+   * the value is taken as optional and an absent one expands to nothing, which
+   * is RFC 6570's own rule — but it is undeclared, so nothing checks it and
+   * the model is told nothing about it. Declare them.
+   */
+  args?: Record<string, ArgSpec>;
+}
+
+/**
+ * Where a `goto` is trying to get to, handed to `MountOptions.navigate`.
+ *
+ * WHY THERE IS A HOOK AT ALL. The core cannot navigate. It has no router, no
+ * `history`, no `location` and no DOM — it is the package that promises to
+ * import nothing — and a core that pushed a URL would be guessing between
+ * `pushState`, a hash, a framework's own router and a native app with no URLs
+ * at all. It would also be the one place in driverkit that reached around the
+ * app instead of through it, which is the same back door `Verb.at` is
+ * deliberately not allowed to be. So the app supplies the one function it
+ * alone can write, and the core supplies everything that is the same in every
+ * app: the declared list, the uniqueness check, the argument types, the
+ * expansion, the refusal when the screen is not one the app has, and the tool
+ * description the model reads.
+ */
+export interface NavigateTarget {
+  /** The `ScreenSpec.id` that was asked for. Already checked against the
+   *  declared list, so a hook never sees a screen the app did not declare. */
+  screen: string;
+  /** The arguments, already checked against the screen's `args`. A hook may
+   *  read them directly rather than re-parsing the url. */
+  args: Record<string, Scalar>;
+  /** The screen's `url` with `args` expanded, or absent when the screen
+   *  declared no template. A hook that has a router usually ignores this and
+   *  routes on `screen`; a hook on an app whose only addressing is the address
+   *  bar assigns it to `location.hash` and is done. */
+  url?: string;
+}
+
+/**
+ * How the app navigates, for the core's reserved `goto` verb.
+ *
+ * Returns nothing for the ordinary case, `ctx.refuse(...)` for a screen this
+ * person may not open or a record that does not exist, or a `Report` with a
+ * `note`. It is the same contract as `Verb.run` on purpose: `goto` is an
+ * ordinary verb whose body happens to be supplied through a different field,
+ * and an author who already knows how to write a verb has nothing new to
+ * learn.
+ *
+ * **A refusal here is how a per-user restriction is expressed**, and it is the
+ * other half of `ScreenSpec`'s rule against filtering the declared list. "You
+ * may not open the billing screen" is a fact about this person at this moment,
+ * so it belongs in the dynamic half — said at the moment of the call, with a
+ * reason — and never as a screen quietly missing from everybody's map.
+ */
+export type NavigateHook = (
+  target: NavigateTarget,
+  ctx: VerbContext,
+) => void | Refusal | Report | Promise<void | Refusal | Report>;
+
+/**
+ * One step of a `FlowSpec`: a verb, and a line about using it here.
+ *
+ * The shape is webmachinelearning/webmcp#340's `steps[].{section, tool, hint}`,
+ * with `tool` spelled `verb` because that is what this library calls the
+ * thing — and because a `tool` field whose value must be a verb name is a
+ * field somebody will eventually fill with an MCP tool name instead.
+ */
+export interface FlowStep {
+  /** The verb to call. Checked at `mount()` against the verbs that exist; see
+   *  `Manifest.flows`. */
+  verb: string;
+  /** What to do with it HERE, in this flow: "sort by pending so the companies
+   *  with work at the top", "read the count it reports before going on". The
+   *  verb's own `describe` already says what the verb does; this says why this
+   *  step exists and what to watch for, which is what a recipe is. */
+  hint: string;
+  /** An optional grouping label for a flow with phases — "find the company",
+   *  "check the numbers". From #340's shape. Several consecutive steps may
+   *  share one. */
+  section?: string;
+}
+
+/**
+ * A declared, static, READABLE recipe: the level above a single verb.
+ *
+ * WHY THIS EXISTS, in one sentence: an app's verbs say what can be done and
+ * nothing says what is usually done with them, so every agent re-derives the
+ * same five-step job from scratch, and the four of five that get it slightly
+ * wrong get it wrong in a way nobody sees until the commit. Five independent
+ * efforts arrived at the same level — webmcp#255 (`registerCollection`),
+ * webmcp#161 (`registerSkill`), webmcp#340, OpenAPI Arazzo's `workflows[]`,
+ * and Apple's app skills — which is the usual sign that the gap is in the
+ * problem and not in one design.
+ *
+ * **THE AGENT READS THIS AND FOLLOWS IT. IT DOES NOT CALL IT.** That is the
+ * whole design and it is a deliberate refusal to ship a workflow engine. A
+ * flow that executed internally would run step 3 on an app whose state had
+ * moved — the client already exists, the selection is empty, the record was
+ * accepted by somebody else a second ago — and the only answers available to
+ * it are to carry on or to stop, both blind, with the agent that could have
+ * adapted holding nothing but an `ok`. Adapting mid-job is the one thing a
+ * model is better at than a state machine, and handing the recipe to the model
+ * keeps the adapting where the judgement is. Apple's app skills make the same
+ * admission out loud — *"Skills don't enforce deterministic behavior, and Siri
+ * doesn't run the listed intents in sequence"* — and it reads as a caveat only
+ * if you expected an engine.
+ *
+ * **The `describe` carries the weight.** Microsoft's finding on plugin
+ * selection across groups is that the choice *"is based on the plugin's
+ * description, not on any of the individual functions"*: a model picking
+ * between several flows reads these sentences and not the steps. So `describe`
+ * is the field to spend the effort on, which is also why it has a documented
+ * size budget — see `SIZE_LIMITS`.
+ *
+ * Static, so it rides in the manifest that was already being cached and costs
+ * nothing per turn. That is the cheapest possible version of this feature:
+ * nothing is sent per turn, nothing is computed per call, and an app that
+ * declares no flows produces the manifest it produced before the field
+ * existed, byte for byte.
+ */
+export interface FlowSpec {
+  /** Stable, kebab-case, unique within a mount. An agent's handle on the flow
+   *  when a person says "do the usual thing", and the string a transcript
+   *  names. */
+  id: string;
+  /**
+   * What this flow is for, in one line, in the user's own words: "accept a
+   * company's pending contacts".
+   *
+   * The field a model chooses on. At most `SIZE_LIMITS.describe` characters
+   * and **no newline**: it is a one-line label, and a paragraph here is a
+   * paragraph that is read instead of the steps.
+   */
+  describe: string;
+  /**
+   * The steps, in order. At least one.
+   *
+   * Every `step.verb` must name a verb that exists, and `mount()` throws if
+   * one does not — the way it throws on a duplicate verb name. A recipe citing
+   * a verb nobody implemented is a dead end whose only symptom is an agent
+   * halfway through a job getting `unknown-verb`, after the navigation and
+   * before the commit, which is the worst place to find out.
+   */
+  steps: FlowStep[];
+}
 
 /** The static half: hand this to a model once and cache it. Contains no data,
  *  no ids, no user, nothing that varies between two people or two minutes. */
@@ -524,9 +897,46 @@ export interface Manifest {
     /** `true` on a `commit` the app can undo. Copied from `Verb.reversible`;
      *  absent makes no claim. */
     reversible?: true;
+    /** `"plan"` on a `commit` that may only be called with the token from the
+     *  `describe` that counted what it is about to touch. Copied from
+     *  `Verb.consumes`; absent means it may be called bare, which is what every
+     *  commit written before this field does.
+     *
+     *  In the cached half because it has to be: a client renders a tool schema
+     *  and a description from this once and caches both, and "you must run the
+     *  `describe` first and pass what it gave you" is a fact an agent should
+     *  read there rather than discover by being refused. The same argument as
+     *  `refuses` and `screen`. */
+    consumes?: "plan";
     args?: Record<string, ArgSpec>;
     refuses?: string[];
   }>;
+  /**
+   * The app's map: every screen it has, declared once.
+   *
+   * Copied from `MountOptions.screens` and in `fingerprint()`, because it is
+   * part of what a cached copy claims about the app — a screen that gained a
+   * url template, or whose `describe` was rewritten, is a screen a model was
+   * briefed about in the app's old words.
+   *
+   * Absent means the app does not describe its screens, NOT that it has one.
+   * Exactly `Snapshot.screen`'s rule, and for the same reason: an app mounted
+   * before this field existed must read identically.
+   *
+   * See `ScreenSpec`, and above all its rule against publishing only the
+   * screens the current user can reach.
+   */
+  screens?: ScreenSpec[];
+  /**
+   * The app's recipes: the multi-step jobs its verbs are usually combined
+   * into. Read and followed by the agent, never called. See `FlowSpec`.
+   *
+   * In `fingerprint()` for the reason `kind` and `screen` are: a flow is
+   * rendered straight into the cached system prompt, so an agent holding the
+   * old manifest is working from the app's old recipe — one that may name a
+   * verb this version has renamed.
+   */
+  flows?: FlowSpec[];
 }
 
 /**
@@ -555,6 +965,99 @@ export interface TabInfo {
   since?: string;
 }
 
+/**
+ * What an approval is being asked about.
+ *
+ * Structurally identical to `@driverkit/agent`'s `CommitRequest`, on purpose
+ * and not by coincidence: the widget's dialog was written against that shape
+ * and is now an implementation of THIS hook, so the two types have to be the
+ * same four fields or the one working confirmation UI in the repository would
+ * need a shim to be reusable. A function that satisfies one satisfies the
+ * other.
+ *
+ * `verb` is the manifest entry rather than the `Verb`, so an approval UI reads
+ * `kind`, `reversible` and `refuses` — the declared facts a person's question
+ * should be worded from — and cannot reach `run`. A gate that could call the
+ * body it is gating is a gate with a way round itself.
+ */
+export interface ApprovalRequest {
+  name: string;
+  args: Record<string, Scalar>;
+  verb: Manifest["verbs"][number];
+  /** The screen as it is right now, so a question can name the selection the
+   *  commit is about to act on. Read before the verb runs. */
+  snapshot: Snapshot;
+}
+
+/**
+ * What an approval hook answers.
+ *
+ * Three outcomes, because there are three things that can happen when you ask
+ * a person: they say yes, they say no, or they are not there.
+ *
+ *   `true` / nothing      allow. Nothing is a yes so a hook may fall through
+ *                         its own cases without accidentally denying.
+ *   `false`               deny, with the core's own wording.
+ *   a string              deny, and the string becomes the hint the agent is
+ *                         told. This is the useful one: "not until finance
+ *                         signs off" is something a model can act on and
+ *                         "declined" is not.
+ *   `{ timedOut: true }`  nobody answered. Distinct from `false`, which is a
+ *                         person deciding; see `approval-timeout` in
+ *                         `RESERVED_REFUSALS`.
+ *
+ * Anything else — an object that is none of these — is treated as a DENIAL and
+ * never as consent. A hook that returns a shape the core does not recognise
+ * has not approved anything, and reading an unknown answer as yes is how a
+ * refactor that changes a return type silently removes the gate.
+ */
+export type Approval = boolean | string | void | { timedOut: true; hint?: string };
+
+/** The hook itself. Async because a human is on the other end of it; a
+ *  synchronous gate can only ever consult a policy, never a person. */
+export type ApprovalHook = (req: ApprovalRequest) => Approval | Promise<Approval>;
+
+/**
+ * What `MountOptions.approve` accepts: a hook, or the word `"unattended"`.
+ *
+ * `"unattended"` is not a hook that returns true. It is the app SAYING OUT
+ * LOUD that commits on this driver run with no person in front of them —
+ * which is a legitimate configuration (a cron job, a test harness, a backend
+ * that has already done its own authorisation) and is also the dangerous one,
+ * so it is written down rather than reached by leaving a field out. See
+ * `MountOptions.approve` for the argument, and `connect()` for the one place
+ * the absence of either becomes an error.
+ */
+export type ApprovalPolicy = ApprovalHook | "unattended";
+
+/**
+ * The approval state a mounted driver publishes.
+ *
+ * Two things live here and they are for two different readers. `policy` is for
+ * whoever is about to publish this driver to the outside — `connect()` reads it
+ * and refuses to publish a driver whose irreversible commits nobody has said
+ * who approves. `hold` is for an approval UI that is NOT the core's hook: the
+ * widget's in-page dialog, or a host's own modal, either of which needs the
+ * core to stop taking calls while the question is open.
+ */
+export interface DriverApproval {
+  /** Which of the three the app declared at `mount()`. */
+  readonly policy: "none" | "hook" | "unattended";
+  /**
+   * Run `ask` with the driver's no-other-calls lock held.
+   *
+   * While it is held, every `call()` on this driver is refused
+   * `approval-pending`. That is what stops an agent from pressing the Approve
+   * button of the dialog that is asking it about something else — see
+   * `RESERVED_REFUSALS` and webmachinelearning/webmcp#288 — and it is why the
+   * widget's dialog goes through here even when the app declared no core hook.
+   *
+   * The verb's own call is not blocked by its own approval: the core clears
+   * the lock before it runs `run`.
+   */
+  hold: <T>(verb: string, ask: () => Promise<T>) => Promise<T>;
+}
+
 export interface MountOptions {
   /** Shown in the manifest. A name a human would recognise. */
   app: string;
@@ -565,6 +1068,113 @@ export interface MountOptions {
   verbs: Verb<never>[] | Verb<Record<string, Scalar>>[] | Verb<any>[];
   /** Called fresh on every read. Must be cheap: it runs on each verb call. */
   visible: () => Snapshot;
+  /**
+   * Every screen the app has, with an optional RFC 6570 url template each.
+   *
+   * Declaring this plus `navigate` is what makes the core offer the reserved
+   * `goto` verb, which is the point of the field: an app stops hand-rolling a
+   * navigation verb under a name of its own — `go`, `navigate`, `open-screen`,
+   * `route-to`, one per app, none of which the next agent recognises — and
+   * gets one whose name, arguments, refusals and tool description are the
+   * same in every app that declares a map.
+   *
+   * Declared WITHOUT `navigate` the list is still published and still useful:
+   * an agent learns what screens exist and what their addresses look like,
+   * which is more than it had. But no `goto` appears, because a navigation
+   * verb the core cannot carry out would be a dead verb sitting in everybody's
+   * cached prefix. `mount()` says so once, out loud, since the likelier of the
+   * two readings is that the hook was forgotten.
+   *
+   * See `ScreenSpec`. Static, and the one rule worth repeating here: publish
+   * the screens the APP has, never the screens this user can reach.
+   */
+  screens?: ScreenSpec[];
+  /**
+   * How the app gets to a screen. The body of the reserved `goto` verb.
+   *
+   * Read only when `screens` is declared, and ignored without it: there is
+   * nowhere for `goto` to go. See `NavigateHook` for why this is the app's
+   * function and not the core's, and `NavigateTarget` for what it is handed.
+   *
+   * An app that would rather keep its own navigation verb simply declares one
+   * named `goto` in `verbs`, and the core leaves it alone — the same rule as
+   * the hoisted `rev` and `screen` arguments in `@driverkit/agent`, where an
+   * app that claims the name keeps it, because the app's meaning wins over
+   * ours.
+   */
+  navigate?: NavigateHook;
+  /**
+   * The app's multi-step recipes, for an agent to read and follow.
+   *
+   * Validated at `mount()` — a flow naming a verb that does not exist throws,
+   * like a duplicate verb name — and then copied into the manifest and
+   * rendered into the cached system prompt. Nothing executes them. See
+   * `FlowSpec`, which carries the argument for why not.
+   */
+  flows?: FlowSpec[];
+  /**
+   * Who approves a `commit`, as a hook or as the word `"unattended"`.
+   *
+   * WHY THIS IS IN THE CORE AND NOT IN A CONSUMER. The confirmation used to
+   * live in `@driverkit/agent`'s `onBeforeCommit`, which `mountWidget` turns
+   * on by default — so a person watching the panel was asked, and an agent
+   * arriving over the relay or MCP called `accept-selected` and it simply ran.
+   * The reserved slug `declined-by-user` existed and nothing on the outside
+   * path could ever emit it. That is the gate being in the wrong layer: a
+   * safety property that holds on one of two paths is not a safety property,
+   * it is a property of one consumer. `call()` is where every path converges —
+   * the in-page loop, a relay frame, a test with no transport — so the gate
+   * belongs here, and from here a denial is the same `declined-by-user`
+   * refusal whichever way the call arrived.
+   *
+   * Called before `run`, for `kind: "commit"` verbs only. `read` and
+   * `describe` are the two kinds that promise no data moves, which is the
+   * promise this gate exists to check; asking about them is how people learn
+   * to click Yes without reading. A commit that declares `reversible` is still
+   * asked about here — the core does not know how large the selection is or
+   * how good the app's undo really is, and the widget's dialog, which does,
+   * answers that question inside its own implementation of this hook.
+   *
+   * NOBODY IS THERE TO ASK: the third answer, and the one this field is shaped
+   * by. A headless agent over MCP has no human, and the three candidate
+   * answers were refuse (safe, and it breaks every automated run), allow (what
+   * happened before this existed, and it is the gap) or make the host DECLARE
+   * which it is. The third is taken, and the precedent is `allow_remote=True`
+   * with no way to identify callers, which raises at construction rather than
+   * serving: three deliberate acts to publish a relay, not one. So here —
+   * absent means absent, in-page behaviour is exactly what it was, and the
+   * declaration is enforced at the moment the driver is published to the
+   * outside. `connect()` refuses to open a stream for a driver that has
+   * `commit` verbs which have not declared `reversible` and no `approve` of
+   * either kind. Three deliberate acts to let an outside agent change data: a
+   * commit verb, a relay connection, and a statement of who approves. The
+   * unsafe case is still reachable — `approve: "unattended"` — but no longer
+   * by accident, which is the whole of what this buys.
+   *
+   * Absent here makes NO claim and changes nothing: an app mounted yesterday
+   * with no `approve` behaves identically in-page, which is why this is not a
+   * required field and why the default is not a gate. The widget keeps its own
+   * dialog for the in-page path either way.
+   */
+  approve?: ApprovalPolicy;
+  /**
+   * How long to wait for an approval before giving up, in milliseconds.
+   *
+   * Absent means wait, and that is the right default rather than a timid one:
+   * the person may be reading the rows the question is about, and a deadline
+   * that denies while they are deciding teaches them that the dialog is a race
+   * instead of a decision. Nothing is lost by waiting — the agent's own
+   * transport deadline fires on its side and tells it the outcome is unknown,
+   * which is true.
+   *
+   * The cost of waiting is that an approval nobody EVER answers leaves the
+   * lock held and every later call refused `approval-pending` until the page
+   * is reloaded. That is safe and it is also a dead app, so an app whose
+   * people are on a phone, or whose gate is a webhook, sets a number here. A
+   * lapsed approval is `approval-timeout`, which says the verb DID NOT RUN —
+   * unlike the relay's `timeout`, which means nobody knows.
+   */
+  approvalTimeout?: number;
 }
 
 export interface Driver {
@@ -574,6 +1184,16 @@ export interface Driver {
   snapshot: () => Snapshot;
   /** Run a verb. Never throws for an expected refusal; see `Result`. */
   call: (name: string, args?: Record<string, Scalar>, opts?: CallOptions) => Promise<Result>;
+  /**
+   * The approval policy this driver was mounted with, and its lock.
+   *
+   * Optional only so that a hand-written driver — which PROTOCOL.md says must
+   * remain possible — still satisfies this interface. A reader treats an
+   * absent one as `policy: "none"`, and `connect()` does. A hand-written
+   * driver that has its own gate says so with
+   * `approval: { policy: "unattended", hold: (_, ask) => ask() }`.
+   */
+  approval?: DriverApproval;
   /** Stop serving. Idempotent. */
   unmount: () => void;
 }
@@ -600,4 +1220,26 @@ export interface CallOptions {
    * answers the wrong question. Omitting it opts out, like `rev`.
    */
   screen?: string;
+  /**
+   * The plan token from the `describe` whose `count` this call was approved
+   * against. Required by a verb declaring `consumes: "plan"`, ignored by every
+   * other verb, and refused as `stale-plan`.
+   *
+   * The third of the three claims, and the one that is NOT optional where it
+   * applies. `rev` and `screen` may be omitted to opt out of their checks,
+   * because an agent that makes no claim about what it was looking at has at
+   * least not made a false one. A plan token cannot work that way: a commit
+   * that may be called without one is a commit whose count guarantee is
+   * advisory, which is the state this field was added to leave. So the verb
+   * declares it statically, in the cached half, and the core refuses the bare
+   * call — with the pairing spelled out in the hint, rather than a validator
+   * at the client rejecting the call before the explanation can reach the
+   * model.
+   *
+   * Checked after `screen` and BEFORE `rev`; `call()` carries the argument for
+   * that order. Opaque: the core minted it and the core reads it, and every hop
+   * in between — both relays, `connect()`, the Python client — forwards the
+   * string untouched, exactly as they do `rev` and `screen`.
+   */
+  plan?: string;
 }

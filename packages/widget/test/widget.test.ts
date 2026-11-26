@@ -17,7 +17,8 @@ import type { Think, ThinkInput } from "../../agent/src/types.ts";
 import { runControls } from "../../agent/src/control.ts";
 import type { RunControlsOptions } from "../../agent/src/control.ts";
 import type { RunControls } from "../../agent/src/types.ts";
-import { COMMIT_ASK_ABOVE, mountWidget, settingsKey, storageKey } from "../src/index.ts";
+import { COMMIT_ASK_ABOVE, PANEL_TITLE, mountWidget, settingsKey, storageKey } from "../src/index.ts";
+import { CSS } from "../src/css.ts";
 import type { Position, WidgetOptions } from "../src/index.ts";
 import { FakeClock, FakeDocument, FakeNode, FakeStorage, FakeWindow, GAP, hide, instant } from "./fake-dom.ts";
 
@@ -119,7 +120,10 @@ test("mounting puts one host element in the container and nothing else", () => {
   // leak out. A library that silently restyles the page it was added to does
   // not get a second chance.
   assert.ok(host.shadow, "the panel was not put in a shadow root");
-  assert.equal(host.one("dk-launcher").textContent, "Ask Contacts");
+  // One word, and not the app's name: see the launcher's own comment. The name
+  // is in the panel header and in the button's accessible name.
+  assert.equal(host.one("dk-launcher").textContent, "Ask");
+  assert.equal(host.one("dk-launcher").attrs.get("aria-label"), "Ask Contacts to do something");
   // Closed by default: a panel that opens itself opens over something the
   // person was reading.
   assert.equal(host.one("dk-wrap").className, "dk-wrap");
@@ -1064,9 +1068,9 @@ test("an explicit x and y is honoured in pixels and kept as a fraction", () => {
   widget.unmount();
 });
 
-test("dragging the header moves the panel", () => {
+test("dragging the grip moves the panel", () => {
   const { widget, host, rect } = place();
-  dragBy(host.one("dk-head"), -300, -100);
+  dragBy(host.one("dk-move"), -300, -100);
   near(rect().left, FAR_X - 300);
   near(rect().top, FAR_Y - 100);
   widget.unmount();
@@ -1085,7 +1089,7 @@ test("a drag is clamped at every edge, during the drag and not only on release",
   ];
   for (const [dx, dy, left, top] of pulls) {
     const { widget, host, rect } = place();
-    const head = host.one("dk-head");
+    const head = host.one("dk-move");
     press(head);
     head.dispatch("pointermove", { pointerId: 7, clientX: 500 + dx, clientY: 500 + dy });
     near(rect().left, left);
@@ -1100,7 +1104,7 @@ test("a release near a corner snaps into it", () => {
   // of the screen is where the app's content is. A magnet is cheaper than
   // asking somebody to be precise with a 380px panel.
   const { widget, host, rect } = place();
-  dragBy(host.one("dk-head"), -40, -30);
+  dragBy(host.one("dk-move"), -40, -30);
   near(rect().left, FAR_X);
   near(rect().top, FAR_Y);
   assert.match(host.className, /dk-snap/);
@@ -1110,7 +1114,7 @@ test("a release near a corner snaps into it", () => {
 test("a release far from a corner stays exactly where it was dropped", () => {
   // Somebody who dragged the panel into the middle of the screen meant it.
   const { widget, host, rect } = place();
-  dragBy(host.one("dk-head"), -300, -100);
+  dragBy(host.one("dk-move"), -300, -100);
   near(rect().left, FAR_X - 300);
   near(rect().top, FAR_Y - 100);
   assert.doesNotMatch(host.className, /dk-snap/);
@@ -1119,7 +1123,7 @@ test("a release far from a corner stays exactly where it was dropped", () => {
 
 test("snapThreshold 0 switches the magnet off", () => {
   const { widget, host, rect } = place({ snapThreshold: 0 });
-  dragBy(host.one("dk-head"), -40, -30);
+  dragBy(host.one("dk-move"), -40, -30);
   near(rect().left, FAR_X - 40);
   near(rect().top, FAR_Y - 30);
   widget.unmount();
@@ -1131,7 +1135,7 @@ test("a snap does not animate for somebody who asked for no animation", () => {
   const win = new FakeWindow(VIEW.width, VIEW.height);
   win.reducedMotion = true;
   const { widget, host } = place({ win });
-  dragBy(host.one("dk-head"), -40, -30);
+  dragBy(host.one("dk-move"), -40, -30);
   assert.doesNotMatch(host.className, /dk-snap/);
   widget.unmount();
 });
@@ -1164,22 +1168,37 @@ test("a press that barely moves is still a click, told apart by distance and not
   widget.unmount();
 });
 
-test("pressing a button inside the header is that button's press, not the start of a drag", () => {
-  // The header is the drag handle and it is also where Close lives. A person
-  // who presses Close and twitches two pixels still meant Close.
+test("the header is not a drag surface, so nothing in it can start a drag", () => {
+  // The header WAS the handle, and that is why an imprecise press near a
+  // button could move the panel: "ignore the controls" is a rule about the
+  // pixels a button covers, and a header is also the gap between two of them
+  // and the padding a pointer lands on when somebody aims at the gear and
+  // misses. The grip is the handle now and the strip is inert, so the failure
+  // has nowhere left to happen. Every press below bubbles to the header
+  // exactly as it does in a browser.
+  for (const where of ["dk-head", "dk-title", "dk-gear", "dk-min"]) {
+    const { widget, host } = place();
+    dragBy(host.one(where), -300, -100);
+    assert.equal(host.style.props.size, 0, `a drag from .${where} moved the panel`);
+    assert.doesNotMatch(host.className, /dk-dragging/);
+    widget.unmount();
+  }
+
+  // And the two buttons in it still do their own jobs after a press that
+  // wandered, which is what the old `controls: "ignore"` guard was for.
   const { widget, host } = place();
-  const close = host.one("dk-x");
-  // Bubbles to the header's handler, exactly as it does in a browser.
-  dragBy(close, -300, -100);
-  assert.equal(host.style.props.size, 0, "a press on Close dragged the panel");
-  close.dispatch("click");
+  dragBy(host.one("dk-gear"), -300, -100);
+  host.one("dk-gear").dispatch("click");
+  assert.match(host.one("dk-wrap").className, /dk-set-open/);
+  dragBy(host.one("dk-min"), -300, -100);
+  host.one("dk-min").dispatch("click");
   assert.equal(host.one("dk-wrap").className, "dk-wrap");
   widget.unmount();
 });
 
 test("a right-click does not start a drag", () => {
   const { widget, host } = place();
-  const head = host.one("dk-head");
+  const head = host.one("dk-move");
   head.dispatch("pointerdown", { pointerId: 7, button: 2, clientX: 500, clientY: 500 });
   head.dispatch("pointermove", { pointerId: 7, clientX: 200, clientY: 200 });
   assert.equal(host.style.props.size, 0);
@@ -1192,7 +1211,7 @@ test("a drag releases the pointer capture it took", () => {
   // moved out from under it. A capture that leaks is a handle that goes on
   // eating the page's pointer events.
   const { widget, host } = place();
-  const head = host.one("dk-head");
+  const head = host.one("dk-move");
   dragBy(head, -100, -40);
   assert.deepEqual(head.captured, []);
   widget.unmount();
@@ -1202,7 +1221,7 @@ test("a cancelled pointer ends the drag rather than sticking the panel to it", (
   // The browser took the pointer for a scroll, or the pen left the tablet.
   // Either way it is not coming back.
   const { widget, host, rect } = place();
-  const head = host.one("dk-head");
+  const head = host.one("dk-move");
   press(head);
   head.dispatch("pointermove", { pointerId: 7, clientX: 200, clientY: 400 });
   head.dispatch("pointercancel", { pointerId: 7 });
@@ -1214,7 +1233,7 @@ test("a cancelled pointer ends the drag rather than sticking the panel to it", (
 
 test("draggable false nails the panel down", () => {
   const { widget, host } = place({ draggable: false, position: "top-left" });
-  dragBy(host.one("dk-head"), 300, 100);
+  dragBy(host.one("dk-move"), 300, 100);
   near(host.getBoundingClientRect().left, GAP);
   widget.unmount();
 });
@@ -1222,7 +1241,7 @@ test("draggable false nails the panel down", () => {
 test("the position survives a remount, per app and per viewer", () => {
   const storage = new FakeStorage();
   const first = place({ storage });
-  dragBy(first.host.one("dk-head"), -300, -100);
+  dragBy(first.host.one("dk-move"), -300, -100);
   const was = first.widget.position()!;
   first.widget.unmount();
 
@@ -1278,7 +1297,7 @@ test("storage that throws on write leaves the panel where it was dragged", () =>
   const storage = new FakeStorage();
   storage.throwOnWrite = true;
   const { widget, host, rect } = place({ storage });
-  dragBy(host.one("dk-head"), -300, -100);
+  dragBy(host.one("dk-move"), -300, -100);
   near(rect().left, FAR_X - 300);
   assert.equal(storage.items.size, 0);
   widget.unmount();
@@ -1312,7 +1331,7 @@ test("persist false remembers nothing and reads nothing", () => {
   const { widget, host, rect } = place({ storage, persist: false });
   // The remembered position is not read, so the default stands.
   near(rect().left, FAR_X);
-  dragBy(host.one("dk-head"), -300, -100);
+  dragBy(host.one("dk-move"), -300, -100);
   near(rect().left, FAR_X - 300, 0.5);
   assert.equal(storage.writes, 0, "a position was remembered after opting out");
   widget.unmount();
@@ -1341,7 +1360,7 @@ test("a window too narrow for the panel pulls it back to the near edge", () => {
 test("a dragged position survives a resize and comes back when there is room", () => {
   const win = new FakeWindow(VIEW.width, VIEW.height);
   const { widget, host, rect } = place({ win });
-  dragBy(host.one("dk-head"), -300, -100);
+  dragBy(host.one("dk-move"), -300, -100);
   const was = widget.position()!;
 
   win.resize(300, 300);
@@ -1443,12 +1462,16 @@ test("a drag of the move button does not cycle the corners", () => {
 
 test("from between corners the first cycle press lands on the nearest one", () => {
   // Rather than jumping across the screen, which is what a strict rotation
-  // would do to somebody who had just dragged the panel somewhere.
-  const { widget, host, rect } = place();
-  dragBy(host.one("dk-head"), -600, -150);
+  // would do to somebody who had just put the panel somewhere.
+  //
+  // Placed by the option rather than by a drag, now that the grip is the only
+  // handle: a drag of the grip swallows the grip's own next click, which is
+  // the point of the test above this one and would hide the one being made
+  // here.
+  const { widget, host, rect } = place({ position: { x: 300, y: 200 } });
   host.one("dk-move").dispatch("click");
   near(rect().left, GAP);
-  near(rect().top, GAP);
+  near(rect().top, FAR_Y);
   widget.unmount();
 });
 
@@ -1521,18 +1544,18 @@ test("positioning survives an element with no style, rect or pointer capture", (
   const host = doc.host();
 
   assert.equal(host.find("dk-launcher").length, 1, "nothing rendered");
-  dragBy(host.one("dk-head"), -300, -100);
+  dragBy(host.one("dk-move"), -300, -100);
   widget.unmount();
 });
 
-test("a drag of the header does not swallow the next click somewhere else", () => {
+test("a drag of the grip does not swallow the next click somewhere else", () => {
   // The suppression is per handle for this reason. Dragging the header fires a
   // click on the HEADER, which nothing listens for, so one shared flag would
   // still be set when the person's next real click landed on a button.
   const { widget, host } = place();
-  dragBy(host.one("dk-head"), -300, -100);
-  host.one("dk-x").dispatch("click");
-  assert.equal(host.one("dk-wrap").className, "dk-wrap", "a stale drag flag ate the Close click");
+  dragBy(host.one("dk-move"), -300, -100);
+  host.one("dk-min").dispatch("click");
+  assert.equal(host.one("dk-wrap").className, "dk-wrap", "a stale drag flag ate the minimise click");
   widget.unmount();
 });
 
@@ -2016,10 +2039,11 @@ test("storage that throws on write still changes the setting for this session", 
   widget.unmount();
 });
 
-test("the settings button does not start a drag, because the header is also the handle", () => {
-  // `controls: "ignore"` is what makes this true, and it is why the gear can
-  // live in the header beside Move and Close at all. A press that starts on a
-  // button belongs to the button, even if the hand moves before it lifts.
+test("a press on the gear never drags, however far the hand moves after it", () => {
+  // The press lands on the gear and the moves arrive at the header, which is
+  // what a browser does with a pointer that wandered out of the button it
+  // started in. Nothing is a handle along that whole path any more, so there
+  // is no drag to swallow the click at the end of it.
   const { widget, host } = place();
   const before = host.getBoundingClientRect();
   const gear = host.one("dk-gear");
@@ -2260,5 +2284,545 @@ test("an outline follows the element when the page scrolls under it", async () =
 
   host.one("dk-stop").dispatch("click");
   await settle();
+  widget.unmount();
+});
+
+// =========================================================================
+// The panel's dialog as an implementation of `MountOptions.approve`.
+//
+// The decision these pin: this dialog stops being the only gate in the system
+// and becomes one implementation of the core's hook. Every option above still
+// decides whether it asks and what it says; what changes is who can call it.
+// An app wires `approve: (req) => panel.approve(req)` and a commit arriving
+// over the relay or MCP renders the same question, with the same count, and a
+// "No" becomes the same `declined-by-user` refusal the in-page loop produces.
+// =========================================================================
+
+/** The forward reference an app has to write, because `mount()` happens before
+ *  the panel that will answer for it exists. This IS the documented wiring. */
+function gatedByPanel(options: Partial<WidgetOptions> = {}, script?: unknown[]) {
+  const doc = new FakeDocument();
+  let turn = 0;
+  let accepted = 0;
+  let rev = 1;
+  let panel: { approve: (req: never) => Promise<unknown> } | undefined;
+  const driver = mount({
+    app: "Contacts",
+    visible: (): Snapshot => ({
+      where: "contacts",
+      rev,
+      rows: [{ id: "c-0" }],
+      selected: ["c-0"],
+      selectedCount: 1000,
+    }),
+    verbs: [
+      { name: "look", kind: "read", describe: "look at the rows", run: () => {} },
+      {
+        name: "accept-selected",
+        kind: "commit",
+        describe: "accept the current selection",
+        run: () => {
+          accepted += 1000;
+          rev++;
+        },
+      },
+    ],
+    approve: (req) => panel!.approve(req as never) as never,
+  });
+  const widget = mountWidget(driver, {
+    think: async () => (script ? (script[turn++] as never) : { text: "hi" }),
+    document: doc,
+    clock: instant,
+    ...options,
+  } as WidgetOptions);
+  panel = widget;
+  return { doc, host: doc.host(), driver, widget, accepted: () => accepted };
+}
+
+test("a commit over the relay renders the panel's own question, with the count off the screen", async () => {
+  // `driver.call()` with no run around it is exactly what a relay frame
+  // becomes. Before the gate moved into the core this ran with nothing in the
+  // way — a live tab, driven from a shell, 425 rows and no question.
+  const { host, driver, accepted } = gatedByPanel();
+
+  const call = driver.call("accept-selected");
+  await settle();
+
+  // The panel opened itself, because a question nobody can see is not a
+  // question — and nobody is at the panel when the agent is in another
+  // process.
+  assert.ok(host.one("dk-wrap").className.includes("dk-open"));
+  // The count comes from `Snapshot.selectedCount`, because there is no run
+  // whose last `describe` could have reported one. That is the one difference
+  // between the two paths and it is unavoidable.
+  assert.match(host.one("dk-ask-q").textContent!, /1,000 rows/);
+
+  host.one("dk-yes").dispatch("click");
+  const out = await call;
+  assert.equal(out.ok, true);
+  assert.equal(accepted(), 1000);
+});
+
+test("saying no to a relay commit refuses it declined-by-user, the slug the outside path could never emit", async () => {
+  const { host, driver, accepted } = gatedByPanel();
+
+  const call = driver.call("accept-selected");
+  await settle();
+  host.one("dk-no").dispatch("click");
+
+  const out = await call;
+  assert.equal(out.ok, false);
+  assert.equal(out.ok === false && out.refused, "declined-by-user");
+  assert.equal(accepted(), 0);
+  assert.match(host.one("dk-ask-said").textContent!, /You said no/);
+});
+
+test("a call that arrives while the panel is asking is refused rather than pressing the Yes", async () => {
+  // The core's lock, end to end through the panel. A second agent — or the
+  // same one — reaching for anything while the question sits in the transcript
+  // is refused `approval-pending`. This is the layer that needs nobody to
+  // remember an attribute: it is true of any approval UI, including a host's
+  // own in the light DOM where `press` could otherwise reach the button.
+  const { host, driver } = gatedByPanel();
+
+  const call = driver.call("accept-selected");
+  await settle();
+  const sneak = await driver.call("look");
+
+  assert.equal(sneak.ok === false && sneak.refused, "approval-pending");
+  host.one("dk-no").dispatch("click");
+  await call;
+  // And released, so one question does not wedge the tab.
+  assert.equal((await driver.call("look")).ok, true);
+});
+
+test("the panel does not ask twice when it is already the core's hook", async () => {
+  // Two questions about one commit is how people learn to click Yes without
+  // reading, which is the failure this panel's own documentation is built
+  // around. So when the driver was mounted with an `approve` hook, the panel
+  // installs no `onBeforeCommit` of its own: the hook is called inside
+  // `driver.call()` for every path, the in-page loop's included. One run, one
+  // commit, one dialog.
+  const { host, widget, accepted } = gatedByPanel({ open: true }, [
+    { calls: [{ id: "b", name: "accept-selected", args: {} }] },
+    { text: "done" },
+  ]);
+
+  await ask(host, "accept them");
+  assert.equal(host.find("dk-ask").length, 1, "one commit produced two questions");
+
+  await allow(host);
+  assert.equal(accepted(), 1000);
+  assert.match(host.find("dk-step")[0]!.textContent!, / · ok/);
+  widget.unmount();
+});
+
+test("confirmCommits false opts the relay path out too, because it is one dialog and one switch", async () => {
+  // The options did not fork. `confirmCommits`, `commitAskAbove` and
+  // `confirmEveryCommit` decide whether this dialog appears, and they decide
+  // it the same way whichever path asked — which is the whole reason the
+  // dialog became an implementation of the hook rather than a second gate
+  // beside it.
+  const { host, driver, accepted } = gatedByPanel({ confirmCommits: false });
+
+  const out = await driver.call("accept-selected");
+
+  assert.equal(host.find("dk-ask").length, 0, "a question was asked after opting out");
+  assert.equal(out.ok, true);
+  assert.equal(accepted(), 1000);
+});
+
+// =========================================================================
+// The launcher.
+// =========================================================================
+
+test("the launcher is one short word, whatever the app is called", async () => {
+  // `Ask Northwind CRM` grew with the app, so the button was a different size
+  // in every app that used it, and it read as an instruction to the person
+  // rather than as a label on a control. The app's name is in the panel header
+  // and in the accessible name, which are the two places it helps.
+  const doc = new FakeDocument();
+  const app = contacts();
+  const widget = mountWidget(app.driver, {
+    think: async () => ({ text: "hi" }),
+    document: doc,
+    clock: instant,
+    title: "A Very Long Application Name Indeed",
+  });
+  const host = doc.host();
+
+  // `title` still overrides it: a host that wants its own word gets it.
+  assert.equal(host.one("dk-launcher").textContent, "A Very Long Application Name Indeed");
+  // And it is ellipsised rather than allowed to stretch the pill, which is the
+  // stylesheet's job below.
+  assert.match(host.one("dk-launcher").attrs.get("aria-label")!, /to do something/);
+  widget.unmount();
+});
+
+test("nothing in the stylesheet can resize the launcher, so no state changes its shape", async () => {
+  // The user's words: "why is the shape changing? make the size and shape
+  // constant oval". A content-sized button changed dimensions with its label
+  // and with the state, and it also MOVED itself — the remembered position is
+  // a fraction of the free space, and the free space is the viewport less the
+  // element's own measured width, so a launcher that grew by thirty pixels
+  // slid by thirty pixels times x.
+  //
+  // Asserted against the stylesheet rather than a layout, because the fake DOM
+  // has no layout: what is pinned is that exactly one rule sizes the launcher
+  // and that the box is fixed, so a later `.dk-busy .dk-launcher { padding: … }`
+  // has to break a named test.
+  // Comments stripped first: one of them quotes `* { box-sizing: content-box }`
+  // and a naive split on `}` would cut the rule in half there.
+  const rules = CSS.replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("}")
+    .map((block) => block + "}")
+    .filter((block) => block.includes(".dk-launcher"));
+
+  const sizing = rules.filter((r) => /\b(width|height|padding|font-size|font:)\s*:/.test(r));
+  assert.equal(sizing.length, 1, `more than one rule sizes the launcher:\n${sizing.join("\n")}`);
+  assert.match(sizing[0]!, /width: var\(--dk-launcher-w\)/);
+  assert.match(sizing[0]!, /height: var\(--dk-launcher-h\)/);
+  // Half the height, so it is a true pill at whatever size a host picks and
+  // never a rounded rectangle at one size and a circle at another.
+  assert.match(sizing[0]!, /border-radius: calc\(var\(--dk-launcher-h\) \/ 2\)/);
+  // The label is clipped rather than allowed to grow the box.
+  assert.match(sizing[0]!, /overflow: hidden/);
+  assert.match(sizing[0]!, /white-space: nowrap/);
+  // And `box-sizing`, because the fixed width must be the whole width: a host
+  // app's inherited `content-box` would otherwise add the padding back on.
+  assert.match(sizing[0]!, /box-sizing: border-box/);
+
+  // The one other rule that mentions it only hides it, which is a state
+  // change that cannot be a size change.
+  const others = rules.filter((r) => r !== sizing[0]);
+  for (const rule of others) assert.match(rule, /display: none/);
+});
+
+// =========================================================================
+// The header: minimise, the grip, and the title.
+// =========================================================================
+
+test("the header button minimises and says so, instead of saying Close", async () => {
+  // The user read "Close" as destroying the conversation and stopped pressing
+  // it, which left them with a panel sitting on top of the rows they had just
+  // asked about. The behaviour was always right; the word was the bug.
+  const { widget, host } = setup();
+  const button = host.one("dk-min");
+
+  assert.notEqual(button.textContent, "Close");
+  assert.match(button.attrs.get("aria-label")!, /minimise/i);
+  // And the label says what survives, because that is the fact the old one
+  // got wrong.
+  assert.match(button.attrs.get("aria-label")!, /conversation is kept/i);
+  assert.match(button.attrs.get("title")!, /reopen/i);
+  // A real button, not a styled glyph with a click handler on it.
+  assert.equal(button.attrs.get("type"), "button");
+
+  button.dispatch("click");
+  assert.equal(host.one("dk-wrap").className, "dk-wrap");
+  // Focus comes back to the launcher, as it does for Escape: a keyboard user
+  // who puts the panel away and is left nowhere has lost their place.
+  assert.equal(host.one("dk-launcher").focused, true);
+  widget.unmount();
+});
+
+test("minimising keeps the transcript and the steps, and reopening is the same conversation", async () => {
+  const { s, widget, host, log } = setup([
+    { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme", limit: 3 } }] },
+    { text: "Three of them." },
+    { text: "Still three." },
+  ]);
+
+  await ask(host, "how many Acme contacts?");
+  assert.match(log().text(), /Three of them\./);
+
+  host.one("dk-min").dispatch("click");
+  // Hidden by a class and nothing else. The alternative — tearing the
+  // transcript down and rebuilding it — is how "minimise" quietly becomes
+  // "close", which is the whole complaint.
+  assert.match(log().text(), /how many Acme contacts\?/);
+  assert.match(log().text(), /Three of them\./);
+  assert.equal(host.find("dk-step").length, 1);
+
+  host.one("dk-launcher").dispatch("click");
+  await ask(host, "and now?");
+  // The model is told what was already said, so reopening lands in the
+  // conversation rather than in a new one that looks like it.
+  const second = s.seen[2]!.messages.map((m) => (m as { text: string }).text).join("\n");
+  assert.match(second, /how many Acme contacts\?/);
+  assert.match(second, /Three of them\./);
+  widget.unmount();
+});
+
+test("a minimised launcher says a conversation is waiting, inside its own 96x40 box", async () => {
+  // Somebody who minimised mid-run has no other signal: the pill looks exactly
+  // like a pill nobody has ever pressed. The indicator therefore lives INSIDE
+  // the pill — a badge on the corner would be an element of a different size,
+  // and the launcher's size is the one thing nothing here may change.
+  const { widget, host } = setup([{ text: "ok" }]);
+  const launcher = host.one("dk-launcher");
+  const dot = host.one("dk-dot");
+  assert.equal(dot.parent, launcher, "the indicator is not inside the launcher");
+
+  // Nothing has been asked, so there is nothing waiting.
+  host.one("dk-min").dispatch("click");
+  assert.equal(host.one("dk-dot").className, "dk-dot");
+  assert.equal(launcher.attrs.get("aria-label"), "Ask Contacts to do something");
+
+  host.one("dk-launcher").dispatch("click");
+  await ask(host, "anything");
+  host.one("dk-min").dispatch("click");
+  assert.match(host.one("dk-dot").className, /dk-dot-on/);
+  // And in words as well as in a dot: a dot is not a thing a screen reader can
+  // read, and the dot itself is `aria-hidden` for exactly that reason.
+  assert.match(launcher.attrs.get("aria-label")!, /conversation is still here/i);
+  assert.equal(dot.attrs.get("aria-hidden"), "true");
+
+  // Gone again once the panel is open, where the transcript is the thing the
+  // person is already looking at.
+  host.one("dk-launcher").dispatch("click");
+  assert.equal(host.one("dk-dot").className, "dk-dot");
+  widget.unmount();
+});
+
+test("the indicator is positioned inside the pill and sizes nothing", async () => {
+  // Asserted against the stylesheet, because the fake DOM has no layout. The
+  // test above this pins that only one rule sizes the launcher; this pins that
+  // the dot cannot become the exception to it — it is absolutely positioned
+  // inside a box the launcher itself establishes.
+  const rules = CSS.replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("}")
+    .map((block) => block + "}");
+  const dot = rules.filter((r) => r.includes(".dk-dot") && r.includes("{"));
+  assert.ok(dot.length >= 1, "the indicator has no rules");
+  assert.match(dot[0]!, /position: absolute/);
+  for (const rule of dot) assert.doesNotMatch(rule, /\.dk-launcher/);
+  const launcher = rules.find((r) => /^\s*\.dk-launcher \{/.test(r))!;
+  assert.match(launcher, /position: relative/);
+});
+
+test("the drag handle is a visible grip glyph, and it is a real button", async () => {
+  // A drag handle has to LOOK like one: six dots is the thing people already
+  // read as "pick this up", where the word "Move" read as a button that
+  // teleports the panel. A real button because it is also the keyboard
+  // control — a handle with nothing focusable in it is a feature only people
+  // with a mouse have.
+  const { widget, host } = setup();
+  const grip = host.one("dk-move");
+  assert.equal(grip.textContent, "⠿");
+  assert.equal(grip.attrs.get("type"), "button");
+  assert.match(grip.attrs.get("aria-label")!, /Move panel/);
+  assert.match(grip.attrs.get("title")!, /Alt \(Option\)/);
+  // First in the strip, so the thing that drags is as far as a 380px header
+  // allows from the things that must not.
+  const head = host.one("dk-head");
+  assert.equal(head.children[0], grip);
+  assert.deepEqual(
+    head.children.map((c) => c.className),
+    ["dk-move", "dk-title", "dk-gear", "dk-min"],
+  );
+  widget.unmount();
+});
+
+test("the panel title is a short word, not the app's name", async () => {
+  // "Northwind CRM" filled the header before the three controls beside it got
+  // a place, and told the person nothing: the app they are looking at is the
+  // whole screen behind the panel. A title says what the panel IS.
+  const { widget, host } = setup();
+  assert.equal(host.one("dk-title").textContent, PANEL_TITLE);
+  assert.equal(PANEL_TITLE, "Assistant");
+  // The app's name is still answerable for, on hover, where it cannot size
+  // anything.
+  assert.equal(host.one("dk-title").attrs.get("title"), "Contacts assistant");
+  widget.unmount();
+});
+
+test("options.title still overrides the header word, as it always did", async () => {
+  const doc = new FakeDocument();
+  const app = contacts();
+  const widget = mountWidget(app.driver, {
+    think: async () => ({ text: "hi" }),
+    document: doc,
+    clock: instant,
+    title: "Copilot",
+  });
+  const host = doc.host();
+  assert.equal(host.one("dk-title").textContent, "Copilot");
+  widget.unmount();
+});
+
+test("a generic title does not take the app's name out of the accessible names", async () => {
+  // The visual title is a word in a box with a width; a screen-reader label is
+  // read in isolation, with none of the context a sighted person gets from the
+  // app around it. So the name goes where it answers a question — what is this
+  // thing reading my screen — and not where it would set a size.
+  const { widget, host, log } = setup();
+  assert.equal(host.one("dk-panel").attrs.get("aria-label"), "Contacts assistant");
+  assert.match(host.one("dk-input").attrs.get("aria-label")!, /Ask Contacts/);
+  assert.match(host.one("dk-input").attrs.get("placeholder")!, /Ask Contacts/);
+  assert.match(host.one("dk-launcher").attrs.get("aria-label")!, /Ask Contacts/);
+  assert.match(log().text(), /things in Contacts/);
+  widget.unmount();
+});
+
+// =========================================================================
+// Clearing the conversation.
+// =========================================================================
+
+test("clear conversation empties the transcript and the step list and starts fresh", async () => {
+  const { s, widget, host, log } = setup([
+    { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme", limit: 3 } }] },
+    { text: "Three." },
+    { text: "Nothing has been said yet." },
+  ]);
+
+  await ask(host, "how many?");
+  assert.equal(host.find("dk-step").length, 1);
+
+  host.one("dk-gear").dispatch("click");
+  host.one("dk-clear").dispatch("click");
+
+  assert.equal(host.find("dk-step").length, 0, "the step list survived");
+  assert.doesNotMatch(log().text(), /how many\?/);
+  assert.doesNotMatch(log().text(), /Three\./);
+  // The greeting comes back, because an empty panel with nothing in it looks
+  // broken and "fresh" is what clearing promises.
+  assert.match(log().text(), /Ask me to do things in Contacts/);
+  // Out of the settings view and back in the conversation, which is the thing
+  // that just changed.
+  assert.equal(host.one("dk-wrap").className, "dk-wrap dk-open");
+  assert.equal(host.one("dk-input").focused, true);
+  // Said out loud too: a panel going empty is a change somebody who cannot see
+  // it has no other way to notice.
+  assert.equal(host.one("dk-status").textContent, "Conversation cleared");
+
+  await ask(host, "what did I just ask?");
+  // And the model is told nothing about the cleared conversation, which is the
+  // only reading of "clear" that is not a lie.
+  assert.equal(s.seen[2]!.messages.length, 1);
+  widget.unmount();
+});
+
+test("clearing abandons a run in flight, through the run's own abort and not a second stop path", async () => {
+  // Clearing the visible history while the loop still holds `messages` would
+  // leave the panel and the model disagreeing about what has been said — and
+  // the model would win, so the next answer would refer to a conversation the
+  // person is looking at the absence of. The existing `AbortController` is
+  // what stops it, because a second stop path could disagree with the first.
+  const { app, s, widget, host, log } = setup([
+    { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme", limit: 5 } }] },
+    () => {
+      host.one("dk-gear").dispatch("click");
+      host.one("dk-clear").dispatch("click");
+      return { calls: [{ id: "b", name: "accept-selected", args: {} }] };
+    },
+    { text: "fresh" },
+  ]);
+
+  await ask(host, "select then accept");
+
+  // The verb after the clear never ran.
+  assert.equal(app.accepted(), 0);
+  // And nothing from the abandoned run landed in the conversation that
+  // replaced it: no steps, no stop note, no history.
+  assert.equal(host.find("dk-step").length, 0);
+  assert.doesNotMatch(log().text(), /Stopped/);
+  assert.doesNotMatch(log().text(), /select then accept/);
+
+  await ask(host, "hello again");
+  assert.equal(s.seen[2]!.messages.length, 1);
+  // The panel is not left busy by the run it abandoned.
+  assert.equal(host.one("dk-wrap").className, "dk-wrap dk-open");
+  widget.unmount();
+});
+
+test("clear conversation asks nothing first, because a lost chat costs one sentence", async () => {
+  // Deliberately not symmetrical with the commit dialog. A confirmation is
+  // worth a click when the thing behind it cannot be undone and cost somebody
+  // something; this one is recoverable by asking again, and a dialog on the
+  // cheap thing is how people learn to click through the dialog on the
+  // expensive one.
+  const { app, widget, host, log } = setup([
+    { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme", limit: 3 } }] },
+    { text: "Three." },
+  ]);
+  await ask(host, "how many?");
+
+  host.one("dk-gear").dispatch("click");
+  host.one("dk-clear").dispatch("click");
+
+  assert.equal(host.find("dk-ask").length, 0, "clearing asked a question");
+  assert.doesNotMatch(log().text(), /how many\?/);
+  // And nothing in the app changed, which is why it is cheap: the steps that
+  // ran stay run.
+  assert.equal(app.accepted(), 0);
+  widget.unmount();
+});
+
+test("clear conversation is the destructive item at the bottom of the settings list", async () => {
+  // Last, below four preferences, because a destructive action next to a
+  // speed radio is one somebody hits while reaching for something else. And
+  // marked in the commit colour, which already means "this changes something
+  // you cannot take back" everywhere else in this panel — a second vocabulary
+  // for danger would weaken the first.
+  const { widget, host } = setup();
+  const rows = host.one("dk-settings").children.map((c) => c.className);
+  assert.deepEqual(rows[rows.length - 1], "dk-done");
+  assert.match(rows[rows.length - 2]!, /dk-set-row/);
+  assert.equal(host.one("dk-clear").parent, host.one("dk-settings").children[rows.length - 2]);
+  assert.match(host.one("dk-clear").textContent!, /Clear conversation/);
+
+  const rule = CSS.replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("}")
+    .map((block) => block + "}")
+    .find((block) => /^\s*\.dk-clear \{/.test(block))!;
+  assert.match(rule, /var\(--dk-commit\)/);
+  widget.unmount();
+});
+
+test("clearing twice over, and clearing an empty panel, are both nothing to worry about", async () => {
+  // The era counter has to be a counter and not a flag: two clears during one
+  // run both have to invalidate it, and the second must not resurrect what the
+  // first threw away.
+  const { widget, host, log } = setup([{ text: "one" }, { text: "two" }]);
+  host.one("dk-gear").dispatch("click");
+  host.one("dk-clear").dispatch("click");
+  host.one("dk-gear").dispatch("click");
+  host.one("dk-clear").dispatch("click");
+  assert.equal(host.find("dk-note").length, 1, "the greeting is in there more than once");
+
+  await ask(host, "still working?");
+  assert.match(log().text(), /one/);
+  widget.unmount();
+});
+
+test("Escape still closes the panel from inside the settings view, clear button and all", async () => {
+  // The panel's one escape hatch keeps working wherever focus is, including
+  // from the row that was added below everything else.
+  const { widget, host } = setup();
+  host.one("dk-gear").dispatch("click");
+  const e = host.one("dk-clear").dispatch("keydown", { key: "Escape" });
+  assert.equal(host.one("dk-wrap").className, "dk-wrap");
+  assert.equal(e.defaultPrevented, true);
+  assert.equal(host.one("dk-launcher").focused, true);
+  widget.unmount();
+});
+
+test("prose the model had already produced does not land in the conversation that replaced it", async () => {
+  // An abort stops the loop at its next await, so a turn that was already on
+  // its way back can still arrive after the clear. The panel is fresh by then
+  // and an answer to a question nobody can see is worse than no answer.
+  const { widget, host, log } = setup([
+    () => {
+      host.one("dk-gear").dispatch("click");
+      host.one("dk-clear").dispatch("click");
+      return { text: "late words about a conversation that is gone" };
+    },
+    { text: "ok" },
+  ]);
+
+  await ask(host, "say something");
+  assert.doesNotMatch(log().text(), /late words/);
+  assert.equal(host.find("dk-me").length, 0);
   widget.unmount();
 });

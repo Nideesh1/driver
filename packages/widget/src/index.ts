@@ -1,7 +1,10 @@
 // `COMMIT_ASK_ABOVE` as well as `mountWidget`, because a host overriding
 // `commitAskAbove` is making a judgement about its own undo and should be able
 // to see — and name in its own help text — the number it is replacing.
-export { COMMIT_ASK_ABOVE, mountWidget } from "./widget.ts";
+// `PANEL_TITLE` alongside, for a host that wants to name the default header
+// word in its own help text or reuse it — the same reason `COMMIT_ASK_ABOVE`
+// is out here rather than buried.
+export { COMMIT_ASK_ABOVE, PANEL_TITLE, mountWidget } from "./widget.ts";
 export type { RunControlsFactory, Widget, WidgetOptions } from "./widget.ts";
 export { CSS, SPOT_CSS } from "./css.ts";
 // `settingsKey` for the same reason as `storageKey`: a host app offering a

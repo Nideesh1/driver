@@ -42,7 +42,7 @@ from typing import Any, Mapping, Sequence
 
 from .client import Driverkit
 from .render import render_result, render_snapshot
-from .types import ArgSpec, Manifest, Tab, VerbSpec
+from .types import ArgSpec, FlowSpec, Manifest, ScreenSpec, Tab, VerbSpec
 
 __all__ = [
     "READ_SCREEN",
@@ -116,6 +116,27 @@ _KIND_NOTE = {
 #:
 #: It still says the data changes, because it does. ``reversible`` is a claim
 #: that there is a way back, not that nobody minds. Verbatim from the TS half.
+#: ``consumes: "plan"`` folded into the description.
+#:
+#: In the cached half for exactly the reason ``refuses`` and ``screen`` are: the
+#: point is that the bare call is never made. A model that learns the pairing
+#: here runs the ``describe`` first and keeps the token; a model that learns it
+#: from a refusal has already spent a round trip, and on a commit it has spent
+#: it in front of a person waiting for an answer.
+#:
+#: It says what the token is FOR and not merely that it is required, because
+#: "pass the plan" reads as ceremony and gets dropped, while "the number you
+#: read is the number that moves" is the reason it exists. Verbatim from the TS
+#: half.
+_PLAN_NOTE = (
+    "REQUIRES A PLAN. This acts on the selection, so it may only be called with the `plan` "
+    "token that the app's `describe` verb returned beside its `count`. Run that describe, read "
+    "the count, check it is the number the person asked for, and pass the `plan` straight back "
+    "here. If anything has moved the selection in between — the person ticked a row, the "
+    "list paged, data arrived — this is refused as `stale-plan` and the refusal names both "
+    "counts. That is the point of the token: the number you read is the number that moves."
+)
+
 _COMMIT_REVERSIBLE_NOTE = (
     "COMMIT (reversible): this changes data, and the app says the change can be undone. "
     "Still a change the person will see, so do not call it to find out what it does; if it "
@@ -223,6 +244,28 @@ def verb_tool(verb: VerbSpec) -> dict[str, Any]:
             ),
         }
 
+    # Hoisted like `rev` and `screen`, with one difference: ONLY onto a verb
+    # that declares `consumes`. Those two are claims any verb can make, so they
+    # go on everything; a plan token means nothing to a verb that does not
+    # consume one, and adding the property to every tool in every app would move
+    # every cached prompt prefix in the world for a feature those apps do not
+    # use. That prefix is the cost argument the library is built on.
+    #
+    # NOT in `required`, although the core refuses the call without it, and that
+    # is deliberate. `required` moves the failure into the client's validator,
+    # where the refusal's hint — which names both counts and spells out the
+    # pairing — never reaches the model. The schema stays permissive and the
+    # core is strict; the description says it is required.
+    if verb.consumes == "plan" and "plan" not in properties:
+        properties["plan"] = {
+            "type": "string",
+            "description": (
+                "Required. The `plan` token from the `describe` verb that counted this "
+                "selection, passed back exactly as it was given. Without it the call is "
+                "refused as `stale-plan`, and so is a token taken before the selection moved."
+            ),
+        }
+
     description = [verb.describe]
     if verb.kind == "commit" and verb.reversible:
         # Checked before the table, so a reversible commit reads differently
@@ -237,8 +280,12 @@ def verb_tool(verb: VerbSpec) -> dict[str, Any]:
         # nothing: this server does not manufacture a safety claim the app did
         # not make, in either direction.
         description.append(_KIND_NOTE[verb.kind])
-    # Third: what a verb does to the world outranks where it works, and both
-    # outrank the mechanics.
+    # Third, above `screen`, because HOW a verb may be called outranks WHERE: a
+    # model that goes to the right screen and calls the commit bare has still
+    # lost the turn, and this is the sentence that stops it. Both still outrank
+    # the mechanics.
+    if verb.consumes == "plan":
+        description.append(_PLAN_NOTE)
     if verb.screen:
         description.append(_screen_note(verb.screen))
     description.append(_RESULT_NOTE)
@@ -314,6 +361,87 @@ def render_tabs(tabs: list[Tab], current: str) -> str:
     return "\n".join(lines)
 
 
+
+def _screens_note(screens: Sequence[ScreenSpec]) -> str:
+    """The app's map, rendered for the model.
+
+    ``Manifest.screens`` is the static list of every screen the app has, so
+    this belongs in the instructions a client prepends once rather than in any
+    turn's tail. What an agent could not do before the field existed is learn
+    that a screen *exists* without standing on it: ``Snapshot.screen`` says
+    where it is and ``Verb.screen`` says where a verb works, and between them
+    there was still no way to find out that a companies list is in there
+    somewhere. The worked example closed that gap by pasting a prose screen-map
+    into ``instructions`` — the same map the app's own route table already had,
+    written a second time in English with nothing checking that the two agree.
+
+    The sentence about it being the same for every user is not padding. It is
+    the one thing a model cannot tell by looking: a list that might have been
+    filtered for this person is a list whose absences mean nothing. See
+    ``ScreenSpec``, which forbids filtering it. Verbatim from the TS half.
+    """
+    lines = [
+        "THE SCREENS THIS APP HAS. The same screens for every user, always \u2014 a screen listed "
+        "here exists whether or not you have been to it. Only which one is LIVE changes, and "
+        "that is the `screen` line of every screen you read. If you cannot get to one of "
+        "these, the app will tell you why when you try; it is never missing from this list."
+    ]
+    for screen in screens:
+        needs = list(screen.args.keys())
+        line = f"- `{screen.id}`: {screen.describe}"
+        if screen.url:
+            line += f" Address: `{screen.url}`."
+        if needs:
+            line += " Needs: " + ", ".join(f"`{n}`" for n in needs) + "."
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _render_flow(flow: FlowSpec) -> str:
+    """One flow, rendered as the recipe it is.
+
+    The id first and the ``describe`` on the same line, because the
+    ``describe`` is what a model picks a flow on — Microsoft's finding on
+    selection across tool groups is that the choice is made "based on the
+    plugin's description, not on any of the individual functions" — and the
+    steps are what it follows once it has picked. A ``section`` is printed once
+    where it changes rather than on every step. Verbatim from the TS half.
+    """
+    lines = [f"`{flow.id}` \u2014 {flow.describe}"]
+    section: str | None = None
+    for i, step in enumerate(flow.steps):
+        if step.section and step.section != section:
+            lines.append(f"  ({step.section})")
+        section = step.section
+        lines.append(f"  {i + 1}. `{step.verb}` \u2014 {step.hint}")
+    return "\n".join(lines)
+
+
+def _flows_note(flows: Sequence[FlowSpec]) -> str:
+    """The app's flows, rendered for the model.
+
+    THE SENTENCE THAT MATTERS is the one saying there is no tool that runs a
+    flow. A model handed a list of numbered steps will look for the button, and
+    not finding one it may well decide the flow is unavailable; being told that
+    following the steps IS the mechanism, and why, is what turns a list into an
+    instruction. The why is honest and is the design: a flow that executed
+    internally could not adapt when step three found the record already
+    accepted, and the agent would get back an ``ok`` that told it nothing.
+    Apple's app skills say the same thing about themselves — "Skills don't
+    enforce deterministic behavior, and Siri doesn't run the listed intents in
+    sequence." Verbatim from the TS half.
+    """
+    return (
+        "THE JOBS THIS APP SAYS ITS VERBS ARE USUALLY COMBINED INTO. Each one is a recipe for "
+        "YOU to carry out with the verbs you already have. **There is no tool that runs a "
+        "flow**, and that is deliberate: following the steps yourself means you see what each "
+        "one actually returned and can change course, which something running them for you "
+        "could not. Take the steps in order, read what each verb reports before the next, and "
+        "depart from the recipe when the screen says something it did not expect \u2014 then say so."
+        "\n\n" + "\n\n".join(_render_flow(f) for f in flows)
+    )
+
+
 def instructions_for(manifest: Manifest) -> str:
     """The server instructions an MCP client prepends to its system prompt.
 
@@ -334,7 +462,49 @@ def instructions_for(manifest: Manifest) -> str:
         "see it \u2014 DESCRIBE changes what is selected and reports a count, COMMIT "
         "changes data and may be irreversible. Never commit on a selection whose count you "
         "have not read.",
+        # The other half of "never commit on a count you have not read", which
+        # that sentence could only ever ask for. A count read and then acted on
+        # a moment later is not a count of the rows that moved: the person can
+        # tick a row between the two calls. A commit that says `consumes:
+        # "plan"` is one the core will not let that happen to, and this is where
+        # an agent arriving over MCP learns the pairing rather than meeting it
+        # as a refusal.
+        "A COMMIT whose description says REQUIRES A PLAN takes the `plan` token that the "
+        "`describe` verb returned beside its `count`. Pass it straight back, do not reuse one "
+        "and do not keep one for later: a plan is good for one commit and only while nothing "
+        "has moved the selection. `stale-plan` means the rows changed under you and names both "
+        "counts — the one you were shown and the one there is now — so run the "
+        "describe again, read the new number and say it before committing to it.",
+        # The consent half of the safety story, which used to be missing from
+        # this text because it was missing from this path: the confirmation
+        # lived in the in-page loop, so a person watching the widget was asked
+        # and an agent arriving here was not. It is in the core's `call()` now,
+        # so every one of these three answers is reachable from here — and the
+        # last sentence is the one that matters. An agent that is refused a
+        # commit and then presses the page's own Approve button has not been
+        # approved by anybody; see webmachinelearning/webmcp#288, where exactly
+        # that happened and the receipt said "approved by you".
+        "A COMMIT may be put to the person first. `declined-by-user` means they said no: do "
+        "not retry it, do not try another verb or control that does the same thing, and do "
+        "not press an approve or confirm control \u2014 pressing it yourself is not consent and "
+        "is refused anyway. `approval-pending` means somebody is being asked right now and "
+        "nothing ran; wait. `approval-timeout` means nobody answered and the verb DID NOT "
+        "RUN, which is not the same as the transport `timeout`, where the call was accepted "
+        "and the outcome is unknown.",
     ]
+    # The map and the recipes, between the library's rules and the app's own
+    # words. Both are pure functions of the static manifest, so this text stays
+    # byte-identical for every session of every user — which is the only reason
+    # either of them is affordable. They go AFTER the safety rules, because a
+    # recipe is a thing to do within those rules and not an exception to them,
+    # and BEFORE `instructions`, because whichever text is last is the one a
+    # model follows when two of them disagree and the app's own voice should
+    # outrank a list the library rendered.
+    if manifest.screens:
+        parts.append(_screens_note(manifest.screens))
+    if manifest.flows:
+        parts.append(_flows_note(manifest.flows))
+
     # The app's own briefing, last. This is the field that closes the one gap
     # where driverkit's two paths disagreed: a widget could be handed
     # `instructions` through `drive()` and an agent arriving here could not, so
@@ -452,5 +622,22 @@ class TabTools:
             if isinstance(raw_screen, str) and raw_screen.strip():
                 screen = raw_screen.strip()
 
-        result = self.client.call(self.tab, verb.name, args, rev=rev, screen=screen)
+        # And so is `plan`, by the same rule, and only on a verb that consumes
+        # one — that is the only verb whose tool schema offered it, so a `plan`
+        # key on any other is either an argument the app named or a mistake the
+        # core should be allowed to see.
+        #
+        # Anything that is not a non-empty string is dropped rather than sent,
+        # as with `screen`. The core then refuses as `stale-plan` with the
+        # pairing spelled out, which is a better answer than a `bad-argument`
+        # about the shape of a field the model should not have invented.
+        plan = None
+        if verb.consumes == "plan" and "plan" not in verb.args:
+            raw_plan = args.pop("plan", None)
+            if isinstance(raw_plan, str) and raw_plan.strip():
+                plan = raw_plan.strip()
+
+        result = self.client.call(
+            self.tab, verb.name, args, rev=rev, screen=screen, plan=plan
+        )
         return ToolOutcome(render_result(result, verb.kind), is_error=not result.landed)

@@ -28,7 +28,14 @@
     "test": "npm run build && node --experimental-strip-types --test packages/*/test/*.test.ts"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^22.20.7",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "aria-query": "^5.3.2",
+    "dom-accessibility-api": "^0.7.1",
+    "uri-templates": "^0.2.0",
+    "zod": "^4.6.7"
   }
 }

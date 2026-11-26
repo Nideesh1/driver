@@ -34,6 +34,14 @@ function app() {
     verbs: [
       {
         name: "set-lane",
+        // Declared, and it has to be: `connect()` refuses a manifest with a
+        // verb that never said what it does, because the core's gate fires on
+        // `kind: "commit"` and cannot see a silent verb at all. `reversible`
+        // is the honest answer for this one — a lane move is undone by moving
+        // it back — and it is what keeps this toy publishable without an
+        // approver, exactly as it was before either check existed.
+        kind: "commit",
+        reversible: true,
         describe: "move a descent to a lane",
         args: {
           id: { type: "string", describe: "descent id" },
@@ -746,5 +754,340 @@ test("anonymous is off by default, so a page that forgot its token gets a 401 no
   const { conn, es, store } = wire(app().driver);
   assert.equal(store.map.get("driverkit:anon:toy"), undefined);
   assert.ok(!es.last().url.includes("dk_token"));
+  conn.disconnect();
+});
+
+// =========================================================================
+// Publishing a driver requires a declared approval policy.
+//
+// The gap these pin: the confirmation used to live in the in-page loop's
+// `onBeforeCommit`, which the widget defaults on, so a person watching the
+// panel was asked and an agent on the other end of THIS stream was not. The
+// gate is in `mount()`'s `call()` now, but a gate the app never installed is
+// still no gate — so the declaration is required at this one act, the act that
+// makes the app reachable by something that is not in the room. The precedent
+// is PROTOCOL.md's own: a relay with remote access and no way to identify
+// callers refuses to start rather than serving.
+// =========================================================================
+
+/** The same toy app, with one irreversible commit on it. */
+function committing(options: Record<string, unknown> = {}) {
+  let rev = 1;
+  return mount({
+    app: "toy",
+    visible: (): Snapshot => ({ where: "descents", rev }),
+    verbs: [
+      {
+        name: "accept-all",
+        kind: "commit",
+        describe: "accept every descent",
+        run: () => {
+          rev++;
+        },
+      },
+    ],
+    ...options,
+  });
+}
+
+test("connecting a driver whose commits nobody approves is refused, with the fix named", () => {
+  // Three deliberate acts to let an outside agent change data: a commit verb,
+  // a relay connection, and a statement of who approves. This is the third one
+  // missing, and it throws rather than connecting-and-hoping, because the
+  // thing on the other end of the stream will not ask anybody.
+  assert.throws(
+    () => wire(committing()),
+    (err: Error) => {
+      assert.match(err.message, /refusing to connect/);
+      // The verb is named, because an author with forty verbs needs to know
+      // which one put them here.
+      assert.match(err.message, /accept-all/);
+      // And both ways out are spelled, including the unsafe one. A refusal
+      // that does not say what to do instead is a refusal people route around.
+      assert.match(err.message, /approve: \(req\)/);
+      assert.match(err.message, /"unattended"/);
+      return true;
+    },
+  );
+});
+
+test("an approval hook is enough to publish, and so is saying `unattended` out loud", () => {
+  // The unsafe configuration stays reachable — a cron-driven tab is a real
+  // thing — and stops being reachable by accident. One word is the whole
+  // difference, which is the trade this makes.
+  const hooked = wire(committing({ approve: () => true }));
+  hooked.conn.disconnect();
+  const unattended = wire(committing({ approve: "unattended" }));
+  unattended.conn.disconnect();
+});
+
+test("an app with no ungated commits connects exactly as it did before", () => {
+  // Two cases, and both are the compatibility claim. A driver with no `commit`
+  // verb at all publishes nothing that can change data, and a commit that
+  // declared `reversible` has said there is a way back — the same line the
+  // widget's dialog draws, for the same reason: an absent `reversible` makes no
+  // claim, and a commit that has not said there is a way back is treated as
+  // one that has not got one.
+  const plain = wire(app().driver);
+  plain.conn.disconnect();
+
+  let rev = 1;
+  const undoable = mount({
+    app: "toy",
+    visible: (): Snapshot => ({ where: "descents", rev }),
+    verbs: [
+      {
+        name: "set-page-size",
+        kind: "commit",
+        reversible: true,
+        describe: "change how many rows a page shows",
+        run: () => {
+          rev++;
+        },
+      },
+    ],
+  });
+  const fine = wire(undoable);
+  fine.conn.disconnect();
+});
+
+test("a hand-written driver can declare the policy itself, because PROTOCOL.md says it may exist", () => {
+  // `Driver.approval` is optional precisely so a thirty-line page loop still
+  // satisfies the interface. An absent one reads as "nothing declared", and a
+  // hand-written driver that has its own gate says so in one line rather than
+  // being locked out of its own relay.
+  const hand: Driver = {
+    manifest: () => committing().manifest(),
+    snapshot: () => ({ where: "descents", rev: 1 }),
+    call: async () => ({ ok: true, snapshot: { where: "descents", rev: 1 } }),
+    unmount: () => {},
+    approval: { policy: "unattended", hold: (_verb, ask) => ask() },
+  };
+  const conn = wire(hand);
+  conn.conn.disconnect();
+
+  const { approval: _dropped, ...undeclared } = hand;
+  assert.throws(() => wire(undeclared as Driver), /refusing to connect/);
+});
+
+// =========================================================================
+// Publishing a driver requires every verb to say what it does.
+//
+// The other half of the same gap. The gate fires on `kind === "commit"` and
+// the check above counts only DECLARED commits, so a verb with no `kind` that
+// changes data went out to an outside agent with no gate and nobody
+// complaining. In-page leniency is deliberate and stays — an absent `kind`
+// makes no claim, and a half-written app must still mount — but publishing is
+// the act that hands the ability to change data to another process, and it is
+// already the place this library demands a declaration instead of inferring
+// one.
+// =========================================================================
+
+/** The toy app with one verb that never said what it does. */
+function silent(options: Record<string, unknown> = {}) {
+  let rev = 1;
+  const lanes = new Map([["01a2", "pruning"]]);
+  return mount({
+    app: "toy",
+    visible: (): Snapshot => ({
+      where: "descents",
+      rev,
+      rows: [...lanes].map(([id, lane]) => ({ id, lane })),
+    }),
+    verbs: [
+      { name: "read-lanes", kind: "read", describe: "list the lanes", run: () => {} },
+      {
+        // No `kind`. It empties the board, which is the point: nothing about
+        // this declaration says so, and nothing in the library could have
+        // guessed it from the name.
+        name: "clear-board",
+        describe: "remove every descent",
+        run: () => {
+          lanes.clear();
+          rev++;
+        },
+      },
+    ],
+    ...options,
+  });
+}
+
+test("connecting a driver with a verb that declares no kind is refused, and the verb is named", () => {
+  // The hole this closes: `clear-board` is not a `commit` as far as the core
+  // can tell, so the gate never fires for it, so an agent in another process
+  // emptied the board with nothing in front of it and no warning anywhere.
+  assert.throws(
+    () => wire(silent()),
+    (err: Error) => {
+      assert.match(err.message, /refusing to connect/);
+      // Named, because an author with forty verbs needs to know which one.
+      assert.match(err.message, /clear-board/);
+      // And only that one. A verb that declared `read` is not an offender and
+      // listing it would teach the author to skim the list.
+      assert.doesNotMatch(err.message, /read-lanes/);
+      // Both ways out, the same shape as the commit refusal: the honest fix
+      // first, then the one that says the risk out loud.
+      assert.match(err.message, /kind: "read" \| "describe" \| "commit"/);
+      assert.match(err.message, /"unattended"/);
+      return true;
+    },
+  );
+});
+
+test("an approval hook does NOT satisfy the kind check, because the gate never sees a silent verb", () => {
+  // The narrower rule that was available and is unsound: "require kinds only
+  // when no approver was declared". A hook covers `kind: "commit"` and nothing
+  // else, so a driver with a perfectly good approver and one silent verb
+  // publishes that verb ungated — which is precisely the configuration the
+  // narrow rule would wave through. Hence the check is independent of the
+  // policy, with one exception, below.
+  assert.throws(() => wire(silent({ approve: () => true })), /clear-board/);
+});
+
+test("`approve: \"unattended\"` satisfies it, because the risk is already accepted out loud", () => {
+  // Not an inconsistency. On an unattended driver a verb that declared
+  // `commit` runs with nobody in front of it too, so there is nothing left for
+  // this check to protect — and a check an unattended host cannot satisfy is a
+  // check that gets deleted rather than met. It reuses the core's existing
+  // typed opt-out rather than inventing a second one.
+  const conn = wire(silent({ approve: "unattended" }));
+  conn.conn.disconnect();
+});
+
+test("in-page `mount()` still takes an undeclared kind and still runs it, unchanged", () => {
+  // The leniency is the documented behaviour of `Verb.kind` and it is not
+  // being tightened: an app being written, with three verbs whose kinds nobody
+  // has decided yet, must still mount and must still work when the person at
+  // the keyboard drives it. Nothing is published by mounting. This test is the
+  // guard against someone reading the refusal above and moving it one layer in.
+  const driver = silent();
+  assert.equal(driver.manifest().verbs.find((v) => v.name === "clear-board")!.kind, undefined);
+  return driver.call("clear-board").then((result) => {
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.ok ? result.snapshot.rows : null, []);
+  });
+});
+
+test("a hand-written driver whose manifest declares its kinds publishes as it always did", () => {
+  // PROTOCOL.md says a hand-written driver must remain possible, and this
+  // check reads the manifest rather than anything `mount()` owns, so the same
+  // rule applies to it by the same route. Declaring the kinds is the whole of
+  // what it has to do.
+  const hand: Driver = {
+    manifest: () => ({
+      version: "x",
+      app: "hand",
+      verbs: [{ name: "look", kind: "read", describe: "look at it" }],
+    }),
+    snapshot: () => ({ where: "descents", rev: 1 }),
+    call: async () => ({ ok: true, snapshot: { where: "descents", rev: 1 } }),
+    unmount: () => {},
+  };
+  const conn = wire(hand);
+  conn.conn.disconnect();
+
+  const mute: Driver = { ...hand, manifest: () => ({ version: "x", app: "hand", verbs: [{ name: "look", describe: "look at it" }] }) };
+  assert.throws(() => wire(mute), /refusing to connect/);
+});
+
+/** A toy whose commit demands the receipt its describe hands out, and whose
+ *  selection can be moved from outside — which is the person at the keyboard,
+ *  the case the plan token exists for. */
+function planned() {
+  const ids = ["01a2", "01b7", "01c9"];
+  let rev = 1;
+  const selected = new Set(["01a2", "01b7"]);
+  let accepted = 0;
+  const driver = mount({
+    app: "toy",
+    visible: (): Snapshot => ({
+      where: "descents",
+      rev,
+      rows: ids.map((id) => ({ id })),
+      selected: [...selected],
+      selectedCount: selected.size,
+      selectionId: [...selected].sort().join("|"),
+    }),
+    verbs: [
+      {
+        name: "select-all",
+        kind: "describe",
+        describe: "select every descent",
+        run: () => {
+          for (const id of ids) selected.add(id);
+          rev += 1;
+          return { count: selected.size };
+        },
+      },
+      {
+        name: "accept-selected",
+        kind: "commit",
+        reversible: true,
+        consumes: "plan",
+        describe: "accept the selection",
+        run: () => {
+          accepted += selected.size;
+          rev += 1;
+        },
+      },
+    ],
+  });
+  return { driver, accepted: () => accepted, tick: (id: string) => void (selected.add(id), (rev += 1)) };
+}
+
+test("a plan crosses the relay in both directions, and a stale one is refused in the page", async () => {
+  // The claim this file exists to check for `rev` and `screen`, now for the one
+  // field where dropping it costs the most: a commit that requires a token and
+  // is reached by a hop that loses it is refused forever, and the only symptom
+  // is a `stale-plan` nobody can explain. So both directions are pinned — the
+  // minted token riding out on the `result`, and the agent's claim riding in on
+  // the `call`.
+  const toy = planned();
+  const { conn, es, http } = wire(toy.driver);
+  es.last().open();
+
+  es.last().deliver({ t: "call", id: "c-1", name: "select-all" });
+  await waitFor(() => http.of("result").length === 1);
+  const counted = http.of("result")[0]!.body.result;
+  assert.equal(counted.count, 3);
+  assert.match(counted.plan, /^dkp1\./);
+
+  // The person ticks something — except everything is already selected here, so
+  // the honest version is a `rev` move, which is what a click does.
+  toy.tick("01c9");
+
+  es.last().deliver({ t: "call", id: "c-2", name: "accept-selected", plan: counted.plan });
+  await waitFor(() => http.of("result").length === 2);
+  const stale = http.of("result")[1]!.body.result;
+  assert.equal(stale.refused, "stale-plan");
+  assert.match(stale.hint, /You were shown 3/);
+  assert.equal(toy.accepted(), 0, "a selection nobody counted was accepted over the relay");
+
+  // And a fresh one goes through, so the refusal above is the check working
+  // rather than the field being dropped on this hop.
+  es.last().deliver({ t: "call", id: "c-3", name: "select-all" });
+  await waitFor(() => http.of("result").length === 3);
+  const fresh = http.of("result")[2]!.body.result;
+  es.last().deliver({ t: "call", id: "c-4", name: "accept-selected", plan: fresh.plan });
+  await waitFor(() => http.of("result").length === 4);
+  assert.equal(http.of("result")[3]!.body.result.ok, true);
+  assert.equal(toy.accepted(), 3);
+  conn.disconnect();
+});
+
+test("a commit that requires a plan and arrives without one is refused, not run", async () => {
+  // The page must not invent one. There is nothing it could invent that would
+  // mean anything — only the core knows what a token binds — and a hop that
+  // filled the field in from what it could see would turn the guarantee into
+  // the thing it replaced.
+  const toy = planned();
+  const { conn, es, http } = wire(toy.driver);
+  es.last().open();
+
+  es.last().deliver({ t: "call", id: "c-1", name: "accept-selected" });
+  await waitFor(() => http.of("result").length === 1);
+  const out = http.of("result")[0]!.body.result;
+  assert.equal(out.refused, "stale-plan");
+  assert.equal(toy.accepted(), 0);
   conn.disconnect();
 });

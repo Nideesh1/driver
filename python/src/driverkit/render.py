@@ -206,6 +206,23 @@ def render_result(result: Result, kind: str | None = None) -> str:
                 "\nThis is what a commit verb acting on the current selection would affect. "
                 "Check it is the number you expect before committing."
             )
+        if result.plan is not None:
+            # Rendered directly under the count, because it is the count's
+            # receipt and means nothing apart from it. Without this line the
+            # token exists in the Result and the model never sees it, so every
+            # commit that requires one is refused -- the field would be plumbing
+            # that reaches everywhere except the one reader that has to use it.
+            #
+            # Verbatim with the TS half. The two renderers say the same words to
+            # the same model, and a difference between them is a difference in
+            # what an agent is told depending on how it connected.
+            head += (
+                f"\nplan: {result.plan}"
+                "\nPass this `plan` back to the commit verb that acts on this selection. It is "
+                "the receipt for the count above: if anything moves the selection first the "
+                "commit is refused as `stale-plan` rather than acting on rows nobody counted. "
+                "One commit per plan."
+            )
     else:
         head = f"refused: {result.refused}"
         if result.hint:

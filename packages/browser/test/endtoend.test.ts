@@ -44,11 +44,15 @@ function app(name = "toy") {
     verbs: [
       {
         name: "select-matching",
-        describe: "select every descent in a lane",
-        args: { lane: { type: "string", describe: "lane to match" } },
         // A `describe` verb: it resolves the predicate and REPORTS the count,
         // and a separate `commit` verb acts on the selection. Two calls, so a
-        // number is always seen before data moves.
+        // number is always seen before data moves. Declared rather than
+        // implied, because `connect()` refuses to publish a manifest with a
+        // verb that never said what it does — the core's gate fires on
+        // `kind: "commit"` and cannot see a silent verb at all.
+        kind: "describe",
+        describe: "select every descent in a lane",
+        args: { lane: { type: "string", describe: "lane to match" } },
         run: ({ lane }: { lane: string }) => {
           const matched = [...lanes.values()].filter((l) => l === lane).length;
           rev++;
@@ -57,6 +61,13 @@ function app(name = "toy") {
       },
       {
         name: "set-lane",
+        // `commit`, and `reversible` because a lane move is undone by moving
+        // it back. The pair is what keeps this fixture publishable with no
+        // approver declared, which is what it was doing before either publish
+        // check existed: an absent `reversible` makes no claim, so a commit
+        // that has not said there is a way back is treated as one without.
+        kind: "commit",
+        reversible: true,
         describe: "move a descent to a lane",
         args: {
           id: { type: "string", describe: "descent id" },

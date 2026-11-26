@@ -485,3 +485,228 @@ test("the screen id renders above the prose, and only when the app declares one"
   );
   assert.ok(!renderSnapshot({ where: "contacts", rev: 12 }).includes("screen:"));
 });
+
+/** A two-screen app with a map and one recipe. The strings asserted below are
+ *  quoted from `python/src/driverkit/mcp_core.py`, which renders the same two
+ *  blocks into the MCP server's instructions. */
+const mapped = () =>
+  mount({
+    app: "Northwind",
+    instructions: "a contact's status moves new → pending → accepted",
+    visible: () => ({ where: "companies", screen: "companies", rev: 3 }),
+    screens: [
+      { id: "companies", describe: "the companies list, sortable", url: "#/companies" },
+      {
+        id: "company",
+        describe: "one company and its contacts",
+        url: "#/companies/{slug}",
+        args: { slug: { type: "string", describe: "the company's slug" } },
+      },
+    ],
+    navigate: () => {},
+    flows: [
+      {
+        id: "accept-pending",
+        describe: "accept the contacts a company has waiting",
+        steps: [
+          { section: "find it", verb: "goto", hint: "go to the companies list" },
+          { verb: "accept-selected", hint: "read the count first, then commit" },
+        ],
+      },
+    ],
+    verbs: [
+      { name: "accept-selected", kind: "commit", describe: "accept the selection", run: () => {} },
+    ],
+  });
+
+test("the app's map is in the cached prompt, and says it is the same for every user", () => {
+  // The gap: an agent could learn where it was (`Snapshot.screen`) and where it
+  // was not (`wrong-screen`), and could not learn that a screen EXISTED without
+  // standing on it. This is the map, in the half that is cached once — which is
+  // also why the worked example stopped pasting a prose version of it into
+  // `instructions`.
+  const text = systemPrompt(mapped().manifest());
+  assert.match(text, /THE SCREENS THIS APP HAS\./);
+  assert.match(text, /- `companies`: the companies list, sortable Address: `#\/companies`\./);
+  // A screen that takes an argument says which, so a model does not have to be
+  // refused once to find out.
+  assert.match(
+    text,
+    /- `company`: one company and its contacts Address: `#\/companies\/\{slug\}`\. Needs: `slug`\./,
+  );
+  // The sentence a model cannot work out by looking: a list that MIGHT have
+  // been filtered for this person is a list whose absences mean nothing.
+  assert.match(text, /The same screens for every user, always/);
+  assert.match(text, /it is never missing from this list/);
+});
+
+test("the flows are in the cached prompt, and say that nothing runs them", () => {
+  const manifest = mapped().manifest();
+  const text = systemPrompt(manifest);
+  assert.match(text, /THE JOBS THIS APP SAYS ITS VERBS ARE USUALLY COMBINED INTO\./);
+  assert.match(text, /`accept-pending` — accept the contacts a company has waiting/);
+  // The sections, printed once where they change rather than on every step.
+  assert.match(text, /\n {2}\(find it\)\n {2}1\. `goto` — go to the companies list/);
+  assert.match(text, /\n {2}2\. `accept-selected` — read the count first, then commit/);
+
+  // THE SENTENCE THAT MATTERS. A model handed numbered steps will look for the
+  // button, and not finding one may decide the flow is unavailable; being told
+  // that following the steps IS the mechanism, and why, is what turns a list
+  // into an instruction.
+  assert.match(text, /\*\*There is no tool that runs a flow\*\*/);
+  // And there is not one: a flow is not a tool, so it cannot be called.
+  assert.equal(toolsFor(manifest).some((t) => t.name === "accept-pending"), false);
+});
+
+test("the order is the rules, then the map, then the recipes, then the app's own words", () => {
+  // Whichever text is last is the one a model follows when two of them
+  // disagree, so the app's own voice goes last; a recipe is a thing to do
+  // WITHIN the safety rules and not an exception to them, so it goes after
+  // them. The host's `instructions` stays last of all, which the loop's own
+  // tests pin.
+  const manifest = mapped().manifest();
+  const text = systemPrompt(manifest);
+  const at = (needle: string) => text.indexOf(needle);
+  assert.ok(at("Never commit on a selection") < at("THE SCREENS THIS APP HAS"));
+  assert.ok(at("THE SCREENS THIS APP HAS") < at("THE JOBS THIS APP SAYS"));
+  assert.ok(at("THE JOBS THIS APP SAYS") < at(manifest.instructions!));
+});
+
+test("an app with no map and no flows gets the prompt it got before either existed", () => {
+  // The additive claim, as a string rather than a promise. Nothing is rendered
+  // for an app that declares neither, so no app's cached prefix moved for a
+  // feature it does not use.
+  const plain = systemPrompt(bulk().manifest());
+  assert.ok(!plain.includes("THE SCREENS THIS APP HAS"));
+  assert.ok(!plain.includes("THE JOBS THIS APP SAYS"));
+});
+
+test("`goto` is described by the core, so the two halves cannot disagree about it", () => {
+  // Every other piece of tool prose is written twice, once here and once in
+  // `mcp_core.py`, and a test pins that the two agree. `goto` is the core's own
+  // verb, so its description is written ONCE in the core and both renderers
+  // copy it through like any app verb's — which is the cheapest way to make
+  // the two halves agree about it.
+  const tool = toolsFor(mapped().manifest()).find((t) => t.name === "goto")!;
+  assert.match(tool.description, /^go to one of this app's screens/);
+  assert.match(tool.description, /READ-ONLY: this changes no data and reports no count/);
+  assert.match(tool.description, /Refused as `bad-screen-argument`/);
+  // The ids are an enum in the schema, so a client that drops the instructions
+  // text can still enumerate the app's screens.
+  assert.deepEqual(tool.inputSchema.properties!.screen!.enum, ["companies", "company"]);
+  // And the hoisted `screen` claim is NOT added, because `goto` claimed the
+  // name: the app's meaning wins over ours, the same rule as `rev`.
+  assert.deepEqual(tool.inputSchema.required, ["screen"]);
+});
+
+const planned = () =>
+  mount({
+    app: "Bulk",
+    visible: () => ({ where: "rows", rev: 3 }),
+    verbs: [
+      { name: "pick", kind: "describe", describe: "pick rows", run: () => ({ count: 1 }) },
+      {
+        name: "accept-selected",
+        kind: "commit",
+        consumes: "plan",
+        describe: "accept the selection",
+        run: () => {},
+      },
+      { name: "decline-selected", kind: "commit", describe: "decline the selection", run: () => {} },
+      {
+        name: "archive-selected",
+        kind: "commit",
+        consumes: "plan",
+        describe: "archive the selection",
+        // An app that declared its own `plan` argument keeps it, which is the
+        // rule `rev` and `screen` already have.
+        args: { plan: { type: "string", describe: "the archive plan's own name" } },
+        run: () => {},
+      },
+    ],
+  });
+
+test("`plan` is hoisted onto a verb that consumes one and onto nothing else", () => {
+  // Hoisted like `rev` and `screen`, with the one difference that earns a test:
+  // ONLY onto the verb that declares `consumes`. A plan token means nothing to
+  // a verb that does not consume one, and adding the property to every tool in
+  // every app would move every cached prompt prefix in the world for a feature
+  // those apps do not use — which is the cost argument the library is built on.
+  const tools = toolsFor(planned().manifest());
+  const strict = tools.find((t) => t.name === "accept-selected")!;
+  const plain = tools.find((t) => t.name === "decline-selected")!;
+
+  assert.equal(strict.inputSchema.properties!.plan!.type, "string");
+  assert.equal(plain.inputSchema.properties!.plan, undefined);
+  // `rev` and `screen` are still on both, because those two are claims any verb
+  // can make.
+  for (const t of [strict, plain]) {
+    assert.ok(t.inputSchema.properties!.rev);
+    assert.ok(t.inputSchema.properties!.screen);
+  }
+
+  // NOT in `required`, although the core refuses the call without it. `required`
+  // moves the failure into the client's validator, where the refusal's hint —
+  // which names both counts and spells out the pairing — never reaches the
+  // model. The schema is permissive and the core is strict.
+  assert.deepEqual(strict.inputSchema.required, []);
+  assert.match(strict.inputSchema.properties!.plan!.description!, /^Required\./);
+});
+
+test("an app that declares its own `plan` argument keeps it", () => {
+  // The same rule `rev` and `screen` have: the app's meaning wins over ours.
+  // The hoisted property would otherwise overwrite a real argument's
+  // description and the model would be told to put a token where the app wants
+  // a name.
+  const tool = toolsFor(planned().manifest()).find((t) => t.name === "archive-selected")!;
+  assert.match(tool.inputSchema.properties!.plan!.description!, /the archive plan's own name/);
+  assert.deepEqual(tool.inputSchema.required, ["plan"]);
+});
+
+test("the plan requirement is in the description, above where the verb works", () => {
+  // In the cached half for the reason `refuses` is: the point is that the bare
+  // call is never made. Above `screen` because HOW a verb may be called
+  // outranks WHERE — a model that walks to the right screen and then calls the
+  // commit bare has still lost the turn.
+  const tool = toolsFor(planned().manifest()).find((t) => t.name === "accept-selected")!;
+  assert.match(tool.description, /REQUIRES A PLAN/);
+  assert.match(tool.description, /refused as `stale-plan` and the refusal names both counts/);
+  assert.ok(
+    tool.description.indexOf("REQUIRES A PLAN") <
+      tool.description.indexOf("Returns the screen as it is AFTER"),
+  );
+  // And a verb that asks for nothing says nothing, so no app's cached prefix
+  // moved for a feature it does not use.
+  const plain = toolsFor(planned().manifest()).find((t) => t.name === "decline-selected")!;
+  assert.ok(!plain.description.includes("REQUIRES A PLAN"));
+});
+
+test("the system prompt teaches the plan pairing, since the refusal is not the place to learn it", () => {
+  // The prompt is the cached half and this is a static rule, so a model should
+  // arrive knowing it rather than discovering it on a refused commit in front
+  // of a person who is waiting.
+  const prompt = systemPrompt(planned().manifest());
+  assert.match(prompt, /Some commit verbs say they REQUIRE A PLAN/);
+  assert.match(prompt, /a plan is good for one commit/);
+  assert.match(prompt, /`stale-plan` means the rows changed under you/);
+});
+
+test("the plan token is rendered under the count, or a model never sees it", () => {
+  // The field would otherwise reach every hop in the library except the one
+  // reader that has to use it. Under the count because it is that count's
+  // receipt and means nothing apart from it.
+  const text = renderResult({
+    ok: true,
+    count: 3412,
+    plan: "dkp1.7.1.4c1f8a20b3de",
+    snapshot: { where: "rows", rev: 7 },
+  });
+  assert.match(text, /count: 3,412 matched/);
+  assert.match(text, /plan: dkp1\.7\.1\.4c1f8a20b3de/);
+  assert.match(text, /One commit per plan\./);
+  assert.ok(text.indexOf("count:") < text.indexOf("plan:"));
+
+  // And a result with no plan reads exactly as it did before the field existed.
+  const before = renderResult({ ok: true, count: 1, snapshot: { where: "rows", rev: 7 } });
+  assert.ok(!before.includes("plan:"));
+});

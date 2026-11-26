@@ -506,7 +506,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
   function dispatch(
     who: Principal,
     tabId: string,
-    body: { name?: unknown; args?: unknown; rev?: unknown; screen?: unknown },
+    body: { name?: unknown; args?: unknown; rev?: unknown; screen?: unknown; plan?: unknown },
   ): Promise<WireResult> | null {
     // Null means "this was never a call", and the caller answers non-2xx. A
     // body with no `name` is malformed, not refused: there is no verb to have
@@ -546,6 +546,13 @@ export function createRelay(options: RelayOptions = {}): Relay {
       // id of any screen and no app should be asked to refuse a call over a
       // field left blank.
       ...(typeof body.screen === "string" && body.screen ? { screen: body.screen } : {}),
+      // `plan` on the same terms again, and here the restraint is not even a
+      // choice: the token is opaque to everything but the core that minted it,
+      // so a relay has nothing to compare it against and could only ever get
+      // the comparison wrong. Dropped when blank, like `screen`, because an
+      // empty string is not a token and the core's refusal should name the
+      // field the agent actually left out.
+      ...(typeof body.plan === "string" && body.plan ? { plan: body.plan } : {}),
     };
 
     return new Promise<WireResult>((resolve) => {

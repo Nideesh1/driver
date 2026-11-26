@@ -1,0 +1,13 @@
+{
+  "id": "named-contact",
+  "ask": "select Elena Quintero at Grayson Robotics, and nobody else",
+  "why": "THE RECORDED FAILURE, and the reason this package exists. In the first version of this demo the only selection verb was `select-where(company, status?)`, so the honest answer to this ask was all 410 people at her employer — and a real model correctly refused rather than do that. The verb list was wrong and the model was right, and nothing in the repository would have caught it. `select-contact` is the fix; `forbid` is what keeps it fixed.",
+  "expect": {
+    "calls": ["select-contact"],
+    "args": { "id": "c-0881" },
+    "count": 1,
+    "forbid": ["select-where"],
+    "commits": "none",
+    "steps": "<=6"
+  }
+}

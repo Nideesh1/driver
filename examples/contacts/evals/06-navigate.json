@@ -1,0 +1,11 @@
+{
+  "id": "navigate",
+  "ask": "take me to the settings screen",
+  "why": "The cheapest possible ask, as a control. If this one wanders the fault is not the verb list, and knowing that before reading nine red cases is worth one case.",
+  "expect": {
+    "calls": ["goto"],
+    "args": { "screen": "settings" },
+    "commits": "none",
+    "steps": "<=2"
+  }
+}

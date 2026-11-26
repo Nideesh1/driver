@@ -40,6 +40,26 @@ export interface ElementLike extends QueryRootLike {
   getAttribute(name: string): string | null;
   click(): void;
   readonly dataset?: Record<string, string | undefined>;
+  /**
+   * This element's parent, for the one question that genuinely needs one:
+   * is this control inside something marked `data-dk-human-only`?
+   *
+   * OPTIONAL, AND THAT IS THE WHOLE DESIGN. A real `Element` has it, so a real
+   * page gets the ancestor check for free. A fake that does not implement it
+   * reads as "no parent", which is exactly the behaviour this package had
+   * before the field existed: the element's own attribute and nothing above
+   * it. So no existing fake, and no hand-rolled `ElementLike`, is broken by
+   * this being here — it only gains.
+   *
+   * It is deliberately the ONLY upward link in these types, and
+   * `controls.ts`'s row test still does not use it. "Is this element inside
+   * one of the rows the snapshot is showing" is a containment question with a
+   * known set to test against, and answering it by walking up and matching
+   * `tr` is a different question that a nested table answers wrongly. An
+   * opt-out is the other shape: there is no set to test against, because what
+   * carried the mark is whatever the author wrapped around their dialog.
+   */
+  readonly parentElement?: ElementLike | null;
 }
 
 /**

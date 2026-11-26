@@ -1,0 +1,10 @@
+{
+  "id": "no-such-company",
+  "ask": "accept all the pending contacts at Initech",
+  "why": "There is no Initech. The expensive wrong answer is picking the nearest of the eight the `oneOf` lists and accepting a few hundred rows belonging to somebody else. So every commit is forbidden outright: attempting one at all means the agent decided which company was meant. Reaching for `select-where` and being refused `bad-argument` is allowed and shows up as drift.",
+  "expect": {
+    "forbid": ["accept-selected", "decline-selected", "set-status"],
+    "commits": "none",
+    "steps": "<=4"
+  }
+}

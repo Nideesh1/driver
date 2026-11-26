@@ -24,7 +24,11 @@
  *
  * **2. The screen goes in the newest message, never in the system prompt.** It
  * is the dynamic half by definition. It enters the conversation exactly twice:
- * on the person's own turn, and riding on each tool result.
+ * on the person's own turn, and riding on each tool result. And it LEAVES
+ * again: one copy survives, the newest, and every older turn keeps its words
+ * or its outcome and gives up its screen. Each copy is small and ten of them
+ * are not, and they land in the half nothing caches — see `pruneScreens`,
+ * which is where the rest of that argument is.
  *
  * **3. One round trip per step, not two.** `Result` already carries the
  * snapshot after the call, so the tool result the model reads is the outcome
@@ -52,7 +56,7 @@
 
 import type { Driver, Manifest, Result, Scalar } from "driverkit";
 import { paceWait, realClock } from "./control.ts";
-import { renderResult, renderSnapshot } from "./render.ts";
+import { renderOutcome, renderSnapshot } from "./render.ts";
 import { READ_SCREEN, systemPrompt, toolsFor } from "./tools.ts";
 import type {
   CallEvent,
@@ -86,25 +90,38 @@ const DECLINED_HINT =
   "what they would like instead.";
 
 /**
- * How the screen is introduced on a user turn, and the seam pruning cuts at.
+ * How a screen is introduced, and the seam pruning cuts at.
  *
- * A marker rather than a guess at where the person's prose ends. Pruning has
- * to remove exactly what this file added and nothing anybody typed, and
- * looking for a line this file wrote is the only way to be sure of that.
+ * A marker rather than a guess at where the rest of the turn ends. Pruning has
+ * to remove exactly what this file added and nothing anybody typed, and looking
+ * for a line this file wrote is the only way to be sure of that.
+ *
+ * Written on both kinds of turn that carry a screen — the person's own, and
+ * every tool result — so there is one seam and not two. A tool turn whose text
+ * were nothing but a screen would have no seam in it at all, which is why even
+ * `read_screen`, whose whole answer is the screen, gets an outcome line above
+ * this marker. One shape, one cut; see `pruneScreens`.
  */
 const SCREEN_MARK = "\n\nOn screen now:\n";
 
 /**
- * What an older user turn's screen is replaced with.
+ * What an older turn's screen is replaced with.
  *
- * Replaced, not deleted. A user turn that simply has no screen reads as a turn
- * where the screen was empty, and "there were no contacts a moment ago" is a
- * worse thing for a model to believe than "there was a screen there and you
- * are not being shown it any more".
+ * Replaced, not deleted. A turn that simply has no screen reads as a turn where
+ * the screen was empty, and "there were no contacts a moment ago" is a worse
+ * thing for a model to believe than "there was a screen there and you are not
+ * being shown it any more". On a tool result the empty reading would be worse
+ * still: a verb whose result showed no rows looks like a verb that emptied the
+ * table.
+ *
+ * One sentence for both kinds of turn, and it is deliberately short. Unlike the
+ * user-turn case, which happens once or twice in a conversation, this is paid
+ * once per pruned tool turn — so it is the one piece of boilerplate in here
+ * that is itself O(steps), and the only honest answer to that is to keep it to
+ * a line. It buys back four fifths of a screen each time it is written.
  */
 const STALE_NOTE =
-  "\n\n(the screen as it was at this point is no longer shown; only the newest screen " +
-  "in this conversation is current)";
+  "\n\n(screen no longer shown; only the newest screen in this conversation is current)";
 
 /**
  * A tool result for a call the loop decided not to run.
@@ -135,36 +152,75 @@ function abandoned(call: ToolCall, why: "stopped" | "aborted"): Turn {
 }
 
 /**
- * Keep the screen on the newest user turn only.
+ * Keep exactly one screen in the conversation: the newest one, wherever it is.
  *
- * Every user turn carries the screen as it was when the person spoke, which is
- * right at the time and wrong five turns later. Two costs, and the second is
- * the one that matters: the old blocks are bytes in the uncached half, paid for
- * on every turn forever; and a model that reads a screen from four messages
- * ago as current will act on rows that have moved. The second is a correctness
- * problem wearing a cost problem's clothes.
+ * The rule the core states on `Snapshot` and this function exists to hold:
  *
- * Tool turns are left alone, and that is deliberate rather than an oversight.
- * Each one carries the authoritative post-call screen, which is how the model
- * knows what its own verbs did; pruning those would take away the record of
- * the run. The honest remaining limit, stated rather than quietly handled: in
- * a conversation carried across many runs, the tool turns from EARLIER runs
- * still carry their screens, and deciding how far back those stay useful is a
- * judgement this function is not the right place to make.
+ *   "an agent is never shown more than the person at the keyboard. Same
+ *    filters, same sort, same page. That is what keeps the cost flat as the
+ *    data grows — a hundred rows on screen is a hundred rows in the prompt
+ *    whether the table holds a hundred or a million"
+ *
+ * Flat as the data grows, and the cost of a step is what the person could see
+ * when it ran. A conversation holding one copy of the screen per step honours
+ * neither: the person at the keyboard is looking at one screen, and the prompt
+ * carried ten. Each copy is small, which is exactly why this went unnoticed for
+ * as long as it did — the leak is in the COUNT, not in the size, and it lands
+ * in the uncached half where every byte is paid for on every remaining turn.
+ *
+ * Both kinds of turn carry one. A user turn carries the screen as it was when
+ * the person spoke; a tool turn carries the screen the call left behind, which
+ * is the authoritative one at the moment it arrives. Each is right at the time
+ * and wrong a few turns later, for the same two reasons, and the second is the
+ * one that matters: old blocks are bytes in the uncached half paid for forever,
+ * and a model that reads a screen from four messages ago as current will act on
+ * rows that have moved. The second is a correctness problem wearing a cost
+ * problem's clothes — and the cure is written into `DriveOutcome.messages`
+ * already: a model is never shown two screens and left to work out which one is
+ * now true.
+ *
+ * **What survives on an older tool turn, and what a model loses.** The outcome
+ * line stays: `ok`, the count and its warning, `refused: <slug>` and its hint.
+ * That is what an old tool turn is actually consulted for — "what did my third
+ * call do" — and it is the half that never goes stale. What is gone is the
+ * table as it stood between two of the model's own calls. A model that wants it
+ * can call `read_screen`, which costs one round trip against ten turns of
+ * carrying it, and the newest screen is always in front of it untouched.
+ *
+ * **Why the newest and not the newest few.** A window of N would still grow
+ * with N, would need a number nobody can justify, and would put two or three
+ * screens of the same table in the tail with nothing but position to say which
+ * is live — reintroducing the misreading above at a constant factor. Keeping
+ * the last screen per `Snapshot.screen` id was the other candidate, and it
+ * fails on the same count: an app with six screens keeps six, the total grows
+ * with navigation rather than with steps, and `screen` is optional — so the
+ * bill would depend on whether an app happens to name its screens.
  */
 export function pruneScreens(messages: Turn[]): Turn[] {
+  // The newest turn that carries a screen, of either kind. Found by looking for
+  // the marker rather than by role: after a call, the newest screen is on a
+  // tool turn and the person's own turn is as stale as any other.
   let newest = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") {
+    const turn = messages[i]!;
+    if (turn.role === "assistant") continue;
+    if (turn.text.includes(SCREEN_MARK)) {
       newest = i;
       break;
     }
   }
 
   return messages.map((turn, i) => {
-    if (turn.role !== "user" || i === newest) return turn;
+    if (turn.role === "assistant" || i === newest) return turn;
     const at = turn.text.indexOf(SCREEN_MARK);
-    return at === -1 ? turn : { role: "user", text: turn.text.slice(0, at) + STALE_NOTE };
+    if (at === -1) return turn;
+    // Everything before the marker is kept verbatim, which on a tool turn is
+    // the outcome line and on a user turn is what the person typed. Spread
+    // rather than rebuilt, so a tool turn keeps the `callId` its `tool_use`
+    // is answering: pruning rewrites text and never removes or re-pairs a
+    // turn, which is what makes it safe to do to something a caller will hand
+    // back as `history`. See `abandoned`.
+    return { ...turn, text: turn.text.slice(0, at) + STALE_NOTE };
   });
 }
 
@@ -238,17 +294,18 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
     });
   }
 
-  // After the new turn is in, so "newest" means newest including it, and so a
-  // run continuing a history that already ends in a user turn keeps that
-  // turn's screen. Done once rather than per turn, which also means the
-  // `messages` handed back are already pruned and a conversation carried
-  // across many runs does not re-accumulate what this just removed.
-  //
   // Lossy on purpose, and worth stating: a caller that wanted a verbatim
   // transcript of what the model was shown does not get one from here. The
   // alternative is paying for every screen the conversation ever had, on every
   // turn, so that nothing is lost — and nobody reads those bytes.
-  messages = pruneScreens(messages);
+  //
+  // Called below, before every `think` and once on the way out, rather than
+  // once here. Once here was enough while only user turns carried screens,
+  // because a run adds at most one of those; tool turns are added by the loop
+  // itself, one per call, so the newest screen moves on every step and the
+  // pruning has to move with it. Running it before each turn also keeps the
+  // `messages` handed back already pruned, so a conversation carried across
+  // many runs does not re-accumulate what this just removed.
 
   let steps = 0;
   let text: string | undefined;
@@ -306,6 +363,12 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
 
     steps++;
     options.onStep?.({ step: steps });
+
+    // Here, not after the pushes below: this is the last moment before the
+    // tail is handed to the model, so "the newest screen" means the newest at
+    // the instant it is read. Idempotent, so running it on every turn costs a
+    // scan of a short array and cannot double-cut anything.
+    messages = pruneScreens(messages);
 
     // `messages.slice()` and not `messages`. A `think` that is a fetch will
     // serialise this and forget it, but one that is a scripted fake, a
@@ -428,13 +491,25 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
 
       const outcome = await runOne(driver, call, verb, options, mark);
 
+      // The two halves, joined with the pruning seam between them. A call that
+      // reached no screen at all — an unknown tool name — gets no marker and
+      // no screen, which is the one honest shape for it: a marker followed by
+      // nothing would say the screen was empty.
+      const screened = (head: string): string =>
+        outcome.screen === undefined ? head : head + SCREEN_MARK + outcome.screen;
+
       options.onResult?.({
         ...event,
         result: outcome.result,
-        text: outcome.text,
+        text: screened(outcome.head),
       });
 
-      let body = outcome.text;
+      // The outcome line only. The screen is appended last, below, so that
+      // anything else this loop has to say about the call sits ABOVE the seam
+      // and survives pruning — the refusal-limit note in particular, which is
+      // written for a caller resuming this conversation later and would be the
+      // first thing cut if it were appended after the screen.
+      let body = outcome.head;
 
       if (outcome.result && !outcome.result.ok) {
         const key = `${call.name}:${outcome.result.refused}`;
@@ -453,7 +528,7 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
         }
       }
 
-      messages.push({ role: "tool", callId: call.id, name: call.name, text: body });
+      messages.push({ role: "tool", callId: call.id, name: call.name, text: screened(body) });
       if (stuck) {
         unrun = calls.slice(i + 1);
         break;
@@ -474,6 +549,13 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
       break;
     }
   }
+
+  // Again on the way out, because the last thing a run does is often to push
+  // tool turns nobody will `think` about — a fan-out's results, or the
+  // `abandoned` answers after a stop. Without this the array handed back would
+  // carry every screen from that final turn, and a caller passing it as
+  // `history` would be billed for them until the next run's first prune.
+  messages = pruneScreens(messages);
 
   options.onStop?.({ stop, steps, ...(text === undefined ? {} : { text }) });
   return { stop, steps, messages, ...(text === undefined ? {} : { text }) };
@@ -539,6 +621,13 @@ function readScreen(raw: Scalar | undefined): string | undefined | typeof BAD_RE
  * `result` is null when nothing was called on the driver — `read_screen`, or a
  * name the manifest does not have. A caller's `onResult` uses that to tell "a
  * verb ran" from "the model looked" when drawing its trace.
+ *
+ * The rendering comes back in two pieces rather than one string, and the
+ * caller joins them. `head` is the outcome and keeps its meaning forever;
+ * `screen` is the block that is current for one turn and is dropped from the
+ * turn after. Joining them here would mean the loop had to find the seam again
+ * by searching the text it just built. `screen` is absent only for a call that
+ * reached no screen at all.
  */
 async function runOne(
   driver: Driver,
@@ -549,12 +638,18 @@ async function runOne(
    *  parked in front of a person's confirmation, which is a wait the run
    *  controls do not own and a panel showing "running" would misdescribe. */
   mark: (state: RunState) => void,
-): Promise<{ result: Result | null; text: string }> {
+): Promise<{ result: Result | null; head: string; screen?: string }> {
   if (call.name === READ_SCREEN && verb === undefined) {
     // `verb === undefined` so an app that genuinely declares a verb by this
     // name keeps it. The app's meaning wins over ours, the same way it does
     // for the hoisted `rev`.
-    return { result: null, text: renderSnapshot(driver.snapshot()) };
+    // `ok` above the screen, where a verb's outcome goes. The screen is the
+    // whole answer here and the line says nothing a model did not know — it is
+    // there so that this turn has the same two-part shape as every other turn
+    // carrying a screen, and therefore a seam to cut at when it goes stale. A
+    // tool turn that was nothing but a screen was the one kind pruning could
+    // not touch, and `read_screen` is the call whose turn is pure screen.
+    return { result: null, head: "ok", screen: renderSnapshot(driver.snapshot()) };
   }
 
   if (verb === undefined) {
@@ -563,7 +658,9 @@ async function runOne(
     // than after another read — the same reason the core lists them on
     // `unknown-verb`.
     const known = [...driver.manifest().verbs.map((v) => v.name), READ_SCREEN].sort().join(", ");
-    return { result: null, text: `no such tool \`${call.name}\`. available: ${known}` };
+    // No screen: nothing was called, so there is no post-call screen to show,
+    // and the newest one is already in the conversation a turn above.
+    return { result: null, head: `no such tool \`${call.name}\`. available: ${known}` };
   }
 
   // `rev` is ours unless the verb claimed the name, in which case it is an
@@ -597,7 +694,7 @@ async function runOne(
           `leave \`rev\` out entirely.`,
         snapshot,
       };
-      return { result, text: renderResult(result) };
+      return { result, head: renderOutcome(result), screen: renderSnapshot(result.snapshot) };
     }
     rev = hoisted;
   }
@@ -622,9 +719,30 @@ async function runOne(
           "entirely.",
         snapshot,
       };
-      return { result, text: renderResult(result) };
+      return { result, head: renderOutcome(result), screen: renderSnapshot(result.snapshot) };
     }
     screen = hoisted;
+  }
+
+  // `plan` is hoisted on the same terms as `rev` and `screen` — the app keeps
+  // the name if it declared an argument by it — with one difference: it is
+  // taken off the args only for a verb that declares `consumes`, because that
+  // is the only verb the tool schema offered it on, so on any other verb a
+  // `plan` key is an argument the app named or a mistake the core should see.
+  //
+  // Not coerced and not refused on a bad type, which is where this parts
+  // company with `readRev` and `readScreen`. Those two refuse a wrong type
+  // because `undefined` means "skip the check" and a silent drop would turn a
+  // safety claim off. Here the opposite is true: the check is mandatory, so a
+  // token that is missing, blank or not a string all arrive at the core and all
+  // come back as `stale-plan` — which is the refusal that explains the pairing.
+  // Inventing a `bad-argument` here would answer a smaller question with a
+  // worse hint.
+  let plan: string | undefined;
+  if (verb.consumes === "plan" && !(verb.args && "plan" in verb.args)) {
+    const raw = args.plan;
+    delete args.plan;
+    if (typeof raw === "string" && raw.trim()) plan = raw.trim();
   }
 
   if (verb.kind === "commit" && options.onBeforeCommit) {
@@ -658,13 +776,14 @@ async function runOne(
         hint: typeof decision === "string" ? decision : DECLINED_HINT,
         snapshot,
       };
-      return { result, text: renderResult(result) };
+      return { result, head: renderOutcome(result), screen: renderSnapshot(result.snapshot) };
     }
   }
 
   const result = await driver.call(verb.name, args, {
     ...(rev === undefined ? {} : { rev }),
     ...(screen === undefined ? {} : { screen }),
+    ...(plan === undefined ? {} : { plan }),
   });
-  return { result, text: renderResult(result) };
+  return { result, head: renderOutcome(result), screen: renderSnapshot(result.snapshot) };
 }

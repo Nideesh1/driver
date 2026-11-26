@@ -876,6 +876,17 @@ class Relay:
             # two files.
             if isinstance(screen, str) and screen:
                 frame["screen"] = screen
+            plan = parsed.get("plan")
+            # `plan` on the same terms again, and here the restraint is not even
+            # a choice: the token is opaque to everything but the core that
+            # minted it, so a relay has nothing to compare it against and could
+            # only ever get the comparison wrong. Dropped when blank, like
+            # `screen`, because an empty string is not a token and the core's
+            # refusal should name the field the agent actually left out.
+            # Behaviourally identical to the TypeScript relay, which is the
+            # standing promise about these two files.
+            if isinstance(plan, str) and plan:
+                frame["plan"] = plan
             sent = tab.stream.write(_sse(frame))
             if not sent:
                 tab.pending.pop(call_id, None)

@@ -34,7 +34,7 @@
  * `backendThink` for the thirty lines that make the realistic deployment work.
  */
 
-import type { Driver } from "driverkit";
+import type { Approval, ApprovalRequest, Driver, Snapshot } from "driverkit";
 // The only cross-package VALUE import in the repository. Everything else
 // between packages is `import type`, which `verbatimModuleSyntax` erases
 // outright -- so this one line is the whole reason `@driverkit/widget` needs
@@ -116,6 +116,33 @@ export type RunControlsFactory = (options: RunControlsOptions) => RunControls;
  */
 export const COMMIT_ASK_ABOVE = 25;
 
+/**
+ * The word in the panel header when the host has not supplied one.
+ *
+ * It used to be the app's own name, and the app's own name is the one thing
+ * that must not size this strip. "Northwind CRM" is a header full before the
+ * three controls beside it get a place; "Mail" leaves it two thirds empty; and
+ * neither of them tells the person anything they do not already know, because
+ * the app they are looking at is the whole screen behind the panel. A chat
+ * panel's title is only there to say what the panel IS.
+ *
+ * "Assistant" and not "Ask", which is the launcher's word, because the two are
+ * different parts of speech doing different jobs: a button says what pressing
+ * it does, and a title names the thing it is on top of. "Ask" as a header
+ * would read as an instruction with nothing to instruct. It is also already
+ * the word in the panel's `aria-label` — `"<app> assistant"` — so the visible
+ * title and the announced one now agree instead of being two different names
+ * for one surface.
+ *
+ * The app's name is NOT gone: it is in that `aria-label`, in the launcher's
+ * and the input's accessible names, in the input's placeholder, in the
+ * greeting, and on the title's own `title` tooltip. Those are the places where
+ * naming the app answers a question somebody actually has — "what is this
+ * thing reading my screen" — and none of them is a box whose width the name
+ * gets to decide.
+ */
+export const PANEL_TITLE = "Assistant";
+
 
 export interface WidgetOptions
   extends Pick<DriveOptions, "think" | "instructions" | "maxSteps" | "refusalLimit"> {
@@ -127,10 +154,21 @@ export interface WidgetOptions
    * two questions about one commit, which is how people learn to click yes
    * without reading. Supplying this also means `confirmCommits` is moot — your
    * function is called for every commit either way.
+   *
+   * This gates THE IN-PAGE RUN ONLY, which is the thing to know about it: it is
+   * `drive`'s option, so a commit arriving over the relay or MCP never reaches
+   * it. The gate that covers every path is `MountOptions.approve`, and
+   * `Widget.approve` is this panel's dialog in that shape. When the driver was
+   * mounted with an `approve` hook, the panel installs no gate of its own —
+   * but passing this one puts it back, and then a commit from the in-page run
+   * is asked about twice: once by you here and once by the core's hook. That
+   * is a combination to pick deliberately or not at all.
    */
   onBeforeCommit?: DriveOptions["onBeforeCommit"];
-  /** Shown in the header and on the launcher. Defaults to the app name from
-   *  the manifest, which is already a name a human recognises. */
+  /** Shown in the header and on the launcher. Defaults to `PANEL_TITLE` in the
+   *  header and "Ask" on the launcher — see `PANEL_TITLE` for why the app's own
+   *  name is not either of them. The app name is still in every accessible
+   *  name, in the placeholder and in the greeting. */
   title?: string;
   /** The first line in the transcript. Defaults to a line naming the app. */
   greeting?: string;
@@ -213,6 +251,13 @@ export interface WidgetOptions
    * Set it false to opt out entirely — for an app whose commits are all small,
    * where a question even on the irreversible ones is noise that teaches
    * people to click through questions.
+   *
+   * This, `commitAskAbove` and `confirmEveryCommit` decide whether the dialog
+   * appears whichever path asked for it, because there is one dialog: see
+   * `Widget.approve`. Switching confirmations off therefore switches them off
+   * for an agent over the relay too, which is the honest reading of a switch
+   * labelled "ask before changing data" and is also a thing to think about
+   * before offering the switch at all.
    */
   confirmCommits?: boolean;
   /**
@@ -289,6 +334,35 @@ export interface Widget {
   close: () => void;
   /** Ask something as if it had been typed. Returns when the run ends. */
   ask: (text: string) => Promise<void>;
+  /**
+   * The panel's confirmation dialog, as a `MountOptions.approve` hook.
+   *
+   * This is how the one working confirmation UI in the repository comes to
+   * cover the relay path as well as the in-page one. Wire it up with a
+   * forward reference, because `mount()` has to happen before the panel that
+   * will answer for it exists:
+   *
+   * ```ts
+   * let panel: Widget;
+   * const driver = mount({ …, approve: (req) => panel.approve(req) });
+   * panel = mountWidget(driver, { think });
+   * ```
+   *
+   * Then a commit arriving over the relay or MCP renders the same question,
+   * with the same count, obeying the same `confirmCommits`, `commitAskAbove`
+   * and `confirmEveryCommit`, and a "No" becomes the same `declined-by-user`
+   * refusal that the in-page loop produces. The core holds its lock for the
+   * duration, so the agent that is being asked cannot call anything else —
+   * including `press` on an approve button — while the question is open.
+   *
+   * The one difference from the in-page path, and it is unavoidable: the count
+   * comes from the screen (`Snapshot.selectedCount`, then the visible
+   * `selected`) because there is no run whose last `describe` could have
+   * reported one. An app whose selection size is only knowable from a verb's
+   * `Report.count` will show "No count was reported" here, which is the honest
+   * answer and is itself a reason to say no.
+   */
+  approve: (req: ApprovalRequest) => Promise<Approval>;
   /** Move the panel, as `WidgetOptions.position`. Persisted like a drag. */
   moveTo: (position: Position) => void;
   /** Where the panel is, as fractions of the free space in `[0, 1]`, or null
@@ -331,6 +405,16 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
 
   const manifest = driver.manifest();
   const app = options.title ?? manifest.app;
+
+  // The launcher's accessible name, and the one place the app's name is still
+  // read out loud about that button. A screen reader reads a name in
+  // isolation, with none of the context a sighted person gets from the app
+  // behind it, so the visible word can be one word and this cannot.
+  const ASK_LABEL = `Ask ${app} to do something`;
+  // The same name with the state the dot shows, in words. A dot is not a thing
+  // a screen reader can read, and "there is a conversation in here" is exactly
+  // the fact somebody who cannot see the dot is missing.
+  const WAITING_LABEL = `${ASK_LABEL}. Your conversation is still here.`;
 
   // One place, shared with positioning, because two storage mechanisms would
   // be two places to get the try/catch wrong. `persist: false` means neither
@@ -385,10 +469,52 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   (options.container ?? doc.body).appendChild(host);
 
   const launcher = el("button", "dk-launcher");
-  launcher.textContent = `Ask ${app}`;
+  // ONE WORD, and the app's name is deliberately not in it. `Ask Northwind
+  // CRM` grew with the app, so the button was a different size in every app
+  // that used it, and it reads as an instruction to the person rather than as
+  // a label on a control — a button says what it is, not what you should do
+  // with it. The app's name belongs in the panel header, where there is room
+  // for it and where it is still the first thing read on opening, and it is
+  // still in the accessible name here. `title` overrides this for a host that
+  // wants its own word; a long one is ellipsised rather than allowed to
+  // stretch the pill.
+  launcher.textContent = options.title ?? "Ask";
   launcher.setAttribute("type", "button");
+  // The app's name survives for anybody who cannot see the panel behind the
+  // button. A screen reader reads a name in isolation, with none of the
+  // context a sighted person gets from the app around it, so "Ask" alone would
+  // be a button that could be about anything; a visual label has the whole
+  // screen for context and needs no more than a word. Same reasoning as the
+  // input's `aria-label`, which is why they read the same.
+  launcher.setAttribute("aria-label", ASK_LABEL);
+  // And on hover, for the case the visible word was clipped.
+  launcher.setAttribute("title", ASK_LABEL);
   launcher.setAttribute("aria-haspopup", "dialog");
   launcher.setAttribute("aria-expanded", "false");
+  /**
+   * The "there is a conversation behind this" dot.
+   *
+   * Minimising keeps the transcript, which is the whole point of change one —
+   * but a person who minimised mid-run then has a pill that looks exactly like
+   * a pill they have never pressed, and no way to tell that the agent is still
+   * working or that what they asked is still in there. So the pill carries a
+   * dot, which pulses while a run is in flight.
+   *
+   * INSIDE the pill, absolutely positioned, and with its own class so its
+   * rules never mention `.dk-launcher`: the launcher's box is 96x40 and
+   * nothing is allowed to change it — a badge hanging off the corner would
+   * grow the element, and the remembered position is a fraction of the
+   * viewport less the element's own width, so a launcher that grew would also
+   * have moved itself. See the launcher's rule in `css.ts`.
+   *
+   * Appended AFTER the label is written, because `textContent =` replaces
+   * every child and would throw the dot away. `aria-hidden`, because the state
+   * it shows is said in words in the launcher's own accessible name — a
+   * screen reader hearing "dot" has learnt nothing.
+   */
+  const dot = el("span", "dk-dot");
+  dot.setAttribute("aria-hidden", "true");
+  launcher.appendChild(dot);
   wrap.appendChild(launcher);
 
   const panel = el("section", "dk-panel");
@@ -400,36 +526,73 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   wrap.appendChild(panel);
 
   const head = el("div", "dk-head");
+  /**
+   * The grip: the drag handle, and the only drag surface on the panel.
+   *
+   * A glyph and not the word "Move", because what a drag handle has to do is
+   * LOOK like one. Six dots is the one thing on a screen people already read
+   * as "pick this up", and the word "Move" read as a button that teleports the
+   * panel somewhere \u2014 which is only half of what it does.
+   *
+   * It is a real `<button>`, and that is deliberate: it is the grab affordance
+   * AND the keyboard control. A drag handle with no focusable element in it is
+   * a feature that exists only for people with a mouse, and a shortcut nobody
+   * can see is a shortcut nobody uses. One control answers both.
+   *
+   * First in the strip, at the far end from the gear and the minimise button.
+   * The whole complaint this change answers is that an imprecise press near a
+   * button started a drag; putting the thing that drags as far as the strip
+   * allows from the things that do not is the cheap half of the fix.
+   */
+  const grip = el("button", "dk-move");
+  grip.textContent = "\u283f";
+  grip.setAttribute("type", "button");
+  grip.setAttribute("aria-label", "Move panel: arrow keys to nudge, Enter for the next corner");
+  grip.setAttribute("title", "Drag to move. Arrow keys to nudge, Enter for the next corner, Alt (Option) and an arrow from anywhere.");
   const title = el("div", "dk-title");
-  title.textContent = app;
-  // The grab affordance AND the keyboard control, which is deliberate: a
-  // shortcut nobody can see is a shortcut nobody uses, and a drag handle with
-  // no focusable element in it is a feature that exists only for people with a
-  // mouse. One button answers both.
-  const move = el("button", "dk-move");
-  move.textContent = "Move";
-  move.setAttribute("type", "button");
-  move.setAttribute("aria-label", "Move panel: arrow keys to nudge, Enter for the next corner");
-  move.setAttribute("title", "Drag to move. Arrow keys to nudge, Enter for the next corner, Alt (Option) and an arrow from anywhere.");
-  // A glyph, not the word "Settings". The header is the drag handle as well as
-  // the chrome, and a title plus three labelled buttons is a strip with
-  // nowhere left to grab. It is still a real button with a real label.
+  // A short word, not the app's name. See `PANEL_TITLE`.
+  title.textContent = options.title ?? PANEL_TITLE;
+  // And the app's name on hover, so a generic title is still answerable for
+  // what it is attached to without being sized by it.
+  title.setAttribute("title", `${app} assistant`);
+  // A glyph, not the word "Settings". The header is a 380px strip with a title
+  // and three controls in it, and three words would not fit; it is still a
+  // real button with a real label.
   const gear = el("button", "dk-gear");
   gear.textContent = "\u2699";
   gear.setAttribute("type", "button");
   gear.setAttribute("aria-label", "Settings");
-  gear.setAttribute("title", "Settings: speed, highlighting, step mode, confirmations");
+  gear.setAttribute("title", "Settings: speed, highlighting, step mode, confirmations, clear");
   // `aria-expanded` and not `aria-pressed`: this discloses a panel section
   // rather than turning something on, and claiming both would be two
   // different promises about one button.
   gear.setAttribute("aria-expanded", "false");
-  const close = el("button", "dk-x");
-  close.textContent = "Close";
-  close.setAttribute("type", "button");
+  /**
+   * Minimise, which is what this button always did and is now what it says.
+   *
+   * It hid the panel and kept the conversation, and it was labelled "Close" \u2014
+   * so people read it as "throw this conversation away" and stopped pressing
+   * it. That is a real failure even though the behaviour was right: a control
+   * whose label overstates what it does is a control people avoid, and the
+   * person who avoids this one is left with a panel sitting on top of the rows
+   * they asked about. The behaviour is untouched; the word and the glyph are
+   * the fix.
+   *
+   * A minus and not a chevron, because a chevron points somewhere and this
+   * panel can be in any of four corners, so "down" is wrong a quarter to three
+   * quarters of the time. The destructive option people were looking for when
+   * they read "Close" is now in the settings view, where destructive things
+   * belong, and it says what it does.
+   */
+  const minimise = el("button", "dk-min");
+  minimise.textContent = "\u2212";
+  minimise.setAttribute("type", "button");
+  minimise.setAttribute("aria-label", "Minimise the panel. The conversation is kept.");
+  minimise.setAttribute("title", "Minimise. Your conversation is kept \u2014 reopen to carry on.");
+  head.appendChild(grip);
   head.appendChild(title);
   head.appendChild(gear);
-  head.appendChild(move);
-  head.appendChild(close);
+  head.appendChild(minimise);
   panel.appendChild(head);
 
   // The run controls, directly above the step list they act on, and only while
@@ -550,6 +713,45 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     settingsView.appendChild(commitRow);
   }
 
+  /**
+   * Clear the conversation: the destructive option, in the one place a person
+   * goes looking for one.
+   *
+   * It is here and not in the header for the same reason the header button is
+   * now a minus. There were two controls and one of them was lying: minimise
+   * read as "destroy the conversation" and nothing actually destroyed it. Now
+   * the header is where you put the panel away and the settings view is where
+   * you throw things away — and this is the LAST row of it, below four
+   * preferences, which is where a destructive action is least likely to be hit
+   * by somebody reaching for something else.
+   *
+   * **No confirmation**, deliberately. A confirmation is worth a click when
+   * the thing behind it cannot be undone and cost somebody something: a
+   * commit, which is why this panel has a dialog for those. A lost chat costs
+   * one retyped sentence, and the panel's own doctrine is that a dialog on the
+   * cheap thing is how people learn to click through the dialog on the
+   * expensive one. The transcript is not a record of anything but itself — the
+   * app's data is untouched by this, and the steps that ran stay run.
+   *
+   * **It stops a run in flight**, through the run's own `AbortController` and
+   * not a second stop path, because that controller is already the one thing
+   * that stops a run and a second one could disagree with it. The alternative
+   * was letting the loop go on holding `messages` the panel has just thrown
+   * away, which is a panel and a model disagreeing about what has been said —
+   * and the model would win, so the next answer would refer to a conversation
+   * the person is looking at the absence of.
+   */
+  const clearRow = setRow(
+    "Clear conversation",
+    "Throw away everything in this panel and start over. Nothing in the app changes and steps that already ran stay run. A run in flight is stopped, because a transcript the model still remembers and the panel does not is worse than no transcript.",
+  );
+  const clear = el("button", "dk-clear");
+  clear.textContent = "Clear conversation";
+  clear.setAttribute("type", "button");
+  clear.addEventListener("click", () => clearConversation());
+  clearRow.appendChild(clear);
+  settingsView.appendChild(clearRow);
+
   const done = el("button", "dk-done");
   done.textContent = "Done";
   done.setAttribute("type", "button");
@@ -573,7 +775,25 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   form.appendChild(stop);
   panel.appendChild(form);
 
-  say("dk-note", options.greeting ?? `Ask me to do things in ${app}. I use the app the way you do.`);
+  /**
+   * Every element in the transcript, in the order it was added.
+   *
+   * Kept because clearing has to be able to empty the log, and there is no way
+   * to do that through `ElementLike` — `innerHTML` is not in `dom.ts` and
+   * putting it there to clear a container would be adding the one DOM property
+   * whose whole reputation is for being misused. Each line can remove itself,
+   * which is a method the fake and every browser already have, so the list of
+   * what to remove is the only missing piece. Declared above the greeting
+   * because the greeting is the first thing to go in it.
+   */
+  const lines: ElementLike[] = [];
+
+  // Kept rather than inlined, because clearing the conversation puts it back:
+  // an empty panel with no greeting looks broken, and a fresh panel is what
+  // clearing promises.
+  const greeting =
+    options.greeting ?? `Ask me to do things in ${app}. I use the app the way you do.`;
+  say("dk-note", greeting);
 
   // The conversation lives here, not in `drive`: the loop is stateless between
   // runs, so a widget is simply the thing that remembers.
@@ -595,6 +815,22 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   let isOpen = false;
   let isBusy = false;
   let isSettings = false;
+  /** Whether anything has been asked since the panel was last cleared. What
+   *  the launcher's dot is about: "there is a conversation in here", which is
+   *  not the same question as "is a run in flight". */
+  let conversed = false;
+  /**
+   * Which conversation the panel is on. Bumped by clearing.
+   *
+   * A run that was in flight when the person cleared is aborted, but an abort
+   * is not instant: the loop resolves at its next await, and everything it
+   * does on the way out — the stop note, the `messages` it hands back, the
+   * sweep that marks abandoned steps — is about a conversation that no longer
+   * exists. Checking a counter is how those writes know not to land in the
+   * fresh transcript. A boolean would not do: clear twice during one run and
+   * the second clear has to invalidate the run too.
+   */
+  let era = 0;
 
   // ---- wiring ------------------------------------------------------------
 
@@ -625,13 +861,37 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     ...(options.window === undefined ? {} : { window: options.window }),
   });
 
-  // The header drags the panel, and `"ignore"` is what keeps the buttons in it
-  // clickable: a press that starts on Close — or on the gear — is that
-  // button's, even if the hand moves two pixels before it lifts.
-  place.handle(head, "ignore");
-  // The move button is its own handle, so the thing that LOOKS like a grip is
-  // a grip.
-  const movedMove = place.handle(move);
+  /**
+   * The grip is the handle, and the header is NOT one any more.
+   *
+   * The header used to be the drag surface, which is why `position.ts` has a
+   * `controls: "ignore"` mode at all: a press that landed on a button inside
+   * the handle had to be rescued from the drag it would otherwise have
+   * started. That guard works, and it is still the wrong shape for this
+   * header. "Ignore the controls" is a rule about the pixels a button covers,
+   * and a header is also the 4px between two of them, the strip above them,
+   * and the few pixels of padding a pointer lands on when somebody aims at the
+   * gear and misses by two — all of which drag, and none of which the person
+   * meant to drag.
+   *
+   * So the handle is now exactly the thing that looks like a handle, and the
+   * header is inert. The cost is forgiveness: somebody who grabs the title
+   * text and pulls gets nothing, where before they got a moving panel. That is
+   * the trade taken deliberately, and in this direction, for three reasons.
+   * The grip is visible and the header's grabbability never was — it was a
+   * `cursor: grab` and no more, so nobody who had not already discovered it
+   * ever would. Predictability is worth more than reach HERE because there is
+   * no reach to lose: the keyboard path still moves the panel from anywhere in
+   * the widget with Alt and an arrow, and the grip's own bare arrows and Enter
+   * still work. And a surface that is not a handle cannot grow a new header
+   * button that is accidentally draggable, which is this bug's shape and the
+   * shape it would come back in.
+   *
+   * `"ignore"` stays in `position.ts` with no caller here on purpose: it is
+   * the right answer for any container handle, and the next person who makes
+   * one should find it rather than rediscover the bug.
+   */
+  const movedGrip = place.handle(grip);
   // And the launcher, because a collapsed widget is over the app just as much
   // as an open one.
   const movedLauncher = place.handle(launcher);
@@ -642,7 +902,7 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     if (movedLauncher()) return;
     setOpen(true);
   });
-  close.addEventListener("click", () => setOpen(false));
+  minimise.addEventListener("click", () => setOpen(false));
   gear.addEventListener("click", () => setSettingsOpen(!isSettings));
   pause.addEventListener("click", () => {
     if (runState === "paused") active?.resume();
@@ -652,13 +912,13 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     // the person deciding to press this and pressing it.
   });
   once.addEventListener("click", () => active?.step());
-  move.addEventListener("click", () => {
-    if (movedMove()) return;
+  grip.addEventListener("click", () => {
+    if (movedGrip()) return;
     place.cycle();
   });
   // Bare arrows, and only here, where the panel's own control has focus. Alt
   // is left to the wrapper's handler so the two do not both act on one press.
-  move.addEventListener("keydown", (e) => {
+  grip.addEventListener("keydown", (e) => {
     if (e.altKey === true) return;
     place.key(e, true);
   });
@@ -702,6 +962,10 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   async function ask(text: string): Promise<void> {
     if (!live || running) return;
     say("dk-you", text);
+    conversed = true;
+    // Which conversation this run belongs to. Clearing bumps it, and
+    // everything below that would write into the transcript checks it first.
+    const mine = era;
 
     const controller = Abort ? new Abort() : null;
     running = controller;
@@ -729,135 +993,35 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     // asked about, because that selection has now been spoken for.
     let lastCount: number | undefined;
 
-    // Always installed when the host has not replaced it, and the SETTING is
-    // read inside — so turning confirmations off, or back on, in the middle of
-    // a run takes effect on the next commit rather than the next run. That is
-    // what somebody who has just watched a commit go past expects of the
-    // switch they reached for.
-    const gate = options.onBeforeCommit ?? confirmCommit;
+    // Always installed when the host has not replaced it AND the core is not
+    // already gating, and the SETTING is read inside — so turning
+    // confirmations off, or back on, in the middle of a run takes effect on
+    // the next commit rather than the next run. That is what somebody who has
+    // just watched a commit go past expects of the switch they reached for.
+    //
+    // Nothing is installed when the driver was mounted with an `approve` hook.
+    // That hook is called inside `driver.call()` for every path, this one
+    // included, so installing the panel's gate as well would be two questions
+    // about one commit — which is the thing this panel's own documentation
+    // says teaches people to click Yes without reading. An app that wants the
+    // panel to be that hook wires `approve: (req) => panel.approve(req)`; see
+    // `Widget.approve`.
+    const gate =
+      options.onBeforeCommit ?? (driver.approval?.policy === "hook" ? undefined : confirmCommit);
 
-    /** The built-in gate. Renders a question in the transcript and waits. */
+    /** The built-in gate, per run: find the count, then ask. */
     function confirmCommit(req: CommitRequest): Promise<CommitDecision> {
-      if (!settings.confirmCommits) return Promise.resolve(true);
-
-      // `Snapshot.selectedCount` as the fallback, because a commit verb takes
-      // no predicate and acts on the current selection — so the size of that
-      // selection is the number this question is about, whether or not a
-      // `describe` verb happened to report one in this run. It matters most in
-      // the case where `lastCount` is missing for a good reason: the person
-      // selected the rows themselves, or did it in an earlier run.
-      //
-      // `selected.length` last, and only as a floor: that field carries just
-      // the ids that are ON SCREEN, so it is the true size of the selection
-      // exactly when the whole selection is in front of the person, and an
-      // undercount otherwise. An app that fills `selectedCount` is believed
-      // over it, which is why it comes third.
-      const count = lastCount ?? req.snapshot.selectedCount ?? req.snapshot.selected?.length;
-
-      // The flag is read here and nowhere else, and only on a `commit` —
-      // `drive` calls this gate for commits alone, so `req.verb.kind` is
-      // already that. Absent means the app made no claim, which is gated: a
-      // commit that has not said there is a way back is treated as one that
-      // has not got one. See `confirmCommits`.
-      const reversible = req.verb.reversible === true;
-
-      // A size check beside the flag rather than folded into it, because they
-      // answer different questions. `reversible` is a claim about the kind of
-      // change; this is about how much of it there is, and an undo over
-      // thousands of rows is a promise an app may not be able to keep at that
-      // size whatever it declared. Strictly greater than, so the option reads
-      // as "ask above this many". See `COMMIT_ASK_ABOVE`.
-      const large = count !== undefined && count > askAbove;
-
-      if (reversible && !options.confirmEveryCommit && !large) {
-        // Through without a dialog, which is the whole point of the flag. Note
-        // what is NOT done here: `lastCount` is left alone. It is cleared when
-        // a question is asked, because that is when the number has been put in
-        // front of somebody and spoken for; a commit that ran without asking
-        // has not used it up, and the next commit — which may well be the
-        // irreversible one — still needs it to be answerable.
-        return Promise.resolve(true);
-      }
-
-      // A question nobody can see is not a question. The person may have hit
-      // Escape while the model was thinking, or be reading the settings view.
-      setOpen(true);
-      setSettingsOpen(false);
-
-      const row = el("div", "dk-ask");
-      const question = el("div", "dk-ask-q");
-      question.textContent =
-        count === undefined
-          ? `${req.verb.describe}?`
-          : `${req.verb.describe} — ${commas(count)} rows?`;
-      const why = el("div", "dk-ask-why");
-      // The two dialogs must not read alike. Two questions with the same words
-      // are one question as far as a person's attention is concerned, and the
-      // person who stops reading the reversible one has stopped reading the
-      // other one too — which is the failure this whole change exists to
-      // avoid, reintroduced one level down. So a reversible commit says there
-      // is a way back, and says why it is being asked about at all when the
-      // only reason is the size.
-      why.textContent =
-        (reversible
-          ? "This changes data, but the app says this can be undone." +
-            (large
-              ? " You are being asked because of how many rows it affects: an undo over" +
-                " this many is a promise an app may not be able to keep."
-              : "")
-          : "This changes data and may be irreversible.") +
-        (count === undefined
-          ? " No count was reported, so nobody can tell you how many rows it affects."
-          : "") +
-        argSummary(req.args);
-      const yes = el("button", "dk-yes");
-      yes.textContent = "Yes, do it";
-      yes.setAttribute("type", "button");
-      const no = el("button", "dk-no");
-      no.textContent = "No";
-      no.setAttribute("type", "button");
-
-      row.appendChild(question);
-      row.appendChild(why);
-      row.appendChild(no);
-      row.appendChild(yes);
-      log.appendChild(row);
-      scroll();
-      // Focus the safe answer, not the destructive one. A person pressing
-      // Enter on a dialog that appeared while they were typing should not
-      // thereby accept a thousand rows; reaching "Yes" takes one deliberate
-      // key.
-      no.focus?.();
-
+      // `lastCount` first, because it is the number the MODEL just put on the
+      // screen in this run. The two fallbacks and their order are
+      // `countFor`'s, which the out-of-run path shares.
+      const count = lastCount ?? countFor(req.snapshot);
+      if (!shouldAsk(req, count)) return Promise.resolve(true);
+      // Cleared when a question is ASKED, because that is when the number has
+      // been put in front of somebody and spoken for. A commit that ran
+      // without asking has not used it up, and the next commit — which may
+      // well be the irreversible one — still needs it to be answerable.
       lastCount = undefined;
-
-      return new Promise<CommitDecision>((resolve) => {
-        let answered = false;
-        const answer = (decision: CommitDecision, said: string): void => {
-          if (answered) return;
-          answered = true;
-          // The buttons go and the answer stays. Scrolling back through a
-          // transcript and finding a live "Yes, do it" button beside something
-          // that already happened is worse than no record at all.
-          yes.remove();
-          no.remove();
-          const outcome = el("div", "dk-ask-said");
-          outcome.textContent = said;
-          row.appendChild(outcome);
-          scroll();
-          resolve(decision);
-        };
-
-        yes.addEventListener("click", () => answer(true, "You allowed this."));
-        no.addEventListener("click", () => answer(false, "You said no."));
-        // Stop, or unmount, while a question is open. Without this the loop
-        // waits on a promise nobody will ever resolve and the panel is stuck
-        // busy forever — the abort has to answer the question, and the only
-        // safe answer is no.
-        controller?.signal.addEventListener?.("abort", () =>
-          answer("the run was stopped before this ran", "Stopped before this ran."),
-        );
-      });
+      return withLock(req.name, () => askPerson(req, count, controller?.signal));
     }
 
     const paced: DriveOptions = {
@@ -867,7 +1031,7 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
       ...(options.maxSteps === undefined ? {} : { maxSteps: options.maxSteps }),
       ...(options.refusalLimit === undefined ? {} : { refusalLimit: options.refusalLimit }),
-      onBeforeCommit: gate,
+      ...(gate ? { onBeforeCommit: gate } : {}),
       ...(controller ? { signal: controller.signal } : {}),
 
       controls: control,
@@ -884,15 +1048,22 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       // app is actually touched, and `onResult` the outcome — the three states
       // of one row.
       onBeforeCall: (e) => {
+        // Nothing from a cleared conversation reaches the one that replaced
+        // it. An abort stops the loop at its next await, so a call it had
+        // already announced can still arrive here afterwards, and a step row
+        // about it would appear in a transcript the person has just emptied.
+        if (era !== mine) return;
         mark(step(steps, e), "pending");
         aim(e);
       },
       onCall: (e) => {
+        if (era !== mine) return;
         mark(step(steps, e), "running");
         aim(e);
       },
       onControl: ({ state }) => show(state),
       onResult: ({ call, kind, result }) => {
+        if (era !== mine) return;
         if (kind === "describe" && result?.ok) lastCount = result.count;
         // The step stops being highlighted the moment it is over, whatever
         // the outcome. An outline left behind is an outline about nothing.
@@ -921,12 +1092,21 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
           outcome(entry, ` · refused: ${result.refused}`, "refused");
         }
       },
-      onSay: ({ text: prose }) => say("dk-me", prose),
+      onSay: ({ text: prose }) => {
+        if (era !== mine) return;
+        say("dk-me", prose);
+      },
     };
 
     try {
       const out = await drive(driver, paced);
 
+      // The conversation this run was part of was cleared while it was
+      // running. Its history is exactly what clearing threw away and its stop
+      // note is about a transcript nobody can see, so neither is kept: `drive`
+      // has already stopped, the panel already said so, and the person is
+      // looking at a fresh panel.
+      if (era !== mine) return;
       messages = out.messages;
       const note = STOP_NOTE[out.stop];
       if (note) say("dk-note", note);
@@ -935,8 +1115,13 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       // in the transcript as well as handed to `onError`, because the person is
       // sitting in front of a panel that just went quiet and the console is
       // not where they are looking.
+      // Handed to `onError` whichever conversation it belonged to — a host
+      // logging its own backend's 500 wants it either way — and said in the
+      // transcript only if that transcript is still the one it is about.
       options.onError?.(err);
-      say("dk-note", `Something went wrong talking to the model: ${message(err)}`);
+      if (era === mine) {
+        say("dk-note", `Something went wrong talking to the model: ${message(err)}`);
+      }
     } finally {
       running = null;
       active = null;
@@ -946,14 +1131,176 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       // hold abandons them unrun and no `onResult` is coming, so leaving them
       // mid-flight would be a panel saying something is about to happen when
       // the run is already over.
-      for (const entry of steps.values()) {
-        if (entry.line.className.includes("dk-step-pending")) {
-          outcome(entry, " · not run", "skipped");
+      if (era === mine) {
+        for (const entry of steps.values()) {
+          if (entry.line.className.includes("dk-step-pending")) {
+            outcome(entry, " · not run", "skipped");
+          }
         }
       }
       busy(false);
-      if (live) input.focus?.();
+      // Not after a clear: `clearConversation` has already put focus where a
+      // fresh panel starts, and it may well have been in the settings view
+      // that the person pressed the button.
+      if (live && era === mine) input.focus?.();
     }
+  }
+
+  // ---- the gate ----------------------------------------------------------
+  //
+  // Lifted out of `ask()` so that the panel's dialog is an IMPLEMENTATION of
+  // `MountOptions.approve` rather than the only gate in the system. The same
+  // three functions serve both callers: the in-page loop's `onBeforeCommit`,
+  // which has a run and a `lastCount` and an abort signal, and `approve()`
+  // below, which has none of those because the call it is about arrived over
+  // the relay. One dialog, one set of rules, two paths — which is the whole
+  // point of the gate moving into the core.
+
+  /**
+   * How many rows the question is about, from the screen alone.
+   *
+   * `Snapshot.selectedCount` first, because a commit verb takes no predicate
+   * and acts on the current selection, so the size of that selection is the
+   * number this question is about whether or not a `describe` verb happened to
+   * report one. `selected.length` last and only as a floor: that field carries
+   * just the ids that are ON SCREEN, so it is the true size exactly when the
+   * whole selection is in front of the person and an undercount otherwise. An
+   * app that fills `selectedCount` is believed over it.
+   */
+  function countFor(snapshot: Snapshot): number | undefined {
+    return snapshot.selectedCount ?? snapshot.selected?.length;
+  }
+
+  /** Whether this commit gets a question. The three options' whole meaning. */
+  function shouldAsk(req: ApprovalRequest, count: number | undefined): boolean {
+    if (!settings.confirmCommits) return false;
+
+    // Absent means the app made no claim, which is gated: a commit that has
+    // not said there is a way back is treated as one that has not got one.
+    const reversible = req.verb.reversible === true;
+
+    // A size check beside the flag rather than folded into it, because they
+    // answer different questions. `reversible` is a claim about the kind of
+    // change; this is about how much of it there is, and an undo over
+    // thousands of rows is a promise an app may not be able to keep at that
+    // size whatever it declared. Strictly greater than, so the option reads as
+    // "ask above this many". See `COMMIT_ASK_ABOVE`.
+    const large = count !== undefined && count > askAbove;
+
+    return !reversible || options.confirmEveryCommit === true || large;
+  }
+
+  /**
+   * Hold the core's no-other-calls lock while this dialog is open.
+   *
+   * This is the panel's share of the webmcp#288 defence. The agent being asked
+   * is not the only agent that can reach this driver: a second one over the
+   * relay can call `press("approve")` while the question sits in the
+   * transcript, and in-page nothing was stopping it. With the lock held, every
+   * `call()` on this driver is refused `approval-pending` until the person
+   * answers — including a press of this panel's own Yes, if a host ever put an
+   * approval control in the light DOM.
+   *
+   * Via the driver rather than by the panel keeping a flag of its own, because
+   * the thing that has to refuse the call is the thing that runs it. An older
+   * hand-written driver with no `approval` simply asks without the lock, which
+   * is what it did before this existed.
+   */
+  function withLock<T>(verb: string, ask: () => Promise<T>): Promise<T> {
+    const hold = driver.approval?.hold;
+    return hold ? hold(verb, ask) : ask();
+  }
+
+  /**
+   * Render the question in the transcript and wait for an answer.
+   *
+   * `signal` is the run's abort, when there is a run. Without it a stop or an
+   * unmount would leave the loop waiting on a promise nobody will ever resolve
+   * and the panel stuck busy forever — so the abort answers the question, and
+   * the only safe answer is no. A call that arrived over the relay has no run
+   * and therefore no signal: that question stays open until somebody answers
+   * it or `MountOptions.approvalTimeout` lapses, which is the core's business
+   * and not the panel's.
+   */
+  function askPerson(
+    req: ApprovalRequest,
+    count: number | undefined,
+    signal?: { addEventListener?: (type: string, fn: () => void) => void },
+  ): Promise<CommitDecision> {
+    // A question nobody can see is not a question. The person may have hit
+    // Escape while the model was thinking, or be reading the settings view.
+    setOpen(true);
+    setSettingsOpen(false);
+
+    const reversible = req.verb.reversible === true;
+    const large = count !== undefined && count > askAbove;
+
+    const row = el("div", "dk-ask");
+    const question = el("div", "dk-ask-q");
+    question.textContent =
+      count === undefined
+        ? `${req.verb.describe}?`
+        : `${req.verb.describe} — ${commas(count)} rows?`;
+    const why = el("div", "dk-ask-why");
+    // The two dialogs must not read alike. Two questions with the same words
+    // are one question as far as a person's attention is concerned, and the
+    // person who stops reading the reversible one has stopped reading the
+    // other one too — which is the failure this whole change exists to avoid,
+    // reintroduced one level down. So a reversible commit says there is a way
+    // back, and says why it is being asked about at all when the only reason
+    // is the size.
+    why.textContent =
+      (reversible
+        ? "This changes data, but the app says this can be undone." +
+          (large
+            ? " You are being asked because of how many rows it affects: an undo over" +
+              " this many is a promise an app may not be able to keep."
+            : "")
+        : "This changes data and may be irreversible.") +
+      (count === undefined
+        ? " No count was reported, so nobody can tell you how many rows it affects."
+        : "") +
+      argSummary(req.args);
+    const yes = el("button", "dk-yes");
+    yes.textContent = "Yes, do it";
+    yes.setAttribute("type", "button");
+    const no = el("button", "dk-no");
+    no.textContent = "No";
+    no.setAttribute("type", "button");
+
+    row.appendChild(question);
+    row.appendChild(why);
+    row.appendChild(no);
+    row.appendChild(yes);
+    post(row);
+    // Focus the safe answer, not the destructive one. A person pressing Enter
+    // on a dialog that appeared while they were typing should not thereby
+    // accept a thousand rows; reaching "Yes" takes one deliberate key.
+    no.focus?.();
+
+    return new Promise<CommitDecision>((resolve) => {
+      let answered = false;
+      const answer = (decision: CommitDecision, said: string): void => {
+        if (answered) return;
+        answered = true;
+        // The buttons go and the answer stays. Scrolling back through a
+        // transcript and finding a live "Yes, do it" button beside something
+        // that already happened is worse than no record at all.
+        yes.remove();
+        no.remove();
+        const outcome = el("div", "dk-ask-said");
+        outcome.textContent = said;
+        row.appendChild(outcome);
+        scroll();
+        resolve(decision);
+      };
+
+      yes.addEventListener("click", () => answer(true, "You allowed this."));
+      no.addEventListener("click", () => answer(false, "You said no."));
+      signal?.addEventListener?.("abort", () =>
+        answer("the run was stopped before this ran", "Stopped before this ran."),
+      );
+    });
   }
 
   // ---- bits --------------------------------------------------------------
@@ -967,9 +1314,45 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   function say(className: string, text: string): ElementLike {
     const line = el("div", className);
     line.textContent = text;
-    log.appendChild(line);
+    return post(line);
+  }
+
+  /** Put one element in the transcript, and remember that it is in there.
+   *  Everything that appends to the log goes through here, because a line that
+   *  skipped it would be a line "clear conversation" could not clear — which
+   *  is a transcript that is half gone, the one outcome worse than either
+   *  keeping it or dropping it. */
+  function post(node: ElementLike): ElementLike {
+    lines.push(node);
+    log.appendChild(node);
     scroll();
-    return line;
+    return node;
+  }
+
+  /**
+   * Drop the transcript, the step list and the history, and stop whatever is
+   * running. See the settings row for why this is where it lives and why it
+   * asks nothing first.
+   */
+  function clearConversation(): void {
+    // First, and through the run's own controller: the loop must not be left
+    // holding `messages` the panel has just thrown away. `era` is what keeps
+    // that run's dying words — its stop note, its abandoned steps, the history
+    // it hands back — out of the conversation that replaces it.
+    era++;
+    running?.abort();
+    messages = [];
+    for (const line of lines) line.remove();
+    lines.length = 0;
+    conversed = false;
+    say("dk-note", greeting);
+    // Out of the settings view, because the thing the person just acted on is
+    // the conversation and that is not the view they are looking at. This also
+    // puts focus in the input, which is where a fresh panel starts.
+    setSettingsOpen(false);
+    // Said out loud as well, because the panel going empty is a change
+    // somebody who cannot see it has no other way to notice.
+    status.textContent = "Conversation cleared";
   }
 
   /** One row of the step list, created the first time a call is mentioned and
@@ -992,8 +1375,7 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       entry.line.setAttribute("title", "Changes data, and may be irreversible.");
     }
     steps.set(call.id, entry);
-    log.appendChild(entry.line);
-    scroll();
+    post(entry.line);
     return entry;
   }
 
@@ -1131,6 +1513,24 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     wrap.className = `dk-wrap${isOpen ? " dk-open" : ""}${isBusy ? " dk-busy" : ""}${
       isSettings ? " dk-set-open" : ""
     }`;
+    paintLauncher();
+  }
+
+  /**
+   * The dot in the launcher, and the launcher's accessible name with it.
+   *
+   * On when the panel is minimised AND there is something behind it: a
+   * conversation, or a run still going. Both, because they are different
+   * reasons to look: the run is the urgent one and the transcript is the one
+   * that is still true an hour later. Not on while the panel is open, where
+   * the transcript is the thing the person is looking at and a dot would be
+   * saying so to somebody already reading it.
+   */
+  function paintLauncher(): void {
+    const waiting = !isOpen && (conversed || isBusy);
+    dot.className = waiting ? "dk-dot dk-dot-on" : "dk-dot";
+    launcher.setAttribute("aria-label", waiting ? WAITING_LABEL : ASK_LABEL);
+    launcher.setAttribute("title", waiting ? WAITING_LABEL : ASK_LABEL);
   }
 
   function setOpen(next: boolean): void {
@@ -1162,6 +1562,19 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     open: () => setOpen(true),
     close: () => setOpen(false),
     ask,
+    // No `withLock` here: the core took its lock before it called this, and a
+    // second take would be the panel asserting a thing that is already true.
+    // No count from `lastCount` either — see `Widget.approve`.
+    approve: async (req: ApprovalRequest): Promise<Approval> => {
+      const count = countFor(req.snapshot);
+      if (!shouldAsk(req, count)) return true;
+      // The run in flight's signal, when there is one, so that stopping a run
+      // also answers a question the relay asked during it. Usually there is
+      // no run at all, and then only an answer or the core's
+      // `approvalTimeout` ends the wait.
+      const decision = await askPerson(req, count, running?.signal);
+      return decision as Approval;
+    },
     moveTo: place.moveTo,
     position: place.chosen,
     unmount: () => {

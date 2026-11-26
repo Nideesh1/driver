@@ -1,0 +1,16 @@
+{
+  "id": "cross-screen",
+  "ask": "sort the companies by how many contacts are pending, open whichever is at the top, and accept its pending ones",
+  "why": "The long job: five verbs across three screens, two of them screen-scoped. It is here to measure DRIFT rather than correctness — a bound of six on a five-call path leaves one model turn of slack, and an agent that needs nine is reading the screen to learn what the manifest should have told it. Acme Industrial has the most pending (112) in the seeded data.",
+  "expect": {
+    "calls": ["goto", "sort-companies", "open-company", "select-pending-here", "accept-selected"],
+    "args": {
+      "goto": { "screen": "companies" },
+      "sort-companies": { "by": "pending" },
+      "open-company": { "company": "Acme Industrial" }
+    },
+    "count": { "select-pending-here": 112 },
+    "commits": ["accept-selected"],
+    "steps": "<=6"
+  }
+}

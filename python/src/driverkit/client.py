@@ -201,6 +201,7 @@ class Driverkit:
         args: Mapping[str, Scalar] | None = None,
         rev: int | None = None,
         screen: str | None = None,
+        plan: str | None = None,
     ) -> Result:
         """``POST /dk/tabs/:tab/call`` — run a verb, get the screen back.
 
@@ -219,6 +220,16 @@ class Driverkit:
         have different fixes. Comes back refused as ``wrong-screen``, naming
         both screens. Omitting it opts out, like ``rev``.
 
+        ``plan`` is the third claim and the one that is NOT optional where it
+        applies: the token a ``describe`` returned in ``Result.plan``, passed
+        back to a commit whose manifest entry says ``consumes: "plan"``. The
+        other two may be omitted to skip their checks, because an agent that
+        makes no claim about what it was looking at has at least made no false
+        one. A commit that could be called without a plan would be a commit
+        whose count guarantee is advisory, so the core refuses the bare call as
+        ``stale-plan`` — and refuses a token taken before the selection moved,
+        naming both counts.
+
         Returns a Result either way. Only the relay being unreachable, or
         answering with something that is not a Result, raises.
         """
@@ -232,6 +243,12 @@ class Driverkit:
             # the id of any screen, so sending it would ask the app to refuse a
             # call over a field the caller left blank.
             payload["screen"] = screen
+        if plan:
+            # Forwarded as the opaque string it is. This client does not parse
+            # it, does not check it and could not: the core that minted it is
+            # the only thing that knows what it binds, and a second opinion
+            # about staleness on this side would be a second set of rules.
+            payload["plan"] = plan
 
         body = self._post(f"/dk/tabs/{urllib.parse.quote(tab, safe='')}/call", payload)
         if not isinstance(body, Mapping) or "ok" not in body:

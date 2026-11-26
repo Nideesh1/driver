@@ -37,7 +37,8 @@ talks to the relay over MCP). Packages: `driverkit` (core `mount()`), `@driverki
 | **write or review a verb list for their app** (the hard part) | read the repo, then draft verbs | [authoring-verbs.md](references/authoring-verbs.md) |
 | see that procedure run on a messy app | a worked draft, verb by verb, with the `kind` reasoning | [worked-example.md](references/worked-example.md) |
 | write `visible()` honestly (`rev`, `page`, `selected`) | the snapshot contract and its three `page` states | [snapshot.md](references/snapshot.md) |
-| **adopt an app with more than one screen** | `Verb.screen`, `Snapshot.screen`, `CallOptions.screen`, `instructions` | [screens.md](references/screens.md) |
+| **adopt an app with more than one screen** | `Verb.screen`, `Snapshot.screen`, `CallOptions.screen`, `instructions`, `Manifest.screens` + `goto` | [screens.md](references/screens.md) |
+| **express a job that takes several verbs** | `Manifest.flows`: a static recipe the agent reads and follows, never calls | [screens.md](references/screens.md) |
 | a chat panel inside their own app (case 1) | `mountWidget(driver, { think: backendThink("/api/chat") })` + that endpoint | [widget.md](references/widget.md) |
 | drive the app from another process, a voice assistant, Claude Desktop (case 2) | relay (standalone or ASGI-mounted) + `driverkit-mcp` | [relay-mcp.md](references/relay-mcp.md) |
 | deploy for more than one person | signed tab tokens the app's backend mints; anonymous visitors | [auth.md](references/auth.md) |
@@ -77,6 +78,12 @@ getting it wrong is what costs them. In short, and at length in [authoring-verbs
 - **The tool list must not vary with the live screen.** Declare the mapping statically with `Verb.screen` and let
   the core refuse `wrong-screen`; a verb list that changed on navigation would bust the prefix every time the
   person moved. The app's own briefing goes in `MountOptions.instructions`, never in every snapshot's `note`.
+- **Declare every screen the app has in `MountOptions.screens`, never the ones this user can reach.** A list
+  narrowed by role or plan is a per-user list in the cached half, and an absence is unfalsifiable — an agent that
+  meets one decides the feature does not exist. "You may not open that" is a refusal from the `navigate` hook.
+- **A flow is a recipe, not a call.** The agent reads `Manifest.flows` and follows the steps with ordinary verbs;
+  nothing executes one, so it can still adapt when step three finds the record already accepted. Budgets, from
+  Apple's app skills: a `describe` is one line ≤1024 chars, a flow's steps ≤10,000, `instructions` ≤10,000.
 - Keep the snapshot to a screenful. A snapshot near the relay's 1 MiB body limit is a bug in `visible()`.
 - Never fill `Snapshot.selected` with every selected id — on-screen ids only, with `selectedCount` for the size.
 - A verb may not be named — or refuse with — a reserved slug: `stale`, `wrong-screen`, `unknown-verb`,

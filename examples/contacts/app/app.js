@@ -48,12 +48,47 @@ let connection;
  *  by the store and once by the listener reading the URL we just set. */
 let writingHash = false;
 
-const app = createApp(() => {
-  syncHash();
-  renderScreen(app, host);
-  markNav();
-  connection?.changed();
-});
+/**
+ * The chat panel, assigned below and referred to before it exists.
+ *
+ * The forward reference is unavoidable and it is the documented wiring:
+ * `mount()` has to happen before there is a panel to answer for it, and the
+ * panel needs the driver `mount()` returns. So the approval hook closes over
+ * this variable and is not called until an agent asks for a commit, by which
+ * time it is set.
+ *
+ * @type {import("../../../packages/widget/dist/widget.js").Widget | undefined}
+ */
+let panel;
+
+const app = createApp(
+  () => {
+    syncHash();
+    renderScreen(app, host);
+    markNav();
+    connection?.changed();
+  },
+  {
+    // THE GATE, AND THE WHOLE REASON THIS LINE EXISTS. Without it the panel
+    // asked the person before a commit and an agent arriving over the relay
+    // did not get asked at all: `driver.call("accept-selected")` from another
+    // process simply accepted the rows. The confirmation was in the in-page
+    // loop, which is one of the two ways in.
+    //
+    // It is in `mount()` now, so this one hook covers both: the panel's own
+    // run and anything that arrives over `/dk`. The question is the panel's
+    // dialog either way — same wording, same count, same `confirmCommits`
+    // switch — and a "No" is the same `declined-by-user` refusal, which is a
+    // slug the outside path could not previously produce at all.
+    //
+    // No `approvalTimeout` here, deliberately. This is a demo somebody drives
+    // by hand, and a deadline that denies while they are reading the question
+    // would be the wrong lesson; the agent's own transport deadline already
+    // tells it the outcome is unknown. An app whose approver is on a phone, or
+    // whose gate is a webhook, sets one.
+    approve: (req) => panel.approve(req),
+  },
+);
 
 const { driver, store } = app;
 
@@ -134,7 +169,7 @@ markNav();
 
 // ---- the two ways in ----------------------------------------------------
 
-mountWidget(driver, {
+panel = mountWidget(driver, {
   think: backendThink("/api/chat"),
   greeting:
     "Ask me to do things in Northwind. Try: “open Grayson Robotics, how many of its " +

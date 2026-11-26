@@ -854,3 +854,194 @@ test("fromDom keeps the rows-unavailable note when it adds the control list", ()
   assert.match(snapshot.note!, /\. controls: retry$/);
   dom.stop();
 });
+
+// ── the gate's own controls ─────────────────────────────────────────────────
+//
+// webmachinelearning/webmcp#288: ChatGPT's in-app browser called a
+// proposal-only tool, the proposal correctly declined to execute itself, so
+// the agent clicked the page's own Approve button and the receipt recorded
+// "approved by you". `press` and `commit-control` are one action with total
+// coverage, and total coverage includes the button that exists to stop the
+// action. These pin the layer that takes a control back out.
+
+const CONFIRM = `
+  <div id="app">
+    <button data-dk-control="accept-all" data-dk-kind="commit">Accept all</button>
+    <div role="dialog">
+      <button data-dk-control="approve" data-dk-kind="commit" data-dk-human-only>Yes, do it</button>
+      <input data-dk-control="signature" data-dk-human-only data-dk-kind="commit" />
+      <button data-dk-control="cancel" data-dk-kind="read" data-dk-human-only="false">No</button>
+    </div>
+  </div>`;
+
+test("a human-only control is not enumerated, so an agent never learns it is there", () => {
+  // Not listed and not refusable-by-name: the two have to go together. A
+  // control an agent can see in the snapshot and cannot press is an invitation
+  // to keep trying, and a control it cannot see does not come up.
+  const { doc } = page(CONFIRM);
+  const { dk } = bind(doc);
+  const names = dk.controls().map((c) => c.name);
+
+  assert.deepEqual(names.sort(), ["accept-all", "cancel"]);
+  assert.equal(dk.note()!.includes("approve"), false, "the note leaked the gate's own button");
+});
+
+test("pressing the gate's own approve button is refused as no-such-control", async () => {
+  // `no-such-control` and NOT a refusal of its own, deliberately. A distinct
+  // slug would make this an oracle over which buttons are the interesting
+  // ones — ask for every name and the ones that come back differently are the
+  // approvals. So a marked-human-only control answers exactly as a button
+  // nobody marked at all.
+  const live = page(CONFIRM);
+  const driver = driverFor(bind(live.doc).dk);
+
+  for (const verb of ["press", "commit-control"]) {
+    const result = await driver.call(verb, { control: "approve" });
+    assert.equal(refusal(result), "no-such-control");
+    assert.equal(live.root.querySelector('[data-dk-control="approve"]')!.clicks, 0);
+  }
+
+  // The field form too: a signature box is a control that takes text, and
+  // typing into it is the same bypass wearing different clothes.
+  assert.equal(refusal(await driver.call("type-into", { control: "signature", text: "A. Lovelace" })), "no-such-control");
+  // And the unmarked button beside it still works, so this is an opt-out and
+  // not a quarantine of everything near a dialog.
+  assert.equal((await driver.call("press", { control: "cancel" })).ok, true);
+});
+
+test("`data-dk-human-only=\"false\"` is a real no, for markup that always emits the attribute", () => {
+  // Presence is the signal, because `data-dk-human-only` with no value is how
+  // an author writes it by hand. A templating language that cannot omit an
+  // attribute needs a way to say no, and `false` is it — the `cancel` button in
+  // the fixture above is enumerated for exactly that reason.
+  const { doc } = page(CONFIRM);
+  const { dk } = bind(doc);
+  assert.ok(dk.controls().some((c) => c.name === "cancel"));
+});
+
+// ── the mark is inherited ───────────────────────────────────────────────────
+//
+// `data-dk-human-only` used to read the element and nothing else, so the
+// natural way to write it — one attribute on the gate itself — marked nothing,
+// and the only spelling that worked was to repeat it on every Yes, every
+// signature field and every 2FA box inside the dialog. An opt-out whose
+// correct use is the laborious one is an opt-out that gets got wrong. The walk
+// needs an upward link, which `ElementLike.parentElement` now declares as an
+// OPTIONAL field: a real `Element` has it, and anything that does not reads as
+// "no parent", which is the behaviour this package had before.
+
+const WRAPPED = `
+  <div id="app">
+    <button data-dk-control="accept-all" data-dk-kind="commit">Accept all</button>
+    <div role="dialog" data-dk-human-only>
+      <p>Accept 3,412 descents?</p>
+      <button data-dk-control="approve" data-dk-kind="commit">Yes, do it</button>
+      <input data-dk-control="signature" data-dk-kind="commit" />
+      <div class="options">
+        <input type="checkbox" data-dk-control="also-notify" data-dk-kind="describe" />
+      </div>
+      <button data-dk-control="read-terms" data-dk-kind="read" data-dk-human-only="false">Terms</button>
+    </div>
+  </div>`;
+
+test("a control inside an element marked human-only is withheld too, at any depth", () => {
+  const { doc } = page(WRAPPED);
+  const { dk } = bind(doc);
+
+  // `also-notify` is two levels down inside the dialog, which is the case the
+  // element-only read got wrong: an author marks the dialog, not its grid.
+  assert.deepEqual(
+    dk.controls().map((c) => c.name).sort(),
+    ["accept-all", "read-terms"],
+  );
+  assert.equal(dk.note()!.includes("approve"), false, "the note leaked the gate's own button");
+  assert.equal(dk.note()!.includes("also-notify"), false);
+});
+
+test("a control inside a human-only ancestor is refused as no-such-control, like an unmarked one", async () => {
+  // Same slug as a name nobody ever marked, deliberately: a distinct refusal
+  // would be an oracle over which buttons are the approvals.
+  const live = page(WRAPPED);
+  const driver = driverFor(bind(live.doc).dk);
+
+  for (const control of ["approve", "also-notify"]) {
+    for (const verb of ["press", "commit-control"]) {
+      assert.equal(refusal(await driver.call(verb, { control })), "no-such-control");
+    }
+    assert.equal(at(live.root, control).clicks, 0);
+  }
+  assert.equal(
+    refusal(await driver.call("type-into", { control: "signature", text: "A. Lovelace" })),
+    "no-such-control",
+  );
+  assert.equal(at(live.root, "signature").value, "");
+});
+
+test("a descendant may say `false`, so one control inside a marked region is opened again", async () => {
+  // The nearest mark wins, which is the only reading that lets an author close
+  // a dialog and still publish the one thing in it that is safe to read.
+  const live = page(WRAPPED);
+  const driver = driverFor(bind(live.doc).dk);
+
+  assert.equal((await driver.call("press", { control: "read-terms" })).ok, true);
+  assert.equal(at(live.root, "read-terms").clicks, 1);
+});
+
+test("the author is told which mark withheld a control, and the agent is told nothing", () => {
+  // The one case of this attribute that looks like a bug in the library: a
+  // control that is marked, is on screen, and does not appear. So the library
+  // says which it was — to the author, on the channel an agent never reads.
+  // Once per enumeration, like every other diagnostic here; the collapsing to
+  // one line per distinct message belongs to the default console warner, and
+  // an `onWarn` that wants it does its own.
+  const { doc } = page(WRAPPED);
+  const { dk, warnings } = bind(doc);
+  dk.controls();
+
+  const said = warnings.filter((w) => w.includes("data-dk-human-only"));
+  assert.equal(said.length, 1, `expected one warning, got ${JSON.stringify(warnings)}`);
+  assert.match(said[0]!, /approve/);
+  assert.match(said[0]!, /signature/);
+  assert.match(said[0]!, /also-notify/);
+  // And it names the way back, because an author who marked a wrapper by
+  // accident needs the escape hatch and not just the diagnosis.
+  assert.match(said[0]!, /data-dk-human-only="false"/);
+});
+
+test("an element with no parentElement reads as having no ancestors, so an older fake still works", () => {
+  // `parentElement` is optional on `ElementLike` for this exact reason. A
+  // hand-rolled element — a test double, a non-DOM renderer's adapter — that
+  // predates the walk must not crash and must not have its controls withheld;
+  // it gets the element-only behaviour, which is what it always had.
+  const button = {
+    textContent: "Accept all",
+    getAttribute: (name: string) =>
+      ({ "data-dk-control": "accept-all", "data-dk-kind": "commit" })[name] ?? null,
+    click: () => {},
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  };
+  const root = {
+    querySelector: () => null,
+    querySelectorAll: (selectors: string) => (selectors === "[data-dk-control]" ? [button] : []),
+  };
+
+  const dk = controlsFromDom({ root, onWarn: () => {} });
+  assert.deepEqual(dk.controls(), [{ name: "accept-all", label: "Accept all", kind: "commit" }]);
+});
+
+test("the undeclared warning asks for a decision and does not offer `read` as a way to silence it", () => {
+  // The line this replaces ended "and the question goes away", which is true
+  // and is also an instruction to type the cheapest value: `read` on
+  // everything silences every question in one pass, and `read` on a button
+  // that changes data removes the only thing in front of an agent pressing it.
+  // The library cannot catch that, so the warning must not invite it.
+  const { dk, warnings } = bind(page(SCREEN).doc, { rows: "#contacts" });
+  dk.controls();
+
+  const said = warnings.find((w) => w.includes("declare no data-dk-kind"))!;
+  assert.match(said, /export/, "the warning has to name the control");
+  assert.match(said, /CLAIM about what the control does/);
+  assert.match(said, /nothing here can check it/);
+  assert.doesNotMatch(said, /question goes away/);
+});

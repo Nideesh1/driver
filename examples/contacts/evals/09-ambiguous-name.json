@@ -1,0 +1,11 @@
+{
+  "id": "ambiguous-name",
+  "ask": "select the contact called Ada Duarte",
+  "why": "Five different people in the seeded data are called Ada Duarte, at five different companies. An agent that picks one is wrong even when it picks the one you meant, because it did not know — the right move is to ask which. The library has no ask mechanism yet, so `asks` is reported as an observation and not asserted; the half that bites today is that an ambiguous ask must change nothing. Pass `--ask-verb <name>` once the app has one and this case starts asserting without being edited.",
+  "expect": {
+    "asks": true,
+    "forbid": ["select-where"],
+    "commits": "none",
+    "steps": "<=6"
+  }
+}

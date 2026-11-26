@@ -249,6 +249,18 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
   if (!ES) throw new Error("driverkit: no EventSource. Pass options.EventSource.");
   if (!post) throw new Error("driverkit: no fetch. Pass options.fetch.");
 
+  // Before anything is opened, for the reason a relay with remote access and
+  // no way to identify callers refuses to start rather than serving: this is
+  // the moment the app becomes drivable by something that is not in the room.
+  //
+  // Kinds first, and the order is an argument rather than a style: the commit
+  // check reads `kind`, so a manifest with silent verbs cannot be assessed by
+  // it at all. "Declare your kinds" and then "now say who approves these
+  // three commits" is two true sentences in the order they can be acted on;
+  // the other order asks about a list that is not yet known to be complete.
+  requireDeclaredKinds(driver);
+  requireApprovalPolicy(driver);
+
   const tab = options.tab ?? remembered(storage, options.app, options.randomUUID, onError);
   const tokenIn = options.tokenIn ?? "query";
   const mintToken =
@@ -561,10 +573,14 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
         // tightens that. `screen` is the agent's claim about which screen it
         // read, checked by the core before `rev`; this hop is where it would
         // otherwise be dropped, which would leave the field working in-page and
-        // silently doing nothing over the relay.
+        // silently doing nothing over the relay. `plan` is here for the same
+        // reason and with the most to lose by being missed: a commit that
+        // requires a token and is reached by a path that drops it is refused
+        // forever, and one reached by a path that invents one would be worse.
         {
           ...(frame.rev === undefined ? {} : { rev: frame.rev }),
           ...(frame.screen === undefined ? {} : { screen: frame.screen }),
+          ...(frame.plan === undefined ? {} : { plan: frame.plan }),
         },
       );
     } catch (err) {
@@ -722,6 +738,126 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
       source = null;
     },
   };
+}
+
+/**
+ * Refuse to publish a driver that has not said what its verbs do.
+ *
+ * THE GAP THIS CLOSES. The core's gate fires on `kind === "commit"`, and the
+ * publish check below counts only DECLARED commits. So a verb with no `kind`
+ * that changes data went out to an outside agent with no gate in front of it
+ * and nobody complaining — the whole guarantee resting on the app having
+ * declared its kinds, which is the one thing nothing checked.
+ *
+ * WHY HERE AND NOT IN `mount()`. In-page leniency is deliberate and
+ * documented: `Verb.kind` is optional, an absent one makes no safety claim in
+ * either direction, and a half-written app with three undeclared verbs must
+ * still mount and still work. Nothing is published by mounting. Publishing to
+ * a relay is the act that hands an agent in another process the ability to
+ * change data, and it is already the place this library demands an explicit
+ * declaration rather than inferring one. So the demand is the same demand, one
+ * field over: say what your verbs do before strangers can call them.
+ *
+ * THE RULE: every verb in a published manifest declares a `kind`, unless the
+ * driver declared `approve: "unattended"`.
+ *
+ * Total, rather than the narrower rules that were available:
+ *
+ *   "Only verbs that look like they change data." There is no such predicate.
+ *   It would have to be a guess from the name — `delete-*`, `set-*` — which is
+ *   the exact inference the controls layer refuses to make, for the exact
+ *   reason: a near miss is how `set-view` gets gated and `finalize` does not.
+ *   A rule that is wrong in both directions teaches an author to distrust it.
+ *
+ *   "Only when no approver was declared at all." This is the tempting one and
+ *   it is unsound. A declared hook does NOT cover an undeclared verb: the core
+ *   asks only about `kind === "commit"`, so a driver with a perfectly good
+ *   approval hook and one silent verb publishes that verb ungated. The narrow
+ *   rule would accept precisely the configuration that is unsafe. Which is
+ *   also why a `hook` policy does not satisfy this check.
+ *
+ *   "Warn instead of throw." A warning on publish is a warning the author of
+ *   the app is not reading, because the app works. The precedent in PROTOCOL.md
+ *   is a refusal to start, and that is what a configuration which must not be
+ *   reachable by accident looks like.
+ *
+ * WHY `"unattended"` SATISFIES IT. Because it is the same claim, said louder.
+ * A driver declaring `"unattended"` runs its declared commits with nobody in
+ * front of them; a silent verb on that driver is treated no differently from a
+ * verb that declared `commit`, so there is nothing left for this check to
+ * protect. Refusing it anyway would be demanding paperwork after the risk has
+ * already been accepted out loud — and it would leave an author who really does
+ * run unattended with no way to connect at all, which is how a safety check
+ * gets deleted rather than satisfied. `"unattended"` is the typed opt-out the
+ * core already defines for this exact decision; this reuses it rather than
+ * inventing a second one.
+ */
+function requireDeclaredKinds(driver: Driver): void {
+  if (driver.approval?.policy === "unattended") return;
+  const manifest = driver.manifest();
+  const silent = manifest.verbs.filter((v) => v.kind === undefined).map((v) => v.name);
+  if (silent.length === 0) return;
+  throw new Error(
+    `driverkit: refusing to connect \`${manifest.app}\` to a relay. ` +
+      `${silent.length} of its ${manifest.verbs.length} verb(s) declare no \`kind\` — ` +
+      `${silent.slice(0, 6).join(", ")}${silent.length > 6 ? ", …" : ""} — so the core's ` +
+      `approval gate, which fires on \`kind: "commit"\`, cannot see them. A verb that changes ` +
+      `data and never said so is published to an agent in another process with nothing in ` +
+      `front of it. In-page this is allowed on purpose (an absent \`kind\` makes no claim); ` +
+      `publishing is where the claim has to be made. Pass ONE of these: ` +
+      `\`kind: "read" | "describe" | "commit"\` on each verb above — the honest answer, and it ` +
+      `is also what tells an agent which calls are free to try; or \`approve: "unattended"\` to ` +
+      `\`mount()\`, which says out loud that commits on this driver run with nobody watching ` +
+      `and takes every verb off this list. See Verb.kind and MountOptions.approve.`,
+  );
+}
+
+/**
+ * Refuse to publish a driver whose commits nobody has said who approves.
+ *
+ * THE GAP THIS CLOSES. The confirmation used to live in the agent loop's
+ * `onBeforeCommit`, which `mountWidget` defaults on, so the in-page panel
+ * asked a person and an agent arriving over this stream called
+ * `accept-selected` and it simply ran. A live tab was driven from a shell and
+ * 425 rows could have been committed with nothing in the way. The gate now
+ * lives in `mount()`'s `call`, where both paths converge — but a gate the app
+ * never installed is still no gate, so the declaration is required HERE, at
+ * the one act that makes the app reachable from outside the page.
+ *
+ * WHY A THROW. The precedent is PROTOCOL.md's: a relay with remote access
+ * turned on and no way to identify callers **refuses to start** rather than
+ * serving every connected tab to anyone who asks. Three deliberate acts to
+ * publish a relay, and by the same argument three to let an outside agent
+ * change data: write a `commit` verb, connect to a relay, and say who
+ * approves. The unsafe answer is still available — `approve: "unattended"` —
+ * and it is now a sentence somebody wrote rather than a field they left out.
+ *
+ * WHICH VERBS COUNT. Only a `commit` that has not declared `reversible`, which
+ * is the same line the widget's dialog draws and for the same reason: an
+ * absent `reversible` makes no claim, and a commit that has not said there is
+ * a way back is treated as one that has not got one. An app whose every commit
+ * declares `reversible` connects exactly as it did before. So does an app with
+ * no commit verbs at all, and so does a hand-written driver that declares
+ * `approval` itself.
+ */
+function requireApprovalPolicy(driver: Driver): void {
+  if ((driver.approval?.policy ?? "none") !== "none") return;
+  const exposed = driver
+    .manifest()
+    .verbs.filter((v) => v.kind === "commit" && v.reversible !== true)
+    .map((v) => v.name);
+  if (exposed.length === 0) return;
+  throw new Error(
+    `driverkit: refusing to connect \`${driver.manifest().app}\` to a relay. It publishes ` +
+      `${exposed.length} commit verb(s) that have not declared \`reversible\` — ` +
+      `${exposed.slice(0, 6).join(", ")}${exposed.length > 6 ? ", …" : ""} — and \`mount()\` was ` +
+      `given no \`approve\`, so an agent on the other end of this stream would change data with ` +
+      `nothing in front of it. Pass ONE of these to \`mount()\`: ` +
+      `\`approve: (req) => …\`, an async hook that asks a person and returns true, false or a ` +
+      `reason; or \`approve: "unattended"\`, which says out loud that commits here run with ` +
+      `nobody watching. Declaring \`reversible: true\` on the commits the app really can undo ` +
+      `also takes them off this list. See MountOptions.approve.`,
+  );
 }
 
 /**

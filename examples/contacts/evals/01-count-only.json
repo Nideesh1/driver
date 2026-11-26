@@ -1,0 +1,12 @@
+{
+  "id": "count-only",
+  "ask": "how many people at Grayson Robotics are still new?",
+  "why": "A question, not an instruction. The whole of the right answer is one `describe` call and the number it reports; a `describe` promises no data moves, so `commits: none` is an assertion about the kind and not about the model's manners. 238 is seeded — if it drifts, the fixture moved.",
+  "expect": {
+    "calls": ["select-where"],
+    "args": { "company": "Grayson Robotics", "status": "new" },
+    "count": 238,
+    "commits": "none",
+    "steps": "<=3"
+  }
+}

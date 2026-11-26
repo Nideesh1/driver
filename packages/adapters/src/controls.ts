@@ -107,6 +107,40 @@ export interface ControlsConfig {
   /** Force or deny "this control takes text". Default `data-dk-field`, read as
    *  `true`/`false`. Absent means the tag decides. */
   fieldAttribute?: string;
+  /**
+   * The attribute that takes a control back out. Default `data-dk-human-only`.
+   *
+   * An element carrying it is not enumerated and cannot be pressed or typed
+   * into, even though it is marked as a control. The case it exists for is the
+   * one in webmachinelearning/webmcp#288: ChatGPT's in-app browser called a
+   * proposal-only tool, the proposal did not execute itself, so the agent
+   * clicked the page's own Approve button and the receipt recorded "approved
+   * by you". `press` and `commit-control` over `data-dk-control` are exactly
+   * that bypass — one action, total coverage, including coverage of the button
+   * that exists to stop the action.
+   *
+   * So the Yes of a confirmation, the signature field, the "I agree" tick and
+   * the 2FA box carry this, and an agent naming one gets `no-such-control` —
+   * indistinguishable from a name that was never marked, because a different
+   * refusal would tell a prober which buttons are the interesting ones.
+   *
+   * IT IS THE WEAKEST OF THE THREE LAYERS and it is named as such because it
+   * is the one an author can forget. The core's `approval-pending` lock needs
+   * nobody to remember anything — while an approval is open no call runs at
+   * all — and the widget's own dialog lives inside a shadow root this
+   * enumerator never walks. Use this for a gate of your own that lives in the
+   * light DOM, and never as the only thing between an agent and a commit.
+   *
+   * THE MARK IS INHERITED. An element inside something marked human-only is
+   * itself human-only, so one attribute on a `<dialog>` takes the Yes, the
+   * signature field and the 2FA box inside it out together. This used to read
+   * the element and nothing else, which meant the natural way to write the
+   * mark — on the gate — did nothing at all, and the only way that worked was
+   * to repeat it on every descendant. The walk goes all the way out, past
+   * `root`, and `data-dk-human-only="false"` on a descendant re-opens that one
+   * control. See `humanOnly`.
+   */
+  humanOnlyAttribute?: string;
 
   /** Narrow every lookup. A control outside this root does not exist. */
   root?: string | QueryRootLike;
@@ -179,6 +213,17 @@ const REFUSES = [
  *  `date` and `number`, takes text and is a field. A checkbox is a control you
  *  press, which is why this list exists at all: typing into one is nonsense and
  *  pressing one is the commonest per-row action there is. */
+/**
+ * How far up `data-dk-human-only` is looked for. See `humanOnly`.
+ *
+ * A number rather than an unbounded loop, because the only way `parentElement`
+ * can fail to terminate is a fake that points an element at itself — a bug
+ * worth surfacing as a wrong answer rather than as a page that stops
+ * responding. 64 is deeper than any real markup's control-to-`<body>` distance
+ * and the walk stops at the first element carrying the attribute anyway.
+ */
+const HUMAN_ONLY_DEPTH = 64;
+
 const NOT_TEXT = new Set([
   "checkbox",
   "radio",
@@ -204,6 +249,7 @@ export function controlsFromDom(config: ControlsConfig = {}): ControlsBinding {
   const kindAttribute = config.kindAttribute ?? "data-dk-kind";
   const labelAttribute = config.labelAttribute ?? "data-dk-label";
   const fieldAttribute = config.fieldAttribute ?? "data-dk-field";
+  const humanOnlyAttribute = config.humanOnlyAttribute ?? "data-dk-human-only";
   const limit = config.limit ?? 40;
   const refuseWhen = config.refuseWhen ?? disabledCheck;
   const warn = warner(config.onWarn);
@@ -246,11 +292,14 @@ export function controlsFromDom(config: ControlsConfig = {}): ControlsBinding {
   /**
    * Every marked element, each told whether it is inside a row.
    *
-   * The row test is a containment test and not an ancestor walk, because
-   * `ElementLike` has no parent — and that turned out to be the better shape
-   * anyway: it asks "is this element inside one of the rows the snapshot is
-   * showing", which is exactly the question, rather than "does it have a `tr`
-   * somewhere above it", which is a different one in a nested table.
+   * The row test is a containment test and not an ancestor walk, and it stays
+   * one now that `ElementLike` has an optional `parentElement` for
+   * `humanOnly`: it asks "is this element inside one of the rows the snapshot
+   * is showing", which is exactly the question and tests against a known set,
+   * rather than "does it have a `tr` somewhere above it", which is a different
+   * question and the wrong answer in a nested table. The opt-out cannot be
+   * written that way — there is no set of marked wrappers to test against —
+   * which is why that one walks and this one does not.
    */
   function scan(): Found[] {
     const r = root();
@@ -262,12 +311,93 @@ export function controlsFromDom(config: ControlsConfig = {}): ControlsBinding {
     }
 
     const out: Found[] = [];
+    const withheld = new Set<string>();
     for (const el of r.querySelectorAll(`[${attribute}]`)) {
       const name = collapse(el.getAttribute(attribute));
       if (!name) continue;
+      // Dropped HERE, in the one function every other function in this file
+      // reads the page through, so the opt-out cannot be true of the
+      // enumeration and false of the three verbs. A control that is not in
+      // this list does not exist to the layer at all — which is the same
+      // answer an unmarked button gets, deliberately.
+      if (humanOnly(el)) {
+        // Said once, and only to the author. A control that vanished because
+        // of a mark on a `<dialog>` three levels up is the one case of this
+        // attribute that looks like a bug in the library, so the library says
+        // which it was.
+        if (humanOnlyAbove(el)) withheld.add(name);
+        continue;
+      }
       out.push({ el, name, row: inRow.get(el) ?? null });
     }
+    if (withheld.size) {
+      warn(
+        `controls: ${withheld.size} control(s) are inside an element marked ` +
+          `${humanOnlyAttribute} and are not published: ` +
+          `${[...withheld].slice(0, 12).join(", ")}. That is what the mark means — an agent is ` +
+          `told nothing about them, exactly as if they were never marked as controls. Put ` +
+          `${humanOnlyAttribute}="false" on one to open it again.`,
+      );
+    }
     return out;
+  }
+
+  /**
+   * Marked for a person only, on this element or on anything above it.
+   *
+   * Presence is the signal, because `data-dk-human-only` with no value is how
+   * an author writes it; the one exception is the literal `false`, so a
+   * templating language that always emits the attribute can still say no — and
+   * a `false` on the element itself wins over a mark further up, which is the
+   * only reading that lets an author open one control inside a closed region.
+   *
+   * THE ANCESTOR WALK, which this did not have. Marking a `<dialog>` used to
+   * mark nothing: every button inside the confirmation stayed enumerable and
+   * pressable, which is the opposite of what the author wrote. The mark that is
+   * natural to write — one attribute on the thing that is the gate — was the
+   * one that did not work, and the mark that worked had to be repeated on
+   * every Yes, every signature field and every 2FA box inside it. An opt-out
+   * whose correct use is the laborious one is an opt-out that will be got
+   * wrong.
+   *
+   * It walks OUT PAST `root`, not up to it. A human-only region that contains
+   * the root is a region an author marked and the enumerator is standing
+   * inside; stopping at the root would silently ignore it, and that is the
+   * direction in which being wrong costs something. The visible consequence is
+   * that a root inside a marked region enumerates nothing at all, which is
+   * loud, is what the markup says, and is warned about once.
+   *
+   * TWO THINGS IT DOES NOT SEE, both worth knowing before relying on it. A
+   * shadow boundary: `parentElement` is null on the top node of a shadow tree,
+   * so a mark on the HOST element does not reach controls inside it — mark
+   * something inside the tree. And an `ElementLike` that does not implement
+   * `parentElement` at all (a non-DOM renderer's adapter, an older fake) reads
+   * as having no ancestors, which is the element-only behaviour this had
+   * before and is the compatible answer rather than the safe one.
+   *
+   * `DEPTH` bounds the walk. A real DOM cannot cycle, and a hand-written
+   * `ElementLike` whose `parentElement` points at itself is a bug in a fake
+   * that should surface as a wrong answer rather than as a hung page.
+   */
+  function humanOnly(el: ElementLike): boolean {
+    let node: ElementLike | null | undefined = el;
+    for (let depth = 0; node && depth < HUMAN_ONLY_DEPTH; depth += 1) {
+      const value = node.getAttribute(humanOnlyAttribute);
+      if (value !== null && value !== undefined) {
+        return collapse(value).toLowerCase() !== "false";
+      }
+      node = node.parentElement;
+    }
+    return false;
+  }
+
+  /** Was this element's mark inherited from an ancestor? Only for the author's
+   *  diagnostic: an agent is never told a control is being withheld, because a
+   *  different answer for a withheld control is an oracle over which buttons
+   *  are the interesting ones. */
+  function humanOnlyAbove(el: ElementLike): boolean {
+    const own = el.getAttribute(humanOnlyAttribute);
+    return (own === null || own === undefined) && humanOnly(el);
   }
 
   function kindOf(name: string, el: ElementLike): VerbKind | undefined {
@@ -373,11 +503,21 @@ export function controlsFromDom(config: ControlsConfig = {}): ControlsBinding {
       );
     }
     if (undeclared.length) {
+      // Worded as a decision the author owes, not as a nuisance they can
+      // clear. The line this replaces ended "and the question goes away",
+      // which is true and is also an instruction to type the cheapest value:
+      // `read` silences the gate on every one of these in one pass, and
+      // `read` on something that changes data is the one claim the library
+      // cannot catch and will act on. So the undeclared state is named as the
+      // SAFE one it is, and the declaration is named as a claim.
       warn(
         `controls: ${undeclared.length} control(s) declare no ${kindAttribute}: ` +
-          `${undeclared.slice(0, 12).join(", ")}. An undeclared control is reachable only through ` +
-          `\`${names.commit}\`, so every press of one asks the human. Add ` +
-          `${kindAttribute}="read|describe|commit" and the question goes away.`,
+          `${undeclared.slice(0, 12).join(", ")}. Each is reachable only through ` +
+          `\`${names.commit}\`, which asks the person first — so this is safe, and it is the ` +
+          `state to leave them in until somebody has read the handler. ` +
+          `${kindAttribute}="read|describe|commit" is a CLAIM about what the control does, and ` +
+          `nothing here can check it: \`read\` on a button that changes data takes away the only ` +
+          `thing standing in front of an agent pressing it. Declare the ones you have read.`,
       );
     }
 

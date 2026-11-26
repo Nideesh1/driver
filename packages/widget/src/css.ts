@@ -39,6 +39,22 @@ export const CSS = `
   --dk-font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
   --dk-mono: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
 
+  /* The collapsed launcher's box, and it is fixed on purpose.
+
+     Content-sized, it was a different size in every app -- "Ask Northwind CRM"
+     is twice the button "Ask Mail" is -- and it changed shape as the label or
+     the state changed, which looks like a bug even when it is not. It also
+     moved itself: the remembered position is a fraction of the FREE space and
+     the free space is the viewport less the element's own measured width, so a
+     launcher that grew by thirty pixels slid by thirty pixels times x. A
+     constant box makes the placement arithmetic stable as well as the look.
+
+     Two properties rather than one, so a host that wants a bigger target can
+     say so, and the radius is derived from the height so it is always a true
+     pill and never a rounded rectangle at one size and a circle at another. */
+  --dk-launcher-w: 96px;
+  --dk-launcher-h: 40px;
+
   /* Position. Two numbers in [0, 1]: 0 is flush with the near edge, 1 with
      the far one, 0.5 centred. The far-edge case is what the translate is for
      -- the element is pushed to the far inset and then pulled back by its own
@@ -96,17 +112,71 @@ export const CSS = `
 button { font: inherit; color: inherit; cursor: pointer; }
 :focus-visible { outline: 2px solid var(--dk-accent); outline-offset: 2px; }
 
+/* ONE RULE, AND NOTHING ELSE IN THIS STYLESHEET MAY RESIZE IT. The busy and
+   open states say what they are with colour and with what they show inside
+   this box; none of them touches its width, height, padding or font, because a
+   control that changes shape as the state changes reads as a glitch and,
+   worse, walks across the screen as it does it. If a new state needs to be
+   visible out here, it gets an indicator INSIDE the pill. */
 .dk-launcher {
+  /* So a host app's \`* { box-sizing: content-box }\` cannot turn the fixed
+     width into width-plus-padding. The shadow boundary already stops their
+     rules reaching in; this stops the inherited-by-default ones. */
+  box-sizing: border-box;
+  /* The containing block for the "a conversation is waiting" dot, which is
+     positioned INSIDE this box. A badge hanging off the corner would be an
+     element of a different size, and this element's size is the one thing
+     nothing here is allowed to change. */
+  position: relative;
+  width: var(--dk-launcher-w);
+  height: var(--dk-launcher-h);
+  /* Half the height, so it is a pill at any size the host picks. */
+  border-radius: calc(var(--dk-launcher-h) / 2);
+  padding: 0 14px;
   background: var(--dk-bg);
   border: 1px solid var(--dk-line);
-  border-radius: 999px;
   box-shadow: var(--dk-shadow);
-  padding: 9px 15px;
+  /* Centre the label in a box it cannot change, and clip it if the host
+     overrode the label with something long. Ellipsised rather than wrapped:
+     two lines would need a taller box, which is the thing being prevented. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: none;
   /* Draggable too: a collapsed widget sits on top of the app just as much as
      an open one, it is simply smaller. */
   touch-action: none;
 }
 .dk-open .dk-launcher { display: none; }
+
+/* "There is a conversation behind this." Its own class, so no rule here
+   mentions \`.dk-launcher\` and the one rule that sizes the pill stays the one
+   rule that sizes the pill. Inside the pill, clear of the 14px label padding
+   at the right end, and 8px across -- big enough to notice in the corner of an
+   eye and small enough not to read as a second control. */
+.dk-dot {
+  display: none;
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--dk-accent);
+}
+.dk-dot-on { display: block; }
+/* And it breathes while a run is in flight, because "the agent is still
+   working" is the state somebody who minimised mid-run most needs to see.
+   Opt-in to motion rather than opt-out: a person who asked for no animation
+   gets a steady dot, which still says everything except the urgency. */
+@media (prefers-reduced-motion: no-preference) {
+  .dk-busy .dk-dot { animation: dk-pulse 1.6s ease-in-out infinite; }
+}
+@keyframes dk-pulse { 50% { opacity: 0.3; } }
 
 .dk-panel {
   display: none;
@@ -126,28 +196,34 @@ button { font: inherit; color: inherit; cursor: pointer; }
   .dk-open .dk-panel { animation: none; }
 }
 
-/* The drag handle. \`touch-action: none\` is what makes a finger drag the panel
-   instead of scrolling the page behind it, and it is scoped to the handles so
-   the transcript still scrolls by touch. \`user-select: none\` stops a drag from
-   leaving the title text highlighted behind it. */
+/* The header, which is chrome and nothing else: no \`cursor: grab\`, no
+   \`touch-action\`, no drag. The grip beside the title is the handle, and a
+   strip that is not a handle cannot start a drag under a press that was aimed
+   at the gear and missed. \`user-select: none\` stays, so a double-click on the
+   chrome does not leave the title highlighted. */
 .dk-head {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 10px 8px 10px 14px;
+  padding: 10px 8px 10px 8px;
   border-bottom: 1px solid var(--dk-line);
-  cursor: grab;
-  touch-action: none;
   user-select: none;
   -webkit-user-select: none;
 }
-.dk-title { flex: 1; font-weight: 600; cursor: grab; }
-:host(.dk-dragging) .dk-head, :host(.dk-dragging) .dk-title, :host(.dk-dragging) .dk-move {
-  cursor: grabbing;
-}
-.dk-x, .dk-move, .dk-gear { background: none; border: 0; padding: 4px 8px; border-radius: 6px; color: var(--dk-dim); }
-.dk-x:hover, .dk-move:hover, .dk-gear:hover { background: var(--dk-you); }
-.dk-move { cursor: grab; touch-action: none; }
+.dk-title { flex: 1; font-weight: 600; }
+:host(.dk-dragging) .dk-move { cursor: grabbing; }
+.dk-min, .dk-move, .dk-gear { background: none; border: 0; padding: 4px 8px; border-radius: 6px; color: var(--dk-dim); }
+.dk-min:hover, .dk-move:hover, .dk-gear:hover { background: var(--dk-you); }
+/* The grip, and the only drag surface on the panel. \`touch-action: none\` is
+   what makes a finger drag the panel instead of scrolling the page behind it,
+   and it is scoped to the handle so the transcript still scrolls by touch.
+   First in the strip and therefore at the far end from the gear and the
+   minimise button, which is half of why a mis-aimed press no longer drags. */
+.dk-move { cursor: grab; touch-action: none; font-size: 13px; line-height: 1; letter-spacing: 1px; }
+/* A minus, not a cross: this puts the panel away and keeps the conversation,
+   and a cross is the glyph for throwing something away. The sizing matches the
+   gear so the two read as one pair of controls. */
+.dk-min { font-size: 15px; line-height: 1; }
 /* A glyph and not the word "Settings", because the header is also the drag
    handle and three words plus a title is a strip nobody can grab. The button
    is a real button with a real label for anybody not reading the glyph. */
@@ -309,6 +385,23 @@ button { font: inherit; color: inherit; cursor: pointer; }
 }
 .dk-toggle[aria-checked="true"] { border-color: var(--dk-accent); }
 .dk-toggle[aria-checked="true"]::after { content: "On"; color: var(--dk-accent); }
+/* The destructive item, and the only red thing in the settings view. It is
+   given the commit colour on purpose: that colour already means "this changes
+   something you cannot take back" everywhere else in this panel, and a second
+   vocabulary for danger would weaken the first. Not a filled button -- it is a
+   thing to find when you want it, not a thing to notice while changing the
+   speed. */
+.dk-clear {
+  align-self: flex-start;
+  border: 1px solid var(--dk-commit);
+  background: none;
+  color: var(--dk-commit);
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+.dk-clear:hover { background: color-mix(in srgb, var(--dk-commit) 10%, transparent); }
 .dk-done {
   align-self: flex-start;
   border: 1px solid var(--dk-line);

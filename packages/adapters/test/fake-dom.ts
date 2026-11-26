@@ -67,6 +67,14 @@ export class FakeElement implements ElementLike {
     this.attrs.delete(name.toLowerCase());
   }
 
+  /** `ElementLike.parentElement`, spelled as a real DOM spells it. The field
+   *  above is the fake's own plumbing and is written by `append`; this is the
+   *  name `controls.ts` reads, and having both is the point — the adapters see
+   *  only what a real `Element` offers. */
+  get parentElement(): FakeElement | null {
+    return this.parent;
+  }
+
   get dataset(): Record<string, string | undefined> {
     const out: Record<string, string> = {};
     for (const [k, v] of this.attrs) {

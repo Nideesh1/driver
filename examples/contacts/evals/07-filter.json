@@ -1,0 +1,11 @@
+{
+  "id": "filter",
+  "ask": "show me just the contacts whose surname is Nakamura",
+  "why": "`search` lives on the contacts list only, and the run starts on the dashboard. The case passes whether or not the agent is refused `wrong-screen` on the way — that is what the step bound is for. It is the one case here that measures whether a screen-scoped verb is DISCOVERABLE from the cached half, or only by being told no.",
+  "expect": {
+    "calls": ["goto", "search"],
+    "args": { "goto": { "screen": "contacts" }, "search": { "q": "Nakamura" } },
+    "commits": "none",
+    "steps": "<=4"
+  }
+}

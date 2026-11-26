@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from driverkit import Driverkit, Manifest
 from driverkit.types import VerbSpec
+from driverkit.mcp_core import TabTools
 from driverkit.mcp_server import (
     LIST_TABS,
     PROTOCOL_VERSION,
@@ -907,3 +908,341 @@ class FastMcpOptional(unittest.TestCase):
             del _sys.modules[name]
         importlib.import_module("driverkit.mcp_server")
         self.assertNotIn("driverkit.fastmcp_server", _sys.modules)
+
+
+class TheAppsMapAndItsRecipes(unittest.TestCase):
+    """``Manifest.screens`` and ``Manifest.flows``, over the wire and into the
+    instructions an MCP client prepends.
+
+    The strings asserted here are quoted from
+    ``packages/agent/src/tools.ts``, which renders the same two blocks into the
+    in-page system prompt. A model driving this app from outside and a model
+    driving it from inside the page must read the same sentences about the same
+    app, and these two tests plus their TypeScript twins are what keep that
+    true.
+    """
+
+    #: The map and one recipe, as the TS core serialises them.
+    MAPPED = dict(
+        MANIFEST,
+        instructions="a descent's status moves new → pending → accepted",
+        screens=[
+            {"id": "descents", "describe": "every descent, sortable", "url": "#/descents"},
+            {
+                "id": "descent",
+                "describe": "one descent and its lanes",
+                "url": "#/descents/{id}",
+                "args": {"id": {"type": "string", "describe": "descent id"}},
+            },
+            # No `url`: a modal is a screen with no address, and `goto` reaches
+            # it by id like any other.
+            {"id": "pruning-modal", "describe": "the pruning dialog"},
+        ],
+        flows=[
+            {
+                "id": "prune-a-descent",
+                "describe": "open a descent and prune it",
+                "steps": [
+                    {"section": "find it", "verb": "goto", "hint": "go to the descents list"},
+                    {"verb": "accept-selected", "hint": "read the count first, then commit"},
+                ],
+            }
+        ],
+    )
+
+    def test_the_map_and_the_flows_round_trip_as_the_manifest(self):
+        # The wire names are the contract: this is the half the TS core
+        # fingerprints, so a Python client that renamed a field would produce
+        # a tool list and a briefing that no longer describe the app being
+        # driven.
+        manifest = Manifest.from_dict(self.MAPPED)
+        self.assertEqual([s.id for s in manifest.screens], ["descents", "descent", "pruning-modal"])
+        self.assertEqual(manifest.screen("descent").url, "#/descents/{id}")
+        self.assertEqual(list(manifest.screen("descent").args), ["id"])
+        # A screen with no template keeps none, rather than acquiring one.
+        self.assertIsNone(manifest.screen("pruning-modal").url)
+        self.assertNotIn("url", manifest.screen("pruning-modal").to_dict())
+        self.assertEqual(manifest.to_dict()["screens"], self.MAPPED["screens"])
+
+        flow = manifest.flow("prune-a-descent")
+        self.assertEqual([s.verb for s in flow.steps], ["goto", "accept-selected"])
+        self.assertEqual(flow.steps[0].section, "find it")
+        self.assertIsNone(flow.steps[1].section)
+        self.assertEqual(manifest.to_dict()["flows"], self.MAPPED["flows"])
+
+        # And an app that declares neither gets the document it got before
+        # these fields existed. Omitted rather than sent as an empty list, for
+        # the reason `instructions` is: the TS core fingerprints a shape that
+        # leaves them out, and a round trip must not turn "the app does not
+        # describe its screens" into a claim that it has none.
+        plain = Manifest.from_dict(MANIFEST)
+        self.assertEqual(plain.screens, ())
+        self.assertEqual(plain.flows, ())
+        self.assertNotIn("screens", plain.to_dict())
+        self.assertNotIn("flows", plain.to_dict())
+
+    def test_the_map_and_the_flows_are_in_the_server_instructions(self):
+        from driverkit.mcp_core import instructions_for
+
+        text = instructions_for(Manifest.from_dict(self.MAPPED))
+
+        # The map. The gap this closes out here is the one the prose version
+        # covered badly: an agent could learn where it was and where it was
+        # not, and could not learn that a screen existed without standing on
+        # it.
+        self.assertIn("THE SCREENS THIS APP HAS.", text)
+        self.assertIn("- `descents`: every descent, sortable Address: `#/descents`.", text)
+        self.assertIn(
+            "- `descent`: one descent and its lanes Address: `#/descents/{id}`. Needs: `id`.",
+            text,
+        )
+        self.assertIn("- `pruning-modal`: the pruning dialog", text)
+        # The sentence a model cannot work out by looking.
+        self.assertIn("The same screens for every user, always", text)
+
+        # The recipes, and the sentence that makes them work: there is no tool
+        # that runs one, because a flow that executed internally could not
+        # adapt when step three found the record already accepted.
+        self.assertIn("THE JOBS THIS APP SAYS ITS VERBS ARE USUALLY COMBINED INTO.", text)
+        self.assertIn("**There is no tool that runs a flow**", text)
+        self.assertIn("`prune-a-descent` — open a descent and prune it", text)
+        self.assertIn("  (find it)\n  1. `goto` — go to the descents list", text)
+        self.assertIn("  2. `accept-selected` — read the count first, then commit", text)
+        self.assertNotIn("prune-a-descent", str([t["name"] for t in tools_for(Manifest.from_dict(self.MAPPED))]))
+
+        # The order: the safety rules, then the map, then the recipes, then the
+        # app's own words. Whichever text is last is the one a model follows
+        # when two of them disagree, and the app's own voice should outrank a
+        # list the library rendered.
+        self.assertLess(text.index("Never commit on a selection"), text.index("THE SCREENS"))
+        self.assertLess(text.index("THE SCREENS"), text.index("THE JOBS THIS APP"))
+        self.assertLess(text.index("THE JOBS THIS APP"), text.index("a descent's status moves"))
+
+        # And an app that declares neither gets exactly the text it got before
+        # the fields existed.
+        plain = instructions_for(Manifest.from_dict(MANIFEST))
+        self.assertNotIn("THE SCREENS", plain)
+        self.assertNotIn("THE JOBS THIS APP", plain)
+
+
+class ThePlanToken(unittest.TestCase):
+    """``consumes: "plan"`` through the manifest, the tool list and a call.
+
+    The MCP path is the one where this is easiest to lose: the token is minted
+    in a browser tab and has to survive a manifest round trip, a tool schema, a
+    model's arguments and an HTTP body before it reaches the core that minted
+    it. Every one of those hops is a place where a field quietly goes missing,
+    and the only symptom would be a commit that is refused forever.
+    """
+
+    PLANNED = {
+        "version": "v",
+        "app": "bulk",
+        "verbs": [
+            {"name": "select-where", "describe": "select rows", "kind": "describe"},
+            {
+                "name": "accept-selected",
+                "describe": "accept the selection",
+                "kind": "commit",
+                "consumes": "plan",
+            },
+            {"name": "decline-selected", "describe": "decline the selection", "kind": "commit"},
+        ],
+    }
+
+    def test_consumes_survives_the_manifest_round_trip(self):
+        # The manifest is the cached half and a client reads this once. A
+        # round trip that dropped it would render a tool with no `plan`
+        # property and no sentence about the pairing, so the model would call
+        # the commit bare and never learn why it was refused.
+        manifest = Manifest.from_dict(self.PLANNED)
+        strict = manifest.verb("accept-selected")
+        self.assertEqual(strict.consumes, "plan")
+        self.assertIsNone(manifest.verb("decline-selected").consumes)
+        self.assertEqual(strict.to_dict()["consumes"], "plan")
+        self.assertNotIn("consumes", manifest.verb("decline-selected").to_dict())
+
+    def test_an_unknown_consumes_value_is_dropped_rather_than_passed_through(self):
+        # The same rule as an unrecognised `kind`: a word this code does not
+        # know is a manifest from a newer core, and the safe reading is that
+        # this client cannot satisfy the requirement. Hoisting a field nothing
+        # ever fills would be worse than being visibly refused.
+        manifest = Manifest.from_dict(
+            {
+                "version": "v",
+                "app": "bulk",
+                "verbs": [
+                    {"name": "go", "describe": "go", "kind": "commit", "consumes": "receipt"}
+                ],
+            }
+        )
+        self.assertIsNone(manifest.verb("go").consumes)
+
+    def test_plan_is_hoisted_only_onto_the_verb_that_consumes_one(self):
+        # Hoisted like `rev` and `screen`, with the one difference: a plan token
+        # means nothing to a verb that does not consume one, and adding the
+        # property to every tool in every app would move every cached prompt
+        # prefix for a feature those apps do not use.
+        tools = tools_for(Manifest.from_dict(self.PLANNED))
+        strict = tool(tools, "accept-selected")["inputSchema"]
+        plain = tool(tools, "decline-selected")["inputSchema"]
+        self.assertEqual(strict["properties"]["plan"]["type"], "string")
+        self.assertNotIn("plan", plain["properties"])
+        # And not in `required`, although the core refuses without it: a
+        # validator rejecting the call would keep the refusal's hint — which
+        # names both counts — from ever reaching the model.
+        self.assertNotIn("plan", strict["required"])
+        self.assertIn("stale-plan", strict["properties"]["plan"]["description"])
+
+    def test_the_plan_requirement_is_in_the_description_above_the_screen_note(self):
+        # In the cached half for the reason `refuses` is: the point is that the
+        # bare call is never made. Above `screen` because HOW a verb may be
+        # called outranks WHERE — a model that walks to the right screen and
+        # then calls the commit bare has still lost the turn. Verbatim with the
+        # TypeScript half, which has the twin of this test.
+        text = tool(tools_for(Manifest.from_dict(self.PLANNED)), "accept-selected")["description"]
+        self.assertIn("REQUIRES A PLAN.", text)
+        self.assertIn("refused as `stale-plan` and the refusal names both counts", text)
+        self.assertLess(
+            text.index("REQUIRES A PLAN."),
+            text.index("Returns the screen as it is AFTER"),
+        )
+        plain = tool(tools_for(Manifest.from_dict(self.PLANNED)), "decline-selected")["description"]
+        self.assertNotIn("REQUIRES A PLAN", plain)
+
+    def test_the_server_instructions_teach_the_pairing_rather_than_leaving_it_to_a_refusal(self):
+        from driverkit.mcp_core import instructions_for
+
+        text = instructions_for(Manifest.from_dict(self.PLANNED))
+        self.assertIn("REQUIRES A PLAN", text)
+        self.assertIn("a plan is good for one commit", text)
+        # And the half it belongs with: right after "never commit on a count you
+        # have not read", which is the sentence this completes.
+        self.assertLess(text.index("Never commit on a selection"), text.index("REQUIRES A PLAN"))
+
+    def test_a_plan_a_model_sent_is_lifted_out_of_the_args_and_into_the_call_body(self):
+        # The hop that matters most on this path. The core reads the token from
+        # the call frame, so a server that left it among the arguments would
+        # have the verb refuse `bad-argument` about an argument the app never
+        # declared — while the commit it was meant to authorise stayed
+        # permanently uncallable.
+        relay = FakeRelay()
+        self.addCleanup(relay.stop)
+        tools = TabTools(Driverkit(relay.url), TAB)
+        # The manifest is the static half and is fetched once by contract, so
+        # seeding it is how this test gets a `consumes` verb without a second
+        # fake relay. The verb name is one the fake app really has, so the call
+        # below is a real HTTP round trip.
+        tools._manifest = Manifest.from_dict(self.PLANNED)
+
+        tools.call("accept-selected", {"plan": "dkp1.7.1.4c1f8a20b3de"})
+        body = relay.last_body or {}
+        self.assertEqual(body["plan"], "dkp1.7.1.4c1f8a20b3de")
+        self.assertNotIn("plan", body.get("args", {}))
+
+        # And a verb that does not consume one leaves a `plan` key alone: it is
+        # either an argument the app named or a mistake the core should see.
+        tools.call("decline-selected", {"plan": "dkp1.7.1.4c1f8a20b3de"})
+        body = relay.last_body or {}
+        self.assertNotIn("plan", body)
+        self.assertEqual(body.get("args", {}).get("plan"), "dkp1.7.1.4c1f8a20b3de")
+
+    def test_a_plan_that_is_not_a_string_is_dropped_and_the_core_answers(self):
+        # The same rule as `screen`: a number is not a token, and dropping it
+        # leaves the core to refuse with the one hint that explains the pairing.
+        # Inventing a `bad-argument` here would answer a smaller question worse.
+        relay = FakeRelay()
+        self.addCleanup(relay.stop)
+        tools = TabTools(Driverkit(relay.url), TAB)
+        tools._manifest = Manifest.from_dict(self.PLANNED)
+        tools.call("accept-selected", {"plan": 7})
+        body = relay.last_body or {}
+        self.assertNotIn("plan", body)
+        self.assertNotIn("plan", body.get("args", {}))
+
+    def test_a_stale_plan_renders_both_counts_and_is_not_an_mcp_error(self):
+        # The refusal as a model reads it. Both counts, because "your plan is
+        # stale" sends it back to work out what changed and "you were shown
+        # 3,412 and the selection is now 3,418" is a sentence it can say to the
+        # person who approved the first number. And NOT `isError`: the app
+        # answered, and a refusal is information to act on — flagging it invites
+        # a client to hide it or a model to retry unchanged.
+        from driverkit.render import render_result
+        from driverkit.types import Result
+
+        counted = render_result(
+            Result.from_dict(
+                {
+                    "ok": True,
+                    "count": 3412,
+                    "plan": "dkp1.7.1.4c1f8a20b3de",
+                    "snapshot": {"where": "contacts", "rev": 7, "selectionId": "2jm-abc"},
+                }
+            ),
+            "describe",
+        )
+        self.assertIn("count: 3,412 matched", counted)
+        # Rendered under the count, or the model never sees it and every commit
+        # that needs one is refused.
+        self.assertIn("plan: dkp1.7.1.4c1f8a20b3de", counted)
+        self.assertIn("One commit per plan.", counted)
+        self.assertLess(counted.index("count:"), counted.index("plan:"))
+
+        stale = Result.from_dict(
+            {
+                "ok": False,
+                "refused": "stale-plan",
+                "hint": (
+                    "that plan named a different selection from the one on screen now. "
+                    "You were shown 3412; the selection is now 3418."
+                ),
+                "snapshot": {"where": "contacts", "rev": 7},
+            }
+        )
+        text = render_result(stale, "commit")
+        self.assertIn("refused: stale-plan", text)
+        self.assertIn("You were shown 3412; the selection is now 3418.", text)
+        # It carries a snapshot, which is the signal that separates it from a
+        # transport refusal: the verb was not reached and nothing changed.
+        self.assertIsNone(stale.relay_refusal)
+
+
+class ThePlanTokenOnTheWire(unittest.TestCase):
+    """``Result.plan``, ``Snapshot.selectionId`` and ``call(plan=...)``."""
+
+    def test_result_plan_round_trips_and_is_absent_when_the_app_minted_none(self):
+        from driverkit.types import Result, Snapshot
+
+        wire = {"ok": True, "count": 3, "plan": "dkp1.1.1.deadbeefcafe", "snapshot": {"where": "x", "rev": 1}}
+        parsed = Result.from_dict(wire)
+        self.assertEqual(parsed.plan, "dkp1.1.1.deadbeefcafe")
+        self.assertEqual(parsed.to_dict()["plan"], "dkp1.1.1.deadbeefcafe")
+        # Absent rather than null, so a round-tripped result still hashes the
+        # same as the one the core produced.
+        plain = Result.from_dict({"ok": True, "snapshot": {"where": "x", "rev": 1}})
+        self.assertIsNone(plain.plan)
+        self.assertNotIn("plan", plain.to_dict())
+        # And a refusal never carries one: a plan is a receipt for a count, and
+        # a refused call counted nothing.
+        refused = Result.from_dict({"ok": False, "refused": "stale-plan", "plan": "x"})
+        self.assertIsNone(refused.plan)
+
+        # `selectionId` is carried as the opaque string it is, under the wire
+        # name, and never interpreted.
+        snap = Snapshot.from_dict({"where": "x", "rev": 1, "selectionId": "3-abc"})
+        self.assertEqual(snap.selection_id, "3-abc")
+        self.assertEqual(snap.to_dict()["selectionId"], "3-abc")
+        self.assertNotIn("selectionId", Snapshot.from_dict({"where": "x", "rev": 1}).to_dict())
+
+    def test_the_client_sends_plan_only_when_it_was_given_one(self):
+        # The rule `rev` and `screen` have: defaulting it would opt an agent
+        # into a claim it did not make, and an empty string is not a token.
+        relay = FakeRelay()
+        self.addCleanup(relay.stop)
+        dk = Driverkit(relay.url)
+        dk.call(TAB, "accept-selected", {}, plan="dkp1.1.1.deadbeefcafe")
+        self.assertEqual((relay.last_body or {})["plan"], "dkp1.1.1.deadbeefcafe")
+        dk.call(TAB, "accept-selected", {})
+        self.assertNotIn("plan", relay.last_body or {})
+        dk.call(TAB, "accept-selected", {}, plan="")
+        self.assertNotIn("plan", relay.last_body or {})

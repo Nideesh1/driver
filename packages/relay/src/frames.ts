@@ -73,6 +73,12 @@ export interface CallFrame {
    *  on, and a relay that compared screens would be a second set of rules
    *  beside the core's. See `CallOptions.screen`. */
   screen?: string;
+  /** The plan token the agent is presenting: the opaque string a `describe`
+   *  returned in `Result.plan`, which a verb declaring `consumes: "plan"` must
+   *  be called with. Forwarded untouched for the same reason `rev` and `screen`
+   *  are, and with one more: the relay could not check it if it wanted to —
+   *  only the core that minted it knows what it binds. See `CallOptions.plan`. */
+  plan?: string;
 }
 
 export type UpFrame = HelloFrame | ResultFrame | SnapshotFrame;

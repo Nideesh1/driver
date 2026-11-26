@@ -24,7 +24,13 @@ import assert from "node:assert/strict";
 import http from "node:http";
 
 import { createApp, COMPANIES, OWNERS, TOTAL } from "./app/store.js";
-import { LANDINGS, href, parse } from "./app/router.js";
+import { LANDINGS, SCREEN_SPECS, href, parse } from "./app/router.js";
+// The RFC 6570 oracle. `ScreenSpec.url` is documented as RFC 6570 and the core
+// implements the one level a route needs by hand -- it has zero runtime
+// dependencies, and this very file is loaded into a browser with no bundler --
+// so the templates are checked against a real implementation rather than
+// against the code that wrote them.
+import uriTemplates from "uri-templates";
 import { drive } from "../../packages/agent/src/loop.ts";
 import { renderSnapshot } from "../../packages/agent/src/render.ts";
 import { systemPrompt, toolsFor, READ_SCREEN } from "../../packages/agent/src/tools.ts";
@@ -99,6 +105,25 @@ async function check(name, body) {
 
 const notes = [];
 
+/**
+ * The `plan` token off the newest rendered tool turn.
+ *
+ * What a model actually does: it reads the `plan:` line the describe's result
+ * put in front of it and quotes it back on the commit. The scripted `think`s
+ * below go through this rather than being handed the token out of band,
+ * because the thing worth checking is that the token REACHES the transcript —
+ * a plan the core mints and the renderer drops is a commit no model can ever
+ * make.
+ *
+ * @param {Array<{ text?: string }>} messages
+ */
+function lastPlan(messages) {
+  const found = messages
+    .map((m) => /plan: (\S+)/.exec(m.text ?? "")?.[1])
+    .filter((x) => Boolean(x));
+  return found[found.length - 1];
+}
+
 // =========================================================================
 // 1. The driver, in process
 // =========================================================================
@@ -119,7 +144,7 @@ await check("the manifest lists eighteen verbs with a kind on every one", () => 
       "back",
       "clear-selection",
       "decline-selected",
-      "go",
+      "goto",
       "next-page",
       "open-company",
       "open-contact",
@@ -199,21 +224,160 @@ await check("the app's own briefing is in the manifest, not in every snapshot", 
   // both paths; the relay's copy of it is asserted further down.
   const m = driver.manifest();
   assert.equal(typeof m.instructions, "string");
-  assert.match(m.instructions, /six screens/);
+  assert.match(m.instructions, /status moves new/);
   // Static means static: nothing per-user, per-screen or per-minute in it.
   assert.ok(!/\bc-\d{4}\b/.test(m.instructions), "a contact id is in the cached half");
   assert.ok(!/\brev\b/.test(m.instructions), "the briefing talks about the uncached half");
   // And it is in the system prompt, which is where the in-page path reads it.
   assert.ok(systemPrompt(m).includes(m.instructions));
+  notes.push(`Manifest.instructions: ${m.instructions.length} chars, said once`);
+});
 
+await check("the prose screen-map is gone from the briefing AND from every note", () => {
+  // The map went from `Snapshot.note` to `instructions` and from
+  // `instructions` to `Manifest.screens`, and this check is the one that
+  // keeps it from coming back. It was never wrong because it was wordy: it
+  // was the app's route table written a second time in English, one file away
+  // from the first and free to disagree with it, and nothing could tell.
+  //
+  // The whole of the uncached half is checked, not only the notes, because a
+  // screen map in `where` would be exactly as expensive and exactly as
+  // duplicated.
+  const m = driver.manifest();
+  const prose = [/six screens/i, /`?go`? reaches/i, /this app has screens/i, /one screen per/i];
+  for (const pattern of prose) {
+    assert.ok(!pattern.test(m.instructions), `${pattern} is still in the briefing`);
+  }
   for (const name of Object.keys(app.screens)) {
-    const note = app.screens[name]().note ?? "";
-    assert.ok(
-      !note.includes("this app has screens") && !note.includes("`go` reaches"),
-      `the screen map is still in ${name}'s note`,
+    const snap = app.screens[name]();
+    const uncached = `${snap.note ?? ""} ${snap.where}`;
+    for (const pattern of prose) {
+      assert.ok(!pattern.test(uncached), `${pattern} is still in ${name}'s uncached half`);
+    }
+  }
+  // And no snapshot carries the map's replacement either: `screens` is static
+  // and belongs in the manifest, so finding it on a snapshot would be the
+  // same mistake in a new field.
+  for (const name of Object.keys(app.screens)) {
+    assert.equal(app.screens[name]().screens, undefined, `${name} publishes screens`);
+    assert.equal(app.screens[name]().flows, undefined, `${name} publishes flows`);
+  }
+});
+
+await check("the manifest carries the app's map: six screens with working templates", () => {
+  // The map is DATA now, in the cached half, so an agent learns a companies
+  // list exists before it has ever been to one. Before this it could only
+  // learn where it was (`Snapshot.screen`) and where it was not
+  // (`wrong-screen`).
+  const m = driver.manifest();
+  assert.deepEqual(
+    m.screens.map((s) => s.id),
+    ["dashboard", "contacts", "contact", "companies", "company", "settings"],
+  );
+  for (const screen of m.screens) {
+    assert.ok(screen.describe.length > 20, `${screen.id} has no sentence for the model`);
+    assert.ok(screen.describe.length <= 1024, `${screen.id} is over the describe budget`);
+    assert.ok(screen.url.startsWith("#/"), `${screen.id} has no address`);
+  }
+
+  // THE TEMPLATES ARE THE ROUTER'S OWN. Every one of them expands to exactly
+  // what `href()` produces for the same route, and that equality is the whole
+  // authoring claim: the map is not a second route table, it is the one the
+  // app already had. `uri-templates` is the oracle rather than the core's own
+  // expansion, so this fails if the core's RFC 6570 subset drifts.
+  for (const screen of m.screens) {
+    const args = screen.id === "contact" ? { id: "c-0184" } : {};
+    if (screen.id === "company") args.slug = "acme-industrial";
+    const expanded = uriTemplates(screen.url).fill(args);
+    assert.equal(
+      expanded,
+      href({ screen: screen.id, id: args.id ?? args.slug ?? null }),
+      `${screen.id}: the template and href() disagree`,
     );
   }
-  notes.push(`Manifest.instructions: ${m.instructions.length} chars, said once`);
+  // And the declared list is the router's, not a copy of it.
+  assert.deepEqual(m.screens, [...SCREEN_SPECS]);
+  notes.push(`Manifest.screens: ${m.screens.map((s) => s.url).join(" ")}`);
+});
+
+await check("goto is the core's verb, reaches a screen by id, and refuses what it cannot", async () => {
+  // The app no longer has a `go`. It declared `screens` and a three-line
+  // `navigate` hook, and the core gave it a verb named the same thing in every
+  // app that does — which is the point, because an agent that learned `go`
+  // here met `navigate` or `open-screen` in the next app.
+  const m = driver.manifest();
+  assert.equal(m.verbs.some((v) => v.name === "go"), false, "the hand-rolled `go` is back");
+  const goto = m.verbs.find((v) => v.name === "goto");
+  // A `read`: it changes no data and reports no count. It does move the
+  // person's screen, which is what `read` now says out loud a read may do.
+  assert.equal(goto.kind, "read");
+  assert.deepEqual(goto.args.screen.oneOf, m.screens.map((s) => s.id));
+  // Every screen's own arguments, hoisted onto the one verb and all optional,
+  // because whether one is required depends on which screen was asked for.
+  assert.deepEqual(Object.keys(goto.args), ["screen", "id", "slug"]);
+  assert.equal(goto.args.id.optional, true);
+  assert.equal(goto.args.slug.optional, true);
+
+  // Driven on a FRESH app, so the walk does not leave the shared one standing
+  // somewhere a later check does not expect.
+  const walked = createApp().driver;
+  for (const id of m.screens.map((s) => s.id)) {
+    const args = { screen: id };
+    if (id === "contact") args.id = "c-0184";
+    if (id === "company") args.slug = "acme-industrial";
+    const out = await walked.call("goto", args);
+    assert.equal(out.ok, true, `goto ${id} refused: ${out.hint}`);
+    assert.equal(out.snapshot.screen, id, `goto ${id} landed elsewhere`);
+  }
+
+  // The app's hook refuses a record that is not there, in the app's own
+  // vocabulary. That is where a "no" belongs: `screens` lists all six for
+  // everybody, because an agent cannot tell a screen that was filtered out of
+  // its map from a screen that does not exist.
+  const bad = await walked.call("goto", { screen: "company", slug: "no-such-firm" });
+  assert.equal(bad.refused, "no-such-company");
+  assert.match(bad.hint, /acme-industrial/);
+});
+
+await check("the flow is declared, names only real verbs, and nothing runs it", async () => {
+  const m = driver.manifest();
+  assert.equal(m.flows.length, 1);
+  const [flow] = m.flows;
+  assert.equal(flow.id, "accept-a-companys-pending-contacts");
+  // One line, within the budget Apple's app skills use and for the same
+  // reason: it is the field a model picks a flow on, not a paragraph it
+  // reasons from.
+  assert.ok(flow.describe.length <= 1024 && !/[\n\r]/.test(flow.describe));
+  // The cross-screen job the demo exists to exercise, in the order the README
+  // used to describe in prose.
+  assert.deepEqual(
+    flow.steps.map((s) => s.verb),
+    ["goto", "sort-companies", "open-company", "select-pending-here", "accept-selected"],
+  );
+  const names = new Set(m.verbs.map((v) => v.name));
+  for (const step of flow.steps) {
+    assert.ok(names.has(step.verb), `the flow names ${step.verb}, which does not exist`);
+    assert.ok(step.hint.length > 20, `${step.verb} has no hint worth reading`);
+  }
+
+  // THERE IS NO TOOL THAT RUNS IT. A flow is a recipe the agent follows with
+  // the verbs it already has, so that step four's count can be read by
+  // something that can decide what to do about it.
+  const tools = toolsFor(m);
+  assert.equal(tools.some((t) => t.name === flow.id), false, "the flow became a tool");
+  const ran = await createApp().driver.call(flow.id);
+  assert.equal(ran.refused, "unknown-verb");
+
+  // It rides in the cached prompt, where it costs nothing per turn, and in the
+  // manifest version, because an agent holding the old copy holds the old
+  // recipe — one that may cite a verb this version renamed.
+  const prompt = systemPrompt(m);
+  assert.ok(prompt.includes(flow.describe), "the flow is not in the cached prompt");
+  assert.ok(prompt.includes("There is no tool that runs a"), "the prompt does not say so");
+  for (const screen of m.screens) {
+    assert.ok(prompt.includes(screen.describe), `${screen.id} is not in the cached prompt`);
+  }
+  notes.push(`systemPrompt with the map and the flow: ${prompt.length} chars, cached once`);
 });
 
 await check("select-where takes named fields with oneOf, not a predicate string", () => {
@@ -284,7 +448,7 @@ await check("every screen names itself in `screen` and describes itself in `wher
 });
 
 await check("the contacts list is a twenty-row window with a real page block", async () => {
-  const out = await driver.call("go", { screen: "contacts" });
+  const out = await driver.call("goto", { screen: "contacts" });
   assert.equal(out.ok, true);
   const s = visible();
   assert.equal(s.rows.length, 20);
@@ -296,7 +460,7 @@ await check("the contacts list is a twenty-row window with a real page block", a
 });
 
 await check("read verbs page and search, and rev moves on every one", async () => {
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
   const before = visible().rev;
   const next = await driver.call("next-page");
   assert.equal(next.ok, true);
@@ -363,7 +527,7 @@ await check("a record-scoped commit takes no id and refuses off its own screen",
   assert.equal(owner.ok, true);
   assert.match(owner.snapshot.where, new RegExp(`owner ${OWNERS[3].replace(".", "\\.")}`));
 
-  await driver.call("go", { screen: "dashboard" });
+  await driver.call("goto", { screen: "dashboard" });
   const nowhere = await driver.call("set-status", { status: "accepted" });
   assert.equal(nowhere.ok, false);
   assert.equal(nowhere.refused, "no-contact-open");
@@ -393,27 +557,37 @@ await check("select-contact picks exactly one row — the failure this demo was 
 });
 
 await check("navigation moves `where`, bumps `rev`, and `back` walks the trail", async () => {
-  await driver.call("go", { screen: "dashboard" });
+  await driver.call("goto", { screen: "dashboard" });
   const start = visible().rev;
 
   for (const screen of LANDINGS) {
-    const out = await driver.call("go", { screen });
-    assert.equal(out.ok, true, `go ${screen} refused`);
+    const out = await driver.call("goto", { screen });
+    assert.equal(out.ok, true, `goto ${screen} refused`);
     // Where it landed is a string equality now rather than a prefix match on
     // prose. That is `Snapshot.screen`'s whole job.
     assert.equal(
       out.snapshot.screen,
       screen,
-      `go ${screen} landed on ${JSON.stringify(out.snapshot.screen)}`,
+      `goto ${screen} landed on ${JSON.stringify(out.snapshot.screen)}`,
     );
   }
   assert.ok(visible().rev > start, "navigating did not move rev");
 
-  // `go` with a screen that needs an id is not offered at all: the core
-  // refuses it as bad-argument and lists the four it accepts.
-  const record = await driver.call("go", { screen: "contact" });
-  assert.equal(record.refused, "bad-argument");
-  assert.match(record.hint, /"dashboard", "contacts", "companies", "settings"/);
+  // A record screen IS offered now — `go` could only reach the four landings,
+  // because an argument required on two of six values had nowhere to live in
+  // one `ArgSpec` — and the core refuses the pair with no record, naming the
+  // screen that wanted the argument.
+  const record = await driver.call("goto", { screen: "contact" });
+  assert.equal(record.refused, "bad-screen-argument");
+  assert.match(record.hint, /the `contact` screen needs its own arguments and missing/);
+  const byId = await driver.call("goto", { screen: "contact", id: "c-0184" });
+  assert.equal(byId.ok, true);
+  assert.equal(byId.snapshot.screen, "contact");
+  // And a screen that is not one of the app's six is the core's own argument
+  // check, which lists every accepted value rather than counting them.
+  const nowhere = await driver.call("goto", { screen: "billing" });
+  assert.equal(nowhere.refused, "bad-argument");
+  assert.match(nowhere.hint, /"dashboard", "contacts", "contact", "companies", "company", "settings"/);
 
   const where = visible().where;
   await driver.call("open-company", { company: "Halloway Foods" });
@@ -434,7 +608,7 @@ await check("the core refuses a scoped verb off its screen, naming BOTH screens"
   // The hand-rolled guard named one screen and left the agent to guess the
   // other. The core names where you are AND where the verb lives, which is the
   // difference between a dead end and a next move.
-  await driver.call("go", { screen: "settings" });
+  await driver.call("goto", { screen: "settings" });
   for (const [name, wants, args] of [
     ["search", "contacts", { q: "Ada" }],
     ["sort-companies", "companies", { by: "pending" }],
@@ -463,7 +637,7 @@ await check("the two pagers are refused by the core on a screen with no pages, n
   // the hint names every screen they do work on rather than sending an agent
   // to the first of them.
   for (const screen of ["settings", "dashboard"]) {
-    await driver.call("go", { screen });
+    await driver.call("goto", { screen });
     for (const name of ["next-page", "prev-page"]) {
       const out = await driver.call(name);
       assert.equal(out.ok, false, `${name} worked on the ${screen} screen`);
@@ -474,18 +648,18 @@ await check("the two pagers are refused by the core on a screen with no pages, n
     }
   }
   // And they really do work on both of the screens that page.
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
   assert.equal((await driver.call("next-page")).snapshot.page.index, 1);
   await driver.call("open-company", { company: "Grayson Robotics" });
   const paged = await driver.call("next-page");
   assert.equal(paged.ok, true, "a company's contact list stopped paging");
   assert.equal(paged.snapshot.screen, "company");
   assert.equal(paged.snapshot.page.index, 1);
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
 });
 
 await check("the companies list rolls up from the same rows the contacts list shows", async () => {
-  await driver.call("go", { screen: "companies" });
+  await driver.call("goto", { screen: "companies" });
   const s = visible();
   assert.equal(s.rows.length, 8);
   assert.equal(s.page, undefined, "eight rows is all of them, so there is no window");
@@ -501,7 +675,7 @@ await check("the companies list rolls up from the same rows the contacts list sh
 await check("the cross-screen job: find a company, open it, accept its pending", async () => {
   // The whole point of the exercise, driven end to end through the verbs an
   // agent would use and nothing else.
-  await driver.call("go", { screen: "companies" });
+  await driver.call("goto", { screen: "companies" });
   const listed = visible().rows.find((r) => r.name === "Berenson Health");
   assert.ok(listed, "Berenson Health is not on the companies list");
   const expected = listed.pending;
@@ -524,13 +698,18 @@ await check("the cross-screen job: find a company, open it, accept its pending",
   assert.equal(picked.snapshot.selected.length, 20);
   assert.match(renderSnapshot(picked.snapshot), /only the ones on screen/);
 
-  const done = await driver.call("accept-selected");
+  // The commit takes the describe's plan token, which is the receipt for the
+  // count asserted just above. Without it `accept-selected` is refused, and
+  // that is the whole point of the field: the number that was read is the
+  // number that moves.
+  assert.match(picked.plan, /^dkp1\./, "select-pending-here minted no plan");
+  const done = await driver.call("accept-selected", {}, { plan: picked.plan });
   assert.equal(done.ok, true);
   assert.equal(done.count, expected);
 
   // And the roll-up moved with it, on this screen and on the companies list.
   assert.match(done.snapshot.where, /0 pending/);
-  await driver.call("go", { screen: "companies" });
+  await driver.call("goto", { screen: "companies" });
   const after = visible().rows.find((r) => r.name === "Berenson Health");
   assert.equal(after.pending, 0);
   assert.equal(
@@ -550,7 +729,7 @@ await check("a selection made on one screen is still live, and committable, on a
   const count = picked.count;
   assert.ok(count > 100);
 
-  await driver.call("go", { screen: "dashboard" });
+  await driver.call("goto", { screen: "dashboard" });
   const s = visible();
   assert.equal(s.selected, undefined, "no contact rows are on the dashboard");
   assert.equal(s.selectedCount, count, "the dashboard forgot how much is selected");
@@ -563,7 +742,7 @@ await check("a selection made on one screen is still live, and committable, on a
 });
 
 await check("the settings form is rows with values, and reaches into the tables", async () => {
-  await driver.call("go", { screen: "settings" });
+  await driver.call("goto", { screen: "settings" });
   const s = visible();
   assert.equal(s.page, undefined);
   assert.deepEqual(s.rows.map((r) => r.id), [
@@ -584,13 +763,13 @@ await check("the settings form is rows with values, and reaches into the tables"
 
   const set = await driver.call("set-setting", { name: "rows-per-page", value: "50" });
   assert.equal(set.ok, true);
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
   const after = visible();
   assert.equal(after.rows.length, 50, "the settings screen did not reach the contacts table");
   assert.equal(after.page.size, 50);
-  await driver.call("go", { screen: "settings" });
+  await driver.call("goto", { screen: "settings" });
   await driver.call("set-setting", { name: "rows-per-page", value: "20" });
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
 });
 
 await check("the router round-trips every screen, and a bad URL lands somewhere real", () => {
@@ -652,7 +831,7 @@ await check("select-where reports a count, and the commit acts on it", async () 
   selectedCount = picked.count;
   notes.push(`select-where(Grayson Robotics, new) = ${picked.count}`);
 
-  const done = await driver.call("accept-selected");
+  const done = await driver.call("accept-selected", {}, { plan: picked.plan });
   assert.equal(done.ok, true);
   assert.equal(done.count, selectedCount);
   // Everything the describe matched is now accepted, and nothing else moved.
@@ -664,13 +843,158 @@ await check("select-where reports a count, and the commit acts on it", async () 
   const again = await driver.call("clear-selection");
   assert.equal(again.count, 0, "clear-selection must report 0, not omit the count");
 
-  const empty = await driver.call("accept-selected");
+  // With a FRESH plan, so what comes back is the app's own refusal and not the
+  // core's. `clear-selection` is a `describe` that reports 0, so it mints a
+  // token like any other — a plan for an empty selection is a real plan, and
+  // "commit on nothing" is a decision an agent can make and should make
+  // against a receipt like any other.
+  const empty = await driver.call("accept-selected", {}, { plan: again.plan });
   assert.equal(empty.ok, false);
   assert.equal(empty.refused, "nothing-selected");
 });
 
+await check("the count a person approved is the set that moves, or nothing moves", async () => {
+  // THE CHECK THIS WHOLE MECHANISM EXISTS FOR, and the one that would have
+  // failed before it.
+  //
+  // The library's headline claim was "two calls, so a count is always seen
+  // before data moves". It was not true. `accept-selected` re-reads the
+  // selection when it runs, so between the describe and the commit a person
+  // can tick a row, page the list, or a websocket can land — and then the
+  // number the agent read, and a person approved, was not the set that changed.
+  // Django shipped that exact bug for fifteen years: `select_across` silently
+  // lost, so a confirmed bulk action ran on page one only.
+  //
+  // So: take the count, move the selection behind the agent's back, commit with
+  // the receipt it was given, and assert that the refusal names BOTH numbers
+  // and that nothing was accepted.
+  await driver.call("goto", { screen: "contacts" });
+  await driver.call("clear-selection");
+
+  const picked = await driver.call("select-where", { company: "Halloway Foods" });
+  assert.equal(picked.ok, true);
+  const counted = picked.count;
+  assert.ok(counted > 20, "the point is a selection larger than the screen");
+  assert.match(picked.plan, /^dkp1\./, "the describe minted no plan");
+
+  // Behind the agent's back: not through a verb, the way a person's click
+  // reaches this store. One row goes in, so the count moves by one and the
+  // identity moves with it — a swap of one row for another would move the
+  // identity and not the count, which is why the token binds the identity and
+  // not the number.
+  const extra = store.rows.find((r) => r.company !== "Halloway Foods");
+  const extraWas = extra.status;
+  const acceptedBefore = store.rows.filter(
+    (r) => r.company === "Halloway Foods" && r.status === "accepted",
+  ).length;
+  store.selected.add(extra.id);
+
+  const out = await driver.call("accept-selected", {}, { plan: picked.plan });
+  assert.equal(out.ok, false, "a commit ran on a selection nobody counted");
+  assert.equal(out.refused, "stale-plan");
+  // BOTH numbers, the way `wrong-screen` names both screens. This is the
+  // sentence a model repeats to the person who approved the first one.
+  assert.match(
+    out.hint,
+    new RegExp(`You were shown ${counted}; the selection is now ${counted + 1}\\.`),
+    `the refusal did not name both counts: ${JSON.stringify(out.hint)}`,
+  );
+  // And the thing that actually matters: nothing moved. Measured against what
+  // was there a moment ago rather than against zero — this table starts with
+  // contacts in every status, and a check that assumed an empty one would be
+  // asserting on the fixture instead of on the refusal.
+  assert.equal(
+    store.rows.filter((r) => r.company === "Halloway Foods" && r.status === "accepted").length,
+    acceptedBefore,
+    "the rows the agent counted were accepted anyway",
+  );
+  assert.equal(extra.status, extraWas, "the row nobody counted was changed");
+
+  // The repair works, which is what keeps the refusal from being a dead end:
+  // count again, read the new number, commit on that.
+  const again = await driver.call("select-where", { company: "Halloway Foods" });
+  assert.equal(again.count, counted, "the re-count moved for a reason this check did not cause");
+  const done = await driver.call("accept-selected", {}, { plan: again.plan });
+  assert.equal(done.ok, true);
+  assert.equal(done.count, counted);
+  assert.equal(
+    store.rows.filter((r) => r.company === "Halloway Foods" && r.status === "accepted").length,
+    counted,
+    "the repair accepted a different set from the one it counted",
+  );
+  // And the receipt is spent: a second commit on it cannot happen, which is
+  // what stops one approved count from moving twice.
+  const twice = await driver.call("accept-selected", {}, { plan: again.plan });
+  assert.equal(twice.refused, "stale-plan");
+
+  await driver.call("clear-selection");
+  notes.push(
+    `stale-plan: shown ${counted}, selection became ${counted + 1}, nothing accepted`,
+  );
+});
+
+await check("both bulk commits demand a plan, so an improvising agent cannot find a bare one", async () => {
+  // The hole an eval found on its first run. `accept-selected` declared
+  // `consumes: "plan"` and `decline-selected` did not, and an agent asked for a
+  // job this app cannot do — "archive everyone who has not replied in six
+  // months" — improvised: it selected a company and called the sibling with no
+  // receipt, and 403 rows changed status with no count read and nothing gated.
+  //
+  // The verb an agent reaches for when it is off its intended path is the
+  // least-declared one, which is exactly when the receipt matters most. So the
+  // rule is all or none, and this pins it for this app's surface rather than
+  // for the one verb the demo script happens to use.
+  const selectionCommits = driver
+    .manifest()
+    .verbs.filter((v) => v.kind === "commit" && v.args === undefined);
+  assert.deepEqual(
+    selectionCommits.map((v) => v.name).sort(),
+    ["accept-selected", "decline-selected"],
+    "a commit with no arguments acts on the selection; if this list grew, it needs a plan",
+  );
+  for (const v of selectionCommits) {
+    assert.equal(v.consumes, "plan", `${v.name} can move the selection with no counted plan`);
+  }
+
+  // And the improvised call is refused, with a hint that does NOT tell it to go
+  // and select something.
+  await driver.call("goto", { screen: "contacts" });
+  const picked = await driver.call("select-where", { company: "Halloway Foods" });
+  const before = store.rows.filter((r) => r.status === "declined").length;
+  const improvised = await driver.call("decline-selected");
+  assert.equal(improvised.refused, "stale-plan");
+  assert.equal(store.rows.filter((r) => r.status === "declined").length, before);
+  // It works with the receipt, so the refusal above is the check and not the
+  // verb being broken.
+  const done = await driver.call("decline-selected", {}, { plan: picked.plan });
+  assert.equal(done.ok, true);
+  await driver.call("clear-selection");
+});
+
+await check("a commit with no plan and nothing selected is told to ask, not to go and select something", async () => {
+  // The second thing the eval found. "Accept the selected contacts" with
+  // nothing selected is answered `stale-plan` rather than the app's own
+  // `nothing-selected`, because the token check runs before the verb body —
+  // and both outcomes are correct, since nothing moved and the agent was told
+  // why. The problem was the wording: the generic repair says "run the describe
+  // again", and with an empty selection the only describe that mints a
+  // non-empty plan is one that INVENTS a selection. That is the worst possible
+  // advice in the one situation where improvising is most expensive, as the
+  // check above shows.
+  await driver.call("clear-selection");
+  const out = await driver.call("accept-selected");
+  assert.equal(out.refused, "stale-plan");
+  assert.match(out.hint, /Nothing is selected right now/);
+  assert.match(out.hint, /do NOT select something near enough/);
+  // And it is NOT the sentence for a plan that went out of date.
+  assert.ok(
+    !out.hint.includes("Do not re-send this one"),
+    "an agent with no plan was told to stop re-sending the plan it does not have",
+  );
+});
+
 await check("a stale rev is refused rather than applied", async () => {
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
   const rev = visible().rev;
   await driver.call("next-page");
   const stale = await driver.call("prev-page", {}, { rev });
@@ -685,7 +1009,7 @@ await check("a call that says which screen it meant is refused when the person m
   // answered `ok`. Both screens page, so nothing about the call was wrong —
   // the call simply never said which list it was for. `CallOptions.screen` is
   // how it says so, and it needs no `Verb.screen` to work.
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
   await driver.call("next-page");
   const read = visible();
   assert.equal(read.screen, "contacts");
@@ -718,7 +1042,7 @@ await check("a call that says which screen it meant is refused when the person m
   assert.equal(unguarded.snapshot.page.index, 1);
   notes.push("next-page aimed at `contacts` after a navigation: wrong-screen, naming both");
 
-  await driver.call("go", { screen: "contacts" });
+  await driver.call("goto", { screen: "contacts" });
   await driver.call("search", { q: "" });
 });
 
@@ -736,7 +1060,13 @@ await check("drive() runs describe → commit and the static half never changes"
   const seen = [];
   const script = [
     { calls: [{ id: "t1", name: "select-where", args: { company: "Fairmont Dental" } }] },
-    { calls: [{ id: "t2", name: "accept-selected", args: {} }] },
+    // Read off the previous turn, the way a model reads it. `accept-selected`
+    // declares `consumes: "plan"`, so a scripted call with empty args would be
+    // refused `stale-plan` — which is the feature working, and would make this
+    // check about the wrong thing.
+    (messages) => ({
+      calls: [{ id: "t2", name: "accept-selected", args: { plan: lastPlan(messages) } }],
+    }),
     { text: "Done." },
   ];
   let step = 0;
@@ -744,7 +1074,8 @@ await check("drive() runs describe → commit and the static half never changes"
   const out = await drive(driver, {
     think: async ({ system, tools, messages }) => {
       seen.push({ system, tools: JSON.stringify(tools), messages: messages.length });
-      return script[step++];
+      const next = script[step++];
+      return typeof next === "function" ? next(messages) : next;
     },
     task: "accept everyone at Fairmont Dental",
     onBeforeCommit: () => true,
@@ -773,7 +1104,9 @@ await check("a declined commit reaches the model as declined-by-user, not a cras
         told = last.text;
         return { text: "You declined, so I stopped." };
       }
-      return { calls: [{ id: "x1", name: "accept-selected", args: {} }] };
+      return {
+        calls: [{ id: "x1", name: "accept-selected", args: { plan: lastPlan(messages) } }],
+      };
     },
     task: "accept them",
     onBeforeCommit: () => false,
@@ -818,14 +1151,46 @@ await check("the tool list carries the commit banner and read_screen", () => {
   const pager = tools.find((t) => t.name === "next-page");
   assert.match(pager.description, /ONLY ON THE `contacts` AND `company` SCREENS/);
   // `screen` is hoisted onto every verb that has not claimed the name itself,
-  // exactly as `rev` is. `go` has claimed it, so `go` keeps its own.
+  // exactly as `rev` is. `goto` has claimed it, so `goto` keeps its own — and
+  // it is REQUIRED there, which is how you can tell the app's argument from
+  // the hoisted one, since the hoisted one is always optional.
   assert.equal(scoped.inputSchema.properties.screen.type, "string");
-  assert.deepEqual(tools.find((t) => t.name === "go").inputSchema.required, ["screen"]);
+  assert.deepEqual(tools.find((t) => t.name === "goto").inputSchema.required, ["screen"]);
+  // The six screen ids are in the cached tool schema as an enum, so a model
+  // can enumerate the app's screens even from a client that drops the
+  // instructions text.
+  assert.deepEqual(tools.find((t) => t.name === "goto").inputSchema.properties.screen.enum, [
+    "dashboard",
+    "contacts",
+    "contact",
+    "companies",
+    "company",
+    "settings",
+  ]);
 
   // The manifest's shape, pinned so a new field cannot arrive unnoticed.
   const manifest = driver.manifest();
-  assert.deepEqual(Object.keys(manifest).sort(), ["app", "instructions", "verbs", "version"]);
-  const allowed = ["name", "describe", "kind", "at", "screen", "reversible", "args", "refuses"];
+  assert.deepEqual(Object.keys(manifest).sort(), [
+    "app",
+    "flows",
+    "instructions",
+    "screens",
+    "verbs",
+    "version",
+  ]);
+  const allowed = [
+    "name",
+    "describe",
+    "kind",
+    "at",
+    "screen",
+    "reversible",
+    // HOW a verb may be called, beside WHERE: `"plan"` on a commit that will
+    // only run with the token from the describe that counted its selection.
+    "consumes",
+    "args",
+    "refuses",
+  ];
   for (const verb of manifest.verbs) {
     assert.deepEqual(
       Object.keys(verb).filter((k) => !allowed.includes(k)),
@@ -849,14 +1214,19 @@ await check("the widget confirms a commit with the count the describe reported",
   const wApp = createApp();
   const script = [
     { calls: [{ id: "w1", name: "select-where", args: { company: "Cordova Logistics" } }] },
-    { calls: [{ id: "w2", name: "accept-selected", args: {} }] },
+    (messages) => ({
+      calls: [{ id: "w2", name: "accept-selected", args: { plan: lastPlan(messages) } }],
+    }),
     { text: "Accepted them." },
   ];
   let step = 0;
 
   const panel = mountWidget(wApp.driver, {
     document: fake,
-    think: async () => script[step++],
+    think: async ({ messages }) => {
+      const next = script[step++];
+      return typeof next === "function" ? next(messages) : next;
+    },
     // Zero, because the widget paces its steps for a person watching — 600ms
     // each by default — and a harness that polled against that would be
     // asserting on a stopwatch. The pace is the widget's, and it is checked in
@@ -908,13 +1278,18 @@ await check("saying no to the widget's gate leaves the data alone", async () => 
   const before = wApp.store.rows.filter((r) => r.status === "accepted").length;
   const script = [
     { calls: [{ id: "n1", name: "select-where", args: { company: "Everline Capital" } }] },
-    { calls: [{ id: "n2", name: "accept-selected", args: {} }] },
+    (messages) => ({
+      calls: [{ id: "n2", name: "accept-selected", args: { plan: lastPlan(messages) } }],
+    }),
     { text: "You said no, so I stopped." },
   ];
   let step = 0;
   const panel = mountWidget(wApp.driver, {
     document: fake,
-    think: async () => script[step++],
+    think: async ({ messages }) => {
+      const next = script[step++];
+      return typeof next === "function" ? next(messages) : next;
+    },
     pace: 0,
   });
   const run = panel.ask("accept everyone at Everline Capital");
@@ -955,7 +1330,27 @@ await check("backendThink posts to the real /api/chat and the widget says so", a
 // 3. The outside path, through the real relay
 // =========================================================================
 
-const connected = createApp();
+/**
+ * Who approves a commit on the tab that is published to the relay.
+ *
+ * A function the checks below swap out, because the interesting thing about
+ * the gate is not that it exists but that every answer it can give is
+ * reachable FROM OUTSIDE. Before it moved into `mount()`, the confirmation
+ * lived in the in-page loop: the panel asked the person, and
+ * `POST /dk/tabs/<id>/call {"name":"accept-selected"}` from any other process
+ * ran with nothing in the way.
+ *
+ * @type {(req: unknown) => unknown}
+ */
+let approver = () => true;
+const asked = [];
+
+const connected = createApp(() => {}, {
+  approve: (req) => {
+    asked.push(req.name);
+    return approver(req);
+  },
+});
 let connection;
 let tabId = "";
 
@@ -992,7 +1387,18 @@ await check("a tab connects to /dk and the relay lists it with a manifest", asyn
   // The other half of the briefing argument, over the wire: an agent that
   // arrives here and never sees the widget still reads the app's own words,
   // and reads them once rather than in every snapshot.
-  assert.match(manifest.body.instructions, /six screens/);
+  assert.match(manifest.body.instructions, /status moves new/);
+  // And so are the map and the recipe. The MAP is the one that used to be
+  // impossible out here: the prose version lived in `instructions`, which at
+  // least crossed the relay, but before that it was in `Snapshot.note` and an
+  // outside agent paid for it on every turn. It is data now, fetched once.
+  assert.deepEqual(
+    manifest.body.screens.map((x) => x.id),
+    ["dashboard", "contacts", "contact", "companies", "company", "settings"],
+  );
+  assert.equal(manifest.body.screens.find((x) => x.id === "company").url, "#/companies/{slug}");
+  assert.equal(manifest.body.flows.length, 1);
+  assert.equal(manifest.body.flows[0].steps[0].verb, "goto");
   assert.equal(
     manifest.body.verbs.find((v) => v.name === "select-pending-here").screen,
     "company",
@@ -1003,7 +1409,7 @@ await check("a tab connects to /dk and the relay lists it with a manifest", asyn
   // sent on connect and on reconnect only. Navigating does not resend it, so
   // this is already wrong the moment the tab moves; see the report.
   assert.equal(listed.url, "/examples/contacts/app/#/contacts");
-  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "settings" } });
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "goto", args: { screen: "settings" } });
   const again = await getJson(`${BASE}/dk/tabs`);
   const moved = (again.body.tabs || []).find((t) => t.tab === tabId);
   assert.equal(
@@ -1017,7 +1423,7 @@ await check("a tab connects to /dk and the relay lists it with a manifest", asyn
 await check("an outside agent can walk screens and read where it is", async () => {
   for (const screen of LANDINGS) {
     const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
-      name: "go",
+      name: "goto",
       args: { screen },
     });
     assert.equal(out.status, 200);
@@ -1043,7 +1449,10 @@ await check("the cross-screen job runs over the relay too", async () => {
   assert.equal(picked.body.count, expected);
   assert.equal(picked.body.snapshot.selectedCount, expected);
 
-  const done = await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "accept-selected" });
+  const done = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "accept-selected",
+    plan: picked.body.plan,
+  });
   assert.equal(done.body.ok, true);
   assert.equal(done.body.count, expected);
   assert.equal(
@@ -1055,7 +1464,7 @@ await check("the cross-screen job runs over the relay too", async () => {
 });
 
 await check("a verb called from the wrong screen refuses, over the relay, with a snapshot", async () => {
-  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "dashboard" } });
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "goto", args: { screen: "dashboard" } });
   const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
     name: "search",
     args: { q: "Ada" },
@@ -1073,7 +1482,7 @@ await check("a call that names a stale screen is refused over the relay too", as
   // `screen` on the wire, which is the field that makes the in-page defence
   // reachable from outside: the agent sends the `screen` it last read and the
   // core answers before it looks at `rev` or the arguments.
-  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "contacts" } });
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "goto", args: { screen: "contacts" } });
   const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
     name: "next-page",
     screen: "company",
@@ -1105,7 +1514,7 @@ await check("an outside call runs the verb and comes back with the count", async
 });
 
 await check("a refusal from the app is 200 with ok:false, not a 4xx", async () => {
-  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "contacts" } });
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "goto", args: { screen: "contacts" } });
   const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "prev-page" });
   assert.equal(out.status, 200);
   assert.equal(out.body.ok, false);
@@ -1114,7 +1523,7 @@ await check("a refusal from the app is 200 with ok:false, not a 4xx", async () =
 });
 
 await check("a stale rev through the relay is refused as stale", async () => {
-  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "go", args: { screen: "contacts" } });
+  await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "goto", args: { screen: "contacts" } });
   const snap = await getJson(`${BASE}/dk/tabs/${tabId}/snapshot`);
   assert.equal(snap.status, 200);
   const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
@@ -1138,13 +1547,171 @@ await check("a commit through the relay changes data and reports the count", asy
     args: { company: "Delacroix Media", status: "pending" },
   });
   const expected = picked.body.count;
-  const done = await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "accept-selected" });
+  // The plan token rides out on the describe's result and back in on the
+  // commit's body, over real HTTP and through the real relay. A hop that
+  // stripped it would leave this commit permanently uncallable from outside —
+  // which is the failure the two-relay forwarding rule exists to prevent.
+  assert.match(picked.body.plan, /^dkp1\./, "the relay did not forward the minted plan");
+  const done = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "accept-selected",
+    plan: picked.body.plan,
+  });
   assert.equal(done.body.ok, true);
   assert.equal(done.body.count, expected);
   const accepted = connected.store.rows.filter(
     (r) => r.company === "Delacroix Media" && r.status === "accepted",
   ).length;
   assert.ok(accepted >= expected);
+});
+
+await check("a relay commit the gate declines is refused declined-by-user, and the rows do not move", async () => {
+  // THE GAP, CLOSED, over real HTTP. This is the same POST as the check above
+  // and the only difference is what the approver answered.
+  const picked = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "select-where",
+    args: { company: "Grayson Robotics", status: "pending" },
+  });
+  const before = connected.store.rows.filter(
+    (r) => r.company === "Grayson Robotics" && r.status === "pending",
+  ).length;
+  assert.ok(picked.body.count > 0, "nothing was selected, so this would prove nothing");
+
+  approver = () => "narrow it to one owner first";
+  try {
+    const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+      name: "accept-selected",
+      plan: picked.body.plan,
+    });
+    // 200 with ok:false, like any other refusal: the app said no on purpose.
+    assert.equal(out.status, 200);
+    assert.equal(out.body.refused, "declined-by-user");
+    // The reason reaches the agent, which is the whole reason a decision is
+    // not a boolean. "Declined" sends a model looking for another way to do
+    // the same thing.
+    assert.match(out.body.hint, /narrow it/);
+    // And a snapshot, because the app is still there — unlike a transport
+    // refusal, which has none.
+    assert.ok(out.body.snapshot, "an app refusal must carry the screen");
+  } finally {
+    approver = () => true;
+  }
+
+  const after = connected.store.rows.filter(
+    (r) => r.company === "Grayson Robotics" && r.status === "pending",
+  ).length;
+  assert.equal(after, before, "a declined commit moved rows anyway");
+});
+
+await check("a second relay call cannot race the open question; it is refused approval-pending", async () => {
+  // webmachinelearning/webmcp#288, over the wire. The call an agent is most
+  // likely to make while a question is open is the Approve button of the
+  // dialog asking it, and the second most likely is the same commit again. The
+  // driver answers both the same way: nothing runs while somebody is being
+  // asked.
+  let answer;
+  // A fresh plan first, because the plan check runs BEFORE the approval gate:
+  // nobody should be asked to approve a commit that was going to be refused
+  // anyway, so a commit with a stale token never opens a question at all.
+  const planned = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "select-where",
+    args: { company: "Halloway Foods", status: "pending" },
+  });
+  approver = () => new Promise((resolve) => (answer = resolve));
+  try {
+    const held = postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+      name: "accept-selected",
+      plan: planned.body.plan,
+    });
+    // Wait for the question to actually be open before trying to get round it.
+    for (let i = 0; i < 100 && answer === undefined; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok(answer, "the approval never opened");
+
+    // `press` is the verb the issue above is about; this app has no controls
+    // layer, so `search` stands in for "any other call at all", which is the
+    // rule actually being pinned.
+    const sneak = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+      name: "search",
+      args: { q: "anything" },
+    });
+    assert.equal(sneak.body.refused, "approval-pending");
+    assert.match(sneak.body.hint, /approve or confirm control/);
+
+    answer("not this time");
+    const out = await held;
+    assert.equal(out.body.refused, "declined-by-user");
+  } finally {
+    approver = () => true;
+  }
+
+  // Released, so one question does not wedge the tab for everybody.
+  const after = await postJson(`${BASE}/dk/tabs/${tabId}/call`, { name: "search", args: { q: "" } });
+  assert.equal(after.body.ok, true);
+});
+
+await check("an approval nobody answers is approval-timeout, which is not the relay's timeout", async () => {
+  // The two must stay tellable apart. The relay's `timeout` means the call was
+  // accepted and no answer came back, so the commit MAY ALREADY HAVE RUN and
+  // the only safe move is to read the screen; `approval-timeout` means the
+  // question lapsed, so the verb was never reached. Different slug, and a
+  // snapshot where the transport refusal has none — the two documented signals
+  // both agree.
+  const lapsing = createApp(() => {}, {
+    approve: () => new Promise(() => {}),
+    approvalTimeout: 20,
+  });
+  const picked = await lapsing.driver.call("select-where", {
+    company: "Acme Industrial",
+    status: "pending",
+  });
+  const before = lapsing.store.rows.filter((r) => r.status === "accepted").length;
+
+  // With the plan, so the question is actually asked: the plan check is before
+  // the gate, so a commit holding a stale token is refused without troubling
+  // anybody — which is deliberate, and would make this check about the wrong
+  // refusal.
+  const out = await lapsing.driver.call("accept-selected", {}, { plan: picked.plan });
+  assert.equal(out.refused, "approval-timeout");
+  assert.ok(out.snapshot, "an approval timeout happened in the app and has a screen to report");
+  assert.match(out.hint, /did not\s+run/);
+  assert.equal(
+    lapsing.store.rows.filter((r) => r.status === "accepted").length,
+    before,
+    "a lapsed approval let the commit through",
+  );
+
+  // The contrast, in the same check: the relay's timeout has no snapshot at
+  // all, which is how a client tells "nothing ran" from "nobody knows".
+  const unknown = await postJson(`${BASE}/dk/tabs/not-a-tab/call`, { name: "search", args: { q: "x" } });
+  assert.equal(unknown.body.snapshot, undefined);
+});
+
+await check("publishing a driver whose commits nobody approves is refused outright", async () => {
+  // Three deliberate acts to let an outside agent change data: a commit verb,
+  // a relay connection, and a statement of who approves. This app has six
+  // commits that have not declared `reversible`, so the third one is not
+  // optional — exactly as a relay with remote access and no way to identify
+  // callers refuses to start rather than serving.
+  const undeclared = createApp();
+  assert.throws(
+    () =>
+      connect(undeclared.driver, {
+        relay: BASE,
+        app: "Northwind CRM",
+        EventSource: HttpEventSource,
+        storage: null,
+      }),
+    (err) => {
+      assert.match(err.message, /refusing to connect/);
+      assert.match(err.message, /accept-selected/);
+      assert.match(err.message, /"unattended"/);
+      return true;
+    },
+  );
+  // And the live tab in this file got through because it declared one.
+  assert.equal(connected.driver.approval.policy, "hook");
+  assert.ok(asked.length > 0, "the gate was never reached from outside");
 });
 
 await check("a call with no name is a 400, not a WireResult", async () => {

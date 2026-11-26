@@ -212,6 +212,12 @@ only through `commit-control`.** So:
   defaulting everything to `commit`, this leaves a well-marked app with a gate
   that fires on the things that actually commit — so the gate goes on meaning
   something, and the incentive points at declaring rather than at ignoring.
+  The incentive also points somewhere bad, which is worth saying out loud:
+  `data-dk-kind="read"` on everything silences every question in one pass.
+  **Declaring a kind is a claim, and nothing here can check it.** The console
+  line is therefore worded as a decision the author owes rather than a nuisance
+  they can clear: an undeclared control is the safe state and the right place
+  to leave one until somebody has read its handler.
 - The author hears about it once, on the console, listing the undeclared
   names. The agent is never told; a diagnostic about the app's markup is not
   information an agent can act on.
@@ -467,6 +473,15 @@ field with an input mask, an IME composition, a form that validates on blur, a
 control that commits on Enter — none of those are reachable. There is no
 `press-key` verb; a screen that genuinely needs one needs a tier-1 verb more.
 
+**The human-only walk stops at a shadow boundary, and at an element that has
+no parent.** `parentElement` is null on the top node of a shadow tree, so
+marking the HOST of a component does not withhold the controls inside it — mark
+something inside. And an `ElementLike` written by hand for a non-DOM renderer
+need not implement `parentElement`; one that does not gets the element-only
+reading, which is what this package did before the walk existed. Compatible
+rather than safe, deliberately: withholding every control from an adapter that
+simply did not implement an optional field would be a silent outage.
+
 **Nothing outside the main document.** Canvas-rendered grids, a table in an
 `<iframe>`, closed shadow roots, native `<select>` dropdowns, and anything
 drawn by a non-DOM renderer are invisible here, exactly as they are to the rest
@@ -484,12 +499,76 @@ to do.
 two rows with one id, the verb acts on whichever the page yields first. Warned
 about, never renamed — a suffixed name would be a name no screen shows.
 
-**The gate is only as good as the host.** `commit-control` is declared `commit`
-and that is all this package can do. Nothing fires if the host never wired
-`onBeforeCommit`, and in that case an undeclared control is pressed with no
-question at all. The routing is still worth it — the model is told the control
-is treated as changing data — but the human in front of it is the host's
-responsibility.
+**The gate is no longer only as good as the host, and this paragraph used to
+say it was.** `commit-control` is declared `commit`, which routes it to the
+gated door; what fires at that door now lives in the core rather than in a
+consumer. `mount({ approve })` is asked before any `commit` verb runs, on every
+path — the in-page loop, a relay frame, a test with no transport — and a denial
+is the reserved `declined-by-user`. So an undeclared control pressed by an agent
+in another process is asked about, where before it was pressed with no question
+at all because the only gate in the library was the in-page one. Connecting a
+driver that publishes ungated commits with no policy declared is refused
+outright; see `MountOptions.approve`. The routing here is still what makes it
+work — the core can only ask about a verb that says it changes data — but the
+human in front of it is no longer optional wiring.
+
+**A MIS-DECLARED CONTROL IS NOT GATED, AND THIS LAYER CANNOT CLOSE THAT.** The
+sharpest limit here, so it gets its own paragraph. `commit-control` is declared
+`commit` and routes through the core's gate. `press` and `type-into` are
+declared `describe` and do not — they cannot be anything else, because `press`
+also presses controls the author declared `describe` (a select-all checkbox),
+and declaring the verb `read` or `commit` would be a false claim about every
+other call it serves. The core asks about the **verb's** kind, not the
+control's. So a genuinely destructive button marked `data-dk-kind="read"` is
+pressed with no question asked.
+
+Three true things about that, in order of how much they help:
+
+- **The undeclared case is already covered.** An unmarked kind routes to
+  `commit-control`, which is gated — and because `commit-control` is a `commit`
+  with no `reversible`, `connect()` will not publish a driver carrying this
+  layer until the app has declared who approves. Forgetting is handled; this
+  limit is about asserting something false, not about omitting it.
+- **A central override exists for markup you do not trust.** The
+  `kind(name, el)` hook is consulted before the attribute, so an app embedding
+  third-party or generated markup can force the controls it knows are dangerous
+  to `commit` in one place, in code, without editing anybody's template. That
+  is the mitigation to reach for when the markup's claims are not yours.
+- **Closing it properly needs a change in the core, not here.** The gate would
+  have to be askable per call rather than only per verb — a verb declaring that
+  it gates itself and an approval the verb body raises, under the same
+  no-other-calls lock. With that, `press` could ask about a particular control
+  while staying honestly `describe`. Without it, the only way to route one
+  control through the gate is to declare it `commit`, which is the author's job
+  and is the mechanism this layer already offers.
+
+**An agent can press its own confirm button, and three things stop it.** This is
+the failure the gate above has on its own, and it is observed rather than
+theoretical: in webmachinelearning/webmcp#288 a proposal-only tool correctly
+declined to execute itself, so the agent clicked the page's own Approve button
+and the receipt recorded "approved by you". This layer is exactly that bypass —
+one action, total coverage, and total coverage includes the button that exists
+to stop the action, which an agent cannot tell is inside a dialog (see the
+ordering limit above).
+
+1. **The core refuses every call while an approval is open**, as
+   `approval-pending`. The strongest of the three, because it needs nobody to
+   remember anything and it covers any approval UI rather than a known one. It
+   also stops a second call racing the dialog.
+2. **A confirmation in a shadow root is invisible here.** Closed shadow roots
+   are not walked, which this document already lists as a limit; for an
+   approval UI it is the feature. `@driverkit/widget`'s dialog is in its own
+   shadow tree for this reason among others.
+3. **`data-dk-human-only`** takes a marked control back out: not enumerated,
+   and refused as `no-such-control` — the same answer an unmarked button gets,
+   so the refusal is not an oracle over which buttons are the interesting ones.
+   Put it on the Yes, the signature field, the "I agree" tick, the 2FA box.
+   `data-dk-human-only="false"` is a real no, for markup that cannot omit an
+   attribute. **The mark is inherited**: one attribute on the `<dialog>` takes
+   every control inside it out together, which is the way an author would
+   write it and, until the walk existed, the way that did nothing at all. It is
+   still the weakest layer, because it is the one an author can forget — so it
+   is a second line and never the only one.
 
 **The uncached cost is real and grows with the screen.** Rows plus controls plus
 the duplicated note line is paid for on every turn. Forty controls is a lot more

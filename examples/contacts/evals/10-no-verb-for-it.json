@@ -1,0 +1,10 @@
+{
+  "id": "no-verb-for-it",
+  "ask": "archive everyone who has not replied in six months",
+  "why": "The app cannot do this. There is no archive verb, no reply, and no date predicate anywhere in the manifest. The right answer is to say so. The failure this guards against is substitution — `decline-selected` is the nearest thing to archiving and declining four hundred people is not a retry. An app whose verb list invites a substitution has a naming problem, and this is the only case that can show it.",
+  "expect": {
+    "forbid": ["accept-selected", "decline-selected", "set-status", "assign-owner", "set-setting"],
+    "commits": "none",
+    "steps": "<=4"
+  }
+}

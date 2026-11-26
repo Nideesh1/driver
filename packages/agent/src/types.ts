@@ -480,8 +480,12 @@ export interface DriveOutcome {
   /** `history` plus everything this run added. Pass it back as the next run's
    *  `history` to continue the conversation.
    *
-   *  Not a verbatim transcript: older user turns have had their screen blocks
-   *  replaced, so that a model is never shown two screens and left to work out
-   *  which one is now true. See `pruneScreens`. */
+   *  Not a verbatim transcript: every turn but the newest one carrying a screen
+   *  has had its screen block replaced — the person's turns and the tool turns
+   *  alike — so that a model is never shown two screens and left to work out
+   *  which one is now true, and so that a ten-step run is not ten screens long.
+   *  A tool turn keeps its outcome line either way, and no turn is ever dropped
+   *  or re-paired: every `tool_use` in here still has its result. See
+   *  `pruneScreens`. */
   messages: Turn[];
 }

@@ -140,6 +140,52 @@ selection?" is unanswerable; "accept 1,000 contacts?" is not.
 `Report.count` is distinct from `0`: returning `{ count: 0 }` means "I matched nothing", omitting the field means
 "I do not count", and those decide different next moves.
 
+### 4a. Two calls is not enough on its own: `consumes: "plan"`
+
+The pairing above is necessary and it is not sufficient, and the gap is worth stating plainly because the library
+shipped it as a guarantee for a while. `accept-selected` re-reads "the current selection" **when it runs**, so
+between the two calls a person can tick a row, page the list, or a websocket can land — and then the count the
+agent read, and a person approved, is not provably the set that moved. Django shipped exactly this bug class from
+2010 to 2025: `select_across` silently lost, so a confirmed bulk action ran on page one only.
+
+The fix is Terraform's saved plan. A `describe` that leaves a selection behind gets a `plan` token back beside its
+`count`, and a `commit` that declares `consumes: "plan"` can only be called with it:
+
+```ts
+// The app publishes the selection's identity. One short string whatever the selection's size.
+visible: () => ({ where: "contacts", rev: store.rev, rows: store.onScreen(),
+                  selectedCount: store.selected.size,
+                  selectionId: selectionId(store.selected) }),   // exported by `driverkit`
+
+// And the commit asks for the receipt.
+{ name: "accept-selected", kind: "commit", consumes: "plan", ... }
+```
+
+The core mints the token, over the `rev` it was taken at and the `selectionId`, so an app cannot get the hashing
+wrong. A commit presented with no token, an unknown one, one taken at an older `rev`, one already spent, or one
+whose selection has changed is refused `stale-plan`, and the hint names **both counts** — "you were shown 3,412;
+the selection is now 3,418".
+
+Three rules:
+
+- **Publish `selectionId`.** Use `selectionId(ids)` from `driverkit` rather than hand-rolling it:
+  `[...set].join(",")` is order-dependent, so ticking the same two rows in the other order reads as a different
+  selection and refuses every commit. Without the field the token still binds the `rev` and the count, which catches
+  every change you bump `rev` for and no change you make quietly; the core says so once at the first call.
+- **ALL OR NONE.** If one commit on the selection consumes a plan, **every** commit on the selection must, or the
+  gate is advisory. An eval asked the worked example for a job it could not do, and the agent improvised: it
+  selected a company and called the one bulk commit that asked for no receipt, and 403 rows changed with no count
+  read and nothing gated. The verb an agent reaches for when it is off its intended path is the least-declared one.
+  `mount()` warns when it can see this shape — a `commit` with no arguments is acting on ambient state by
+  definition — but the warning cannot see every case and the rule is the thing to remember.
+- **A verb that names what it acts on needs no plan.** `set-status(status)` on the one record whose screen is open,
+  or anything taking an id, is acting on something the person can see and the count is 1. A plan is the receipt for
+  a count **larger than the screen**.
+
+And publish `selectedCount: 0` rather than omitting it when nothing is selected. An absent one means "I do not
+count", so the core cannot then tell an agent "nothing is selected, so there is nothing for a plan to be taken on"
+— which is the sentence that stops it going off to select something so the commit has rows to run on.
+
 ## 5. `visible()`
 
 The snapshot is the uncached half and the honesty of the whole integration. Full contract in
@@ -158,6 +204,8 @@ The snapshot is the uncached half and the honesty of the whole integration. Full
   window, `{index,size}` = a window of unknown size. Never fake a total.
 - **`selected` is on-screen ids only; `selectedCount` is the real size.** Filling `selected` with ten thousand ids
   puts tens of kilobytes in the uncached half of every result from then on.
+- **`selectionId` is the selection's identity**, which neither of those two can be: `selected` is only the ids on
+  screen and a count cannot tell one selection from a different selection of the same size. See 4a.
 
 Keep `visible()` cheap — it runs on every verb call, twice per call on the refusal paths.
 

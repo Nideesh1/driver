@@ -46,4 +46,10 @@ export interface CallFrame {
   /** The agent's claim about which screen it read, handed to the driver as
    *  `CallOptions.screen` and checked there before `rev`. */
   screen?: string;
+  /** The plan token the agent is presenting, handed to the driver as
+   *  `CallOptions.plan` and checked there before `rev`. Carried here because
+   *  this hop is where it would otherwise be dropped — which would leave the
+   *  field working in-page and silently doing nothing over the relay, and a
+   *  commit guarantee that holds on one of two paths is not a guarantee. */
+  plan?: string;
 }

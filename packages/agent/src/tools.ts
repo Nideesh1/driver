@@ -95,6 +95,28 @@ const KIND_NOTE: Record<string, string> = {
  * It still says the data changes, because it does. `reversible` is a claim
  * about there being a way back, not that nobody minds.
  */
+/**
+ * `consumes: "plan"` folded into the description.
+ *
+ * In the cached half for exactly the reason `refuses` and `screen` are: the
+ * point is that the bare call is never made. A model that learns the pairing
+ * here runs the `describe` first and keeps the token; a model that learns it
+ * from a refusal has already spent a round trip, and on a commit it has spent
+ * it in front of a person waiting for an answer.
+ *
+ * It says what the token is FOR and not merely that it is required, because
+ * "pass the plan" reads as ceremony and gets dropped, while "the number you
+ * read is the number that moves" is the reason it exists. Verbatim from the
+ * Python half.
+ */
+const PLAN_NOTE =
+  "REQUIRES A PLAN. This acts on the selection, so it may only be called with the `plan` " +
+  "token that the app's `describe` verb returned beside its `count`. Run that describe, read " +
+  "the count, check it is the number the person asked for, and pass the `plan` straight back " +
+  "here. If anything has moved the selection in between — the person ticked a row, the list " +
+  "paged, data arrived — this is refused as `stale-plan` and the refusal names both counts. " +
+  "That is the point of the token: the number you read is the number that moves.";
+
 const COMMIT_REVERSIBLE_NOTE =
   "COMMIT (reversible): this changes data, and the app says the change can be undone. " +
   "Still a change the person will see, so do not call it to find out what it does; if it " +
@@ -205,6 +227,29 @@ export function verbTool(verb: Manifest["verbs"][number]): ToolSpec {
     };
   }
 
+  // Hoisted like `rev` and `screen`, with one difference: ONLY onto a verb that
+  // declares `consumes`. `rev` and `screen` are claims any verb can make, so
+  // they go on everything; a plan token means nothing to a verb that does not
+  // consume one, and adding the property to every tool in every app would move
+  // every cached prompt prefix in the world for a feature those apps do not
+  // use. That prefix is the cost argument the library is built on.
+  //
+  // NOT in `required`, although the core will refuse the call without it, and
+  // that is deliberate. `required` moves the failure into the client's
+  // validator, where the refusal's hint — which names both counts and spells
+  // out the pairing — never reaches the model. This library's stance throughout
+  // is that an agent learns from a refusal it can act on, so the schema stays
+  // permissive and the core is strict. The description says it is required.
+  if (verb.consumes === "plan" && !("plan" in properties)) {
+    properties.plan = {
+      type: "string",
+      description:
+        "Required. The `plan` token from the `describe` verb that counted this " +
+        "selection, passed back exactly as it was given. Without it the call is " +
+        "refused as `stale-plan`, and so is a token taken before the selection moved.",
+    };
+  }
+
   const description = [verb.describe];
   if (verb.kind === "commit" && verb.reversible) {
     // Checked before the table, so a reversible commit reads differently from
@@ -220,8 +265,11 @@ export function verbTool(verb: Manifest["verbs"][number]): ToolSpec {
     // either direction.
     description.push(KIND_NOTE[verb.kind]!);
   }
-  // Third: what a verb does to the world outranks where it works, and both
-  // outrank the mechanics.
+  // Third, above `screen`, because HOW a verb may be called outranks WHERE: a
+  // model that goes to the right screen and calls the commit bare has still
+  // lost the turn, and this is the sentence that stops it. Both still outrank
+  // the mechanics.
+  if (verb.consumes === "plan") description.push(PLAN_NOTE);
   if (verb.screen) description.push(screenNote(verb.screen));
   description.push(RESULT_NOTE);
   if (verb.refuses && verb.refuses.length) {
@@ -270,6 +318,99 @@ export function toolsFor(manifest: Manifest): ToolSpec[] {
 }
 
 /**
+ * The app's map, rendered for the model.
+ *
+ * `Manifest.screens` is the static list of every screen the app has, so this
+ * belongs in the cached prefix beside the tool list rather than in any turn's
+ * tail. What an agent could not do before this existed is learn that a screen
+ * EXISTS without standing on it: `Snapshot.screen` says where it is and
+ * `Verb.screen` says where a verb works, and between them there was still no
+ * way to find out that a companies list is in there somewhere. The worked
+ * example closed that gap by pasting a prose screen-map into `instructions`,
+ * which is the same map the app's own route table already had, written a
+ * second time in English with nothing checking that the two agree.
+ *
+ * The sentence about it being the same for every user is not padding. It is
+ * the one thing a model cannot tell by looking: a list that might have been
+ * filtered for this person is a list whose absences mean nothing, and an agent
+ * that cannot trust the absences has to probe for screens anyway. See
+ * `ScreenSpec`, which forbids filtering it, and which puts "you may not open
+ * that" in the refusal where it can be read.
+ *
+ * Verbatim from the Python half.
+ */
+export function screensNote(screens: NonNullable<Manifest["screens"]>): string {
+  const lines = [
+    "THE SCREENS THIS APP HAS. The same screens for every user, always — a screen listed " +
+      "here exists whether or not you have been to it. Only which one is LIVE changes, and " +
+      "that is the `screen` line of every screen you read. If you cannot get to one of " +
+      "these, the app will tell you why when you try; it is never missing from this list.",
+  ];
+  for (const screen of screens) {
+    const needs = Object.keys(screen.args ?? {});
+    lines.push(
+      `- \`${screen.id}\`: ${screen.describe}` +
+        (screen.url ? ` Address: \`${screen.url}\`.` : "") +
+        (needs.length ? ` Needs: ${needs.map((n) => `\`${n}\``).join(", ")}.` : ""),
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * One flow, rendered as the recipe it is.
+ *
+ * The id first and the `describe` on the same line, because the `describe` is
+ * what a model picks a flow on — Microsoft's finding on selection across tool
+ * groups is that the choice is made "based on the plugin's description, not on
+ * any of the individual functions" — and the steps are what it follows once it
+ * has picked. A `section` is printed once where it changes rather than on
+ * every step, so a flow with phases reads as phases and a flow without one
+ * costs nothing.
+ *
+ * Verbatim from the Python half.
+ */
+function renderFlow(flow: NonNullable<Manifest["flows"]>[number]): string {
+  const lines = [`\`${flow.id}\` — ${flow.describe}`];
+  let section: string | undefined;
+  flow.steps.forEach((step, i) => {
+    if (step.section && step.section !== section) lines.push(`  (${step.section})`);
+    section = step.section;
+    lines.push(`  ${i + 1}. \`${step.verb}\` — ${step.hint}`);
+  });
+  return lines.join("\n");
+}
+
+/**
+ * The app's flows, rendered for the model.
+ *
+ * THE SENTENCE THAT MATTERS is the one saying there is no tool that runs a
+ * flow. A model handed a list of numbered steps will look for the button, and
+ * not finding one it may well decide the flow is unavailable; being told that
+ * following the steps IS the mechanism, and why, is what turns a list into an
+ * instruction. The why is honest and is the design: a flow that executed
+ * internally could not adapt when step three found the record already
+ * accepted, and the agent would get back an `ok` that told it nothing. Apple's
+ * app skills say the same thing about themselves — "Skills don't enforce
+ * deterministic behavior, and Siri doesn't run the listed intents in sequence."
+ *
+ * Static, so it rides in the prefix that was already being cached and costs
+ * nothing per turn. Verbatim from the Python half.
+ */
+export function flowsNote(flows: NonNullable<Manifest["flows"]>): string {
+  return (
+    "THE JOBS THIS APP SAYS ITS VERBS ARE USUALLY COMBINED INTO. Each one is a recipe for " +
+    "YOU to carry out with the verbs you already have. **There is no tool that runs a " +
+    "flow**, and that is deliberate: following the steps yourself means you see what each " +
+    "one actually returned and can change course, which something running them for you " +
+    "could not. Take the steps in order, read what each verb reports before the next, and " +
+    "depart from the recipe when the screen says something it did not expect — then say so." +
+    "\n\n" +
+    flows.map(renderFlow).join("\n\n")
+  );
+}
+
+/**
  * The system prompt. A pure function of the manifest — including the app's own
  * `Manifest.instructions` — and the host's static `instructions`, and of
  * nothing else.
@@ -309,7 +450,15 @@ export function systemPrompt(manifest: Manifest, instructions?: string): string 
       "is not what you expected, stop and say so in plain words. Asked to accept a " +
       "thousand rows, accepting fifty thousand because a filter was wider than anybody " +
       "thought is the single worst thing you can do here, and checking the count is how " +
-      "you avoid it.",
+      "you avoid it.\n\n" +
+      "Some commit verbs say they REQUIRE A PLAN. Those return a `plan` token beside the " +
+      "`count` of the describe that counted them, and you pass it straight back. Do not " +
+      "hold one over for later and do not reuse one: a plan is good for one commit and " +
+      "only while nothing has moved the selection. `stale-plan` means the rows changed " +
+      "under you — it names the count you were shown and the count there is now — so run " +
+      "the describe again, read the new number, and say it out loud before you commit to " +
+      "it. That refusal is not an obstacle; it is the one that stops you from accepting a " +
+      "set the person never agreed to.",
 
     "A refusal is a normal answer, not an error. Read the reason and do something " +
       "different; repeating the same call unchanged will get the same answer. If you " +
@@ -325,6 +474,17 @@ export function systemPrompt(manifest: Manifest, instructions?: string): string 
       "verb call ends your turn. Keep it short: this is rendered in a small panel in " +
       "the corner of the person's screen.",
   ];
+
+  // The map and the recipes, between the library's rules and the app's own
+  // words. Both are pure functions of the static manifest, so the prefix stays
+  // byte-identical across every turn of every session of every user -- which
+  // is the only reason either of them is affordable at all. They go AFTER the
+  // safety rules, because a recipe is a thing to do within those rules and not
+  // an exception to them, and BEFORE `instructions`, because whichever text is
+  // last is the one a model follows when two of them disagree and the app's
+  // own voice should outrank a list the core rendered.
+  if (manifest.screens && manifest.screens.length) parts.push(screensNote(manifest.screens));
+  if (manifest.flows && manifest.flows.length) parts.push(flowsNote(manifest.flows));
 
   // The app's own briefing, then the host's. Both last, not first: an
   // app-specific note is an addition to these rules and not a replacement for

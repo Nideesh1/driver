@@ -22,6 +22,20 @@
  * both selected and accepted is how fifty thousand rows get accepted because a
  * filter was wider than anybody thought.
  *
+ * **And the commit takes the `describe`'s plan token.** The pairing above is
+ * two calls, which is necessary and was never sufficient: `accept-selected`
+ * re-reads the selection when it runs, so a checkbox clicked between the two
+ * calls meant the 410 the agent read was not the 410 that changed. So
+ * BOTH selection commits declare `consumes: "plan"`, every screen publishes a
+ * `selectionId`, and a commit holding a token from before the selection moved
+ * is refused `stale-plan` with both counts named. Both, and not just the one
+ * the demo script uses, because an eval found the hole: asked for a job this
+ * app cannot do, an agent improvised its way to `decline-selected` and changed
+ * 403 rows with nothing gated. The two record verbs — `set-status` and
+ * `assign-owner` — declare nothing and are right not to: they act on the ONE
+ * contact whose screen is open, so the count is 1 and the person is looking at
+ * it. A plan is the receipt for a count larger than the screen.
+ *
  * **The arguments are named fields with `oneOf`, not a predicate string.** A
  * `where: string` argument reads like a kindness to the model and is the
  * opposite: two models handed one invent two query languages — `company =
@@ -61,7 +75,7 @@
  * app whose word the next agent will not recognise.
  */
 
-import { mount } from "../../../packages/core/dist/registry.js";
+import { mount, selectionId } from "../../../packages/core/dist/registry.js";
 import {
   COMPANIES,
   OWNERS,
@@ -72,7 +86,7 @@ import {
   companySlug,
   historyFor,
 } from "./data.js";
-import { HOME, LANDINGS, href, parse, same } from "./router.js";
+import { HOME, SCREEN_SPECS, href, parse, same } from "./router.js";
 
 /** @typedef {import("./data.js").Contact} Contact */
 /** @typedef {import("./data.js").Status} Status */
@@ -110,14 +124,80 @@ export { COMPANIES, OWNERS, STATUSES, TOTAL };
  * a cached copy claims.
  */
 const INSTRUCTIONS =
-  "This is a CRM with six screens: a dashboard, a contacts list, one screen per contact, a " +
-  "companies list, one screen per company, and settings. `go` reaches the four main screens; " +
-  "`open-contact` and `open-company` drill into one record and replace the screen you are on, " +
-  "and `back` walks out again. Several verbs work on one screen only — their tool description " +
-  "says which, and calling one elsewhere is refused as `wrong-screen` naming the screen you " +
-  "are on and the screen it wants. A contact's status moves new → pending → accepted or " +
-  "declined. The selection is global: it survives navigation, so a commit verb can act on " +
-  "rows that are not on the screen in front of you, and `selectedCount` is its honest size.";
+  "A drill-down replaces the screen you are on, and `back` walks out again — the trail is " +
+  "this session's, not the browser's. Several verbs work on one screen only; their tool " +
+  "description says which, and calling one elsewhere is refused as `wrong-screen` naming the " +
+  "screen you are on and the screen it wants. A contact's status moves new → pending → " +
+  "accepted or declined. The selection is global: it survives navigation, so a commit verb " +
+  "can act on rows that are not on the screen in front of you, and `selectedCount` is its " +
+  "honest size. `accept-selected` and `decline-selected` both take the `plan` token that a " +
+  "select verb returns beside its count: pass it back on the same turn, because a person " +
+  "clicking a checkbox while you think is the ordinary case here and not a rare one. If the " +
+  "person asked for something this app cannot select, say so rather than selecting something " +
+  "near it.";
+
+/**
+ * The cross-screen job, declared as a recipe rather than written in prose.
+ *
+ * This is the job the whole demo exists to exercise, and until `flows` existed
+ * there was nowhere to say it: the five verbs were all declared and nothing
+ * said they went together in that order, so every agent re-derived the
+ * sequence and the ones that got it slightly wrong — committing before reading
+ * the count — got it wrong invisibly. It used to be a paragraph in the
+ * README, which is to say it was somewhere no model reads.
+ *
+ * NOTHING CALLS THIS. There is no `accept-a-companys-pending-contacts` tool,
+ * and that is the design: step four reports a number, and what to do about a
+ * number that is not what the person asked for is a judgement, not a branch.
+ * An engine running these five would either accept 112 rows or stop, both
+ * without saying why. The agent reads the recipe and keeps the judgement.
+ *
+ * `goto` is named like any other verb, because by the time the flow is checked
+ * it is one: the core added it from `screens` and `navigate`, and `mount()`
+ * throws if a step names a verb that does not exist.
+ */
+const FLOWS = [
+  {
+    id: "accept-a-companys-pending-contacts",
+    describe:
+      "accept the contacts a company has waiting: find the company, look at what is pending " +
+      "there, check how many, and accept them",
+    steps: [
+      {
+        section: "find the company",
+        verb: "goto",
+        hint: "`goto(screen: \"companies\")`. If the person named the company, you can skip "
+          + "straight to `open-company` instead — this step is for finding which one it is.",
+      },
+      {
+        section: "find the company",
+        verb: "sort-companies",
+        hint: "sort by `pending` so the companies with work waiting are at the top. The rows "
+          + "carry the count per company, so this is also how you answer \"who has the most?\".",
+      },
+      {
+        section: "look at what is waiting",
+        verb: "open-company",
+        hint: "open it by name. Its contact list opens on the pending tab, which is the one "
+          + "this job is about.",
+      },
+      {
+        section: "check the number before anything changes",
+        verb: "select-pending-here",
+        hint: "selects every pending contact of this company and reports the `count`. READ "
+          + "THAT COUNT. It is the number of rows the next step will change, and it is "
+          + "usually larger than the twenty you can see.",
+      },
+      {
+        section: "check the number before anything changes",
+        verb: "accept-selected",
+        hint: "takes no filter and acts on the selection, so the count you just read is what "
+          + "moves. If that count is not what the person asked for, stop and say so instead "
+          + "of calling this.",
+      },
+    ],
+  },
+];
 
 /**
  * Build a fresh store and a driver over it.
@@ -125,8 +205,22 @@ const INSTRUCTIONS =
  * @param {() => void} [onChange] called after every mutation, once `rev` has
  *   moved. The page redraws, syncs the address bar and pushes a snapshot to
  *   the relay from here.
+ * @param {{ approve?: import("driverkit").ApprovalPolicy, approvalTimeout?: number }} [options] who
+ *   approves a commit, passed straight through to `mount()`.
+ *
+ *   It is an argument rather than a constant in here because the answer is not
+ *   the app's to give: this module is the store and the verb table, and WHO IS
+ *   WATCHING is a property of the embedding. `app.js` wires the chat panel's
+ *   own dialog, so a commit arriving over the relay renders the same question
+ *   the person would have seen in the panel; `check.mjs` wires a policy of its
+ *   own, because a test harness has nobody to ask.
+ *
+ *   Six of this app's commits have not declared `reversible`, so `connect()`
+ *   refuses to publish this driver to a relay without one of the two. That is
+ *   the point of the field: an agent in another process changing data with
+ *   nothing in front of it is now a configuration somebody has to write down.
  */
-export function createApp(onChange = () => {}) {
+export function createApp(onChange = () => {}, options = {}) {
   const rows = buildContacts();
 
   const store = {
@@ -285,6 +379,38 @@ export function createApp(onChange = () => {}) {
     bump();
   }
 
+  /**
+   * `selectedCount` and `selectionId`, for every screen, from one place.
+   *
+   * Six screens build six snapshots and each one of them has to say the same
+   * two things about the selection, which is the whole argument for this being
+   * a function: a selection fingerprint that five screens publish and the
+   * sixth forgets is a plan token that silently stops checking anything the
+   * moment the person navigates. One place, so there is one answer.
+   *
+   * BOTH are published even when nothing is selected, and `selectedCount: 0`
+   * is a change from what this app used to send. It used to omit the count for
+   * an empty selection to save the bytes, and the type is explicit that an
+   * absent one means "I DO NOT COUNT" rather than "none" — which was a small
+   * lie, because this app counts perfectly well, and it cost something real:
+   * the core cannot tell an agent "nothing is selected, so there is nothing for
+   * a plan to be taken on" from a field that is not there. That sentence is the
+   * difference between an agent asking the person and an agent going off to
+   * select something so the commit has rows to run on, which is the failure an
+   * eval caught. Two bytes for that is a bargain.
+   *
+   * `selectionId()` comes from the core rather than being hand-rolled here.
+   * This app has the Set in hand and could hash it in a line, and that line is
+   * where it would go wrong — `[...set].join(",")` is order-dependent, so
+   * ticking the same two rows in the other order would read as a different
+   * selection and refuse every commit. Hashing a few hundred ids inside
+   * `visible()` is cheap; an app selecting tens of thousands would keep a
+   * running value instead.
+   */
+  function selectionFields() {
+    return { selectedCount: store.selected.size, selectionId: selectionId(store.selected) };
+  }
+
   /** Mark every selected contact with one status. @param {Status} status */
   function applyToSelection(status) {
     let changed = 0;
@@ -373,7 +499,7 @@ export function createApp(onChange = () => {}) {
           { id: "pipeline", metric: "open pipeline, USD", value: pipeline },
           { id: "hottest", metric: "most pending", value: `${hottest.name} (${hottest.pending})` },
         ],
-        ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
+        ...selectionFields(),
         note:
           "this screen is a dashboard, not a table: each row above is one metric tile and " +
           "`id` names the tile, not a record." +
@@ -405,7 +531,7 @@ export function createApp(onChange = () => {}) {
         })),
         page: { index: store.page, size: pageSize(), total: all.length },
         ...(onScreen.length ? { selected: onScreen } : {}),
-        ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
+        ...selectionFields(),
         ...(store.selected.size > onScreen.length
           ? {
               note:
@@ -441,7 +567,7 @@ export function createApp(onChange = () => {}) {
           `added ${open.added}; deal value ${open.value}`,
         rev: store.rev,
         rows: events.map((e) => ({ id: e.id, when: e.when, what: e.what, who: e.who })),
-        ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
+        ...selectionFields(),
         note:
           "the rows above are this contact's activity history, oldest first — they are not " +
           "contacts. `set-status` and `assign-owner` act on this record and take no id." +
@@ -467,7 +593,7 @@ export function createApp(onChange = () => {}) {
           pending: c.pending,
           accepted: c.accepted,
         })),
-        ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
+        ...selectionFields(),
         note:
           "`id` is the company's slug, which is what the URL uses; `open-company` takes the " +
           "`name`." +
@@ -519,7 +645,7 @@ export function createApp(onChange = () => {}) {
         })),
         page: { index: store.page, size: pageSize(), total: all.length },
         ...(onScreen.length ? { selected: onScreen } : {}),
-        ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
+        ...selectionFields(),
         note:
           "the rows are this company's contacts under the current status tab. " +
           "`select-pending-here` selects every pending contact at this company in one call and " +
@@ -574,7 +700,7 @@ export function createApp(onChange = () => {}) {
             accepts: "true | false",
           },
         ],
-        ...(store.selected.size ? { selectedCount: store.selected.size } : {}),
+        ...selectionFields(),
         note:
           "this screen is a form, not a table: each row is one input, `id` is the setting to " +
           "pass to `set-setting`, `value` is what the box says now and `accepts` is what it " +
@@ -593,39 +719,81 @@ export function createApp(onChange = () => {}) {
 
   const driver = mount({
     app: "Northwind CRM",
+    // Absent unless the embedding gave one, so this file still produces the
+    // driver it produced before the gate existed when nobody says otherwise.
+    ...(options.approve === undefined ? {} : { approve: options.approve }),
+    ...(options.approvalTimeout === undefined
+      ? {}
+      : { approvalTimeout: options.approvalTimeout }),
     // Said once, in the cached half, and read by both ways in. See
     // `INSTRUCTIONS` for why it is no longer pasted into every snapshot.
     instructions: INSTRUCTIONS,
     visible,
+    // The app's map, straight out of the router. Not retyped here: see
+    // `SCREEN_SPECS` in `router.js` for why the declaration lives beside
+    // `href()` and not beside the verbs.
+    screens: SCREEN_SPECS,
+    /**
+     * How this app navigates. The body of the core's reserved `goto`.
+     *
+     * The core has no router and will not guess at one, so this three-line
+     * function is the whole of what the app had to supply to replace its own
+     * `go` verb — and what it got back is a verb with the same name, the same
+     * arguments and the same refusals as every other driverkit app that
+     * declares a map, instead of a `go` that only this app's agents have ever
+     * heard of.
+     *
+     * `navigate` here is the store's own function a few dozen lines up; the
+     * key is the hook and the call inside it is the app's. The two record
+     * screens are refused rather than navigated to when the record does not
+     * exist, which is the hook's other job: a per-call, per-user "no" with a
+     * reason, which is where such a no belongs — `screens` itself must list
+     * all six for everybody, or an agent cannot tell a screen it may not open
+     * from a screen that is not there.
+     */
+    navigate: ({ screen, args }, ctx) => {
+      if (screen === "contact" && !contact(String(args.id))) {
+        return ctx.refuse(
+          "no-such-contact",
+          `there is no contact with id \`${args.id}\`. Ids run from c-0001 to c-${TOTAL}.`,
+        );
+      }
+      if (screen === "company" && !company(String(args.slug))) {
+        return ctx.refuse(
+          "no-such-company",
+          `there is no company with the slug \`${args.slug}\`. The eight are ` +
+            `${store.companies.map((c) => c.id).join(", ")} — or call \`open-company\`, ` +
+            `which takes the name as it is written.`,
+        );
+      }
+      navigate({ screen, id: args.id ?? args.slug ?? null });
+    },
+    // The recipe, not an engine. See `FLOWS`.
+    flows: FLOWS,
     verbs: [
       // ---- getting about ------------------------------------------------
-      {
-        name: "go",
-        // `read`, and no longer under protest. This verb is why `read` was
-        // reworded: it changes no data and reports no count, which is what the
-        // kind now promises, but it emphatically does not "change nothing" —
-        // it moves the person's screen out from under them, which is the most
-        // visible thing an agent can do to somebody who is watching. The
-        // ladder is about what a wrong call COSTS, and a wrong navigation
-        // costs exactly what a wrong read costs: the person has to look
-        // somewhere else.
-        kind: "read",
-        describe:
-          "go to one of the app's main screens, the way clicking the left-hand nav does. " +
-          "The two record screens are not here: use `open-contact` or `open-company`.",
-        at: ".nav",
-        args: {
-          screen: {
-            type: "string",
-            describe: "which screen to show",
-            oneOf: [...LANDINGS],
-          },
-        },
-        run: ({ screen }) => {
-          navigate({ screen, id: null });
-        },
-      },
-
+      //
+      // THE `go` VERB USED TO BE HERE. It took one of the four landing screens
+      // from a hand-written `oneOf`, called the store's `navigate`, and was
+      // named `go` because that is what this author typed — while the app next
+      // door named the same verb `navigate` or `open-screen` or `route-to`,
+      // and an agent that had learned one did not recognise the next. The core
+      // offers `goto` now, built from `screens` and the `navigate` hook above,
+      // and it is strictly more than `go` was: all six screens instead of four
+      // (`goto("contact", { id: "c-0184" })` works, because a screen's own
+      // arguments become the verb's), the url template expanded for whoever
+      // wants to paste it, and a refusal that lists the screens when the id is
+      // wrong. What was lost is the `at: ".nav"` outline the widget used to
+      // draw on the navigation bar: `ScreenSpec` has no `at`, and inventing
+      // one here would be the app guessing at a library field.
+      //
+      // `open-contact` and `open-company` STAY, and they are not duplicates of
+      // `goto`. `open-company` takes the company's NAME as a person writes it,
+      // out of an eight-value `oneOf`, and does the slug conversion itself —
+      // `goto` takes the slug, because a url template takes what goes in the
+      // url. A verb surface in the user's own vocabulary is the point of the
+      // whole library, so the app keeps the verb that speaks it; what it no
+      // longer keeps is the generic one it had to write itself.
       {
         name: "open-contact",
         kind: "read",
@@ -923,6 +1091,23 @@ export function createApp(onChange = () => {}) {
       {
         name: "accept-selected",
         kind: "commit",
+        // The verb the plan token was built for, and the one this demo exists
+        // to make the case with. Accepting the selection is the irreversible
+        // bulk act in this app: `select-where(Grayson Robotics)` matches 410
+        // rows, the agent reads 410, a person approves 410 — and before this,
+        // the only thing that connected that number to the rows that actually
+        // changed was that the two calls happened close together. A click on a
+        // checkbox in between, or a `snapshot` frame landing, and the commit
+        // accepted a set nobody had counted. Now it cannot: the token binds the
+        // `rev` and the selection's identity, and a commit presented with a
+        // stale one is refused with both numbers named.
+        //
+        // `decline-selected` deliberately does NOT declare this, and the
+        // contrast is the point rather than an oversight: a verb that has not
+        // adopted the field behaves exactly as it did, which is what makes this
+        // a feature an app can take up one commit at a time instead of a
+        // migration it has to finish.
+        consumes: "plan",
         describe:
           "accept the currently selected contacts, wherever they were selected. Takes no " +
           "filter: it acts on the selection, which may reach past this screen.",
@@ -952,6 +1137,19 @@ export function createApp(onChange = () => {}) {
       {
         name: "decline-selected",
         kind: "commit",
+        // The sibling, and the reason this is not optional once `accept-selected`
+        // has it. An eval asked this app to "archive everyone who has not
+        // replied in six months" — a job it cannot do — and the agent
+        // improvised: `select-where(Halloway Foods)`, then THIS verb, and 403
+        // rows changed status with no plan, no count read and nothing gated. It
+        // reached for the ungated one precisely because it was improvising.
+        //
+        // So the rule is all or none: a guarantee is only as strong as the
+        // least-declared commit that acts on the same ambient state, and an
+        // agent that is off its intended path will find that one. See
+        // `Verb.consumes`, where this is now stated as a rule rather than left
+        // to each app, and `mount()`, which warns about exactly this shape.
+        consumes: "plan",
         describe: "decline the currently selected contacts. Takes no filter; see the selection.",
         refuses: ["nothing-selected"],
         run: (_args, ctx) => {

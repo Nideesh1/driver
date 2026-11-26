@@ -1,0 +1,10 @@
+{
+  // Typecheck only. This package emits nothing, publishes its source and is
+  // not in `tsconfig.build.json` — see the `//exports` note in package.json.
+  //
+  // `tsc -p packages/eval/tsconfig.json` checks it alone; the repo-wide
+  // `tsconfig.json` at the root globs `packages/*/src/**` and `packages/*/test/**`,
+  // so `npm run typecheck` already covers it with everything else.
+  "extends": "../../tsconfig.base.json",
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
