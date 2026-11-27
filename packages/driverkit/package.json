@@ -3,6 +3,15 @@
   "version": "0.0.0",
   "description": "Make a web app drivable by an agent. No pixels, no selectors, no model.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nideesh1/driver.git",
+    "directory": "packages/driverkit"
+  },
+  "homepage": "https://github.com/Nideesh1/driver#readme",
+  "bugs": {
+    "url": "https://github.com/Nideesh1/driver/issues"
+  },
   "type": "module",
   "//exports": [
     "One install, one version, one changelog. The five areas are subpaths rather",
