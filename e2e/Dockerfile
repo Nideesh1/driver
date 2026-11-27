@@ -5,7 +5,7 @@
 # has none. Node builds it; Python serves it. Nothing in the serving stage
 # needs node, npm or a network.
 #
-#   docker compose -f e2e/docker-compose.yml up --build
+#   docker compose up --build
 #
 # This is an ADDITION to the zero-install path, not a replacement for it:
 # `npm ci && npm run build && python3 examples/contacts/server.py` on a machine

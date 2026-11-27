@@ -48,7 +48,7 @@ An addition, not a replacement — the demo needs `python3` and a built
 `packages/driverkit/dist`, and nothing else.
 
 ```sh
-docker compose -f e2e/docker-compose.yml up --build
+docker compose up --build
 open http://127.0.0.1:8770/examples/contacts/app/
 ```
 

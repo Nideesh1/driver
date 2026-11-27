@@ -329,16 +329,52 @@ declarations). The wire protocol is written down in
 [`PROTOCOL.md`](PROTOCOL.md), and the relay has two independent
 implementations that are tested against each other.
 
-## Running the example
+## Try it before you integrate it
 
-A contacts app with 3,412 rows, the widget in the corner, and the relay
-mounted on the same server — so one page is drivable both ways.
+A contacts app with 3,412 rows across six screens, the widget in the corner,
+and the relay mounted on the same server — so one page is drivable both ways,
+by the panel and by an outside agent.
+
+```sh
+docker compose up --build
+```
+
+then open <http://127.0.0.1:8770/examples/contacts/app/>.
+
+**No API key is needed to see it work.** Every screen, the router and the
+relay run without one. Only `/api/chat` does not, and when it cannot reach a
+model the widget says so in its own transcript rather than going quiet — so
+you can click through the whole app, watch the relay list your tab, and decide
+whether any of this is worth a key.
+
+To let the widget talk to a model, put the key in the environment of the shell
+that runs compose:
+
+```sh
+ANTHROPIC_API_KEY=... docker compose up --build
+```
+
+It is never written to a file and never reaches the browser: the page talks
+only to `/api/chat`, which is the reason `driverkit/agent` ships no model
+client of its own.
+
+Then ask the panel for something that takes more than one step — *"open Acme
+Industrial, tell me how many of its contacts are pending, then accept them"* —
+and watch the real UI navigate, filter, select 112 rows, and stop at the
+approval gate before it changes anything.
+
+<details>
+<summary>Without Docker</summary>
+
+The demo needs `python3` and a built `packages/driverkit/dist`, and nothing
+else:
 
 ```sh
 npm install && npm run build
-export ANTHROPIC_API_KEY=...
+export ANTHROPIC_API_KEY=...        # optional, as above
 python3 examples/contacts/server.py
 ```
+</details>
 
 ## Status
 
