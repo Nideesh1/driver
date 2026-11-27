@@ -134,9 +134,11 @@ _PLAN_NOTE = (
     "REQUIRES A PLAN. This acts on the selection, so it may only be called with the `plan` "
     "token that the app's `describe` verb returned beside its `count`. Run that describe, read "
     "the count, check it is the number the person asked for, and pass the `plan` straight back "
-    "here. If anything has moved the selection in between — the person ticked a row, the "
-    "list paged, data arrived — this is refused as `stale-plan` and the refusal names both "
-    "counts. That is the point of the token: the number you read is the number that moves."
+    "here. If anything has moved the selection in between — the person ticked a row, data "
+    "arrived — this is refused as `stale-plan` and the refusal names both counts. Reading and "
+    "navigating do not move the selection and do not spend the plan, so go and confirm "
+    "whatever you are unsure of first. That is the point of the token: the number you read is "
+    "the number that moves."
 )
 
 _COMMIT_REVERSIBLE_NOTE = (
@@ -578,7 +580,9 @@ def instructions_for(manifest: Manifest) -> str:
         "A COMMIT whose description says REQUIRES A PLAN takes the `plan` token that the "
         "`describe` verb returned beside its `count`. Pass it straight back, do not reuse one "
         "and do not keep one for later: a plan is good for one commit and only while nothing "
-        "has moved the selection. `stale-plan` means the rows changed under you and names both "
+        "has moved the selection. Looking is free: reading a screen or navigating to another "
+        "one leaves the plan good, so go back and confirm anything you are unsure of before an "
+        "irreversible commit. `stale-plan` means the rows changed under you and names both "
         "counts — the one you were shown and the one there is now — so run the "
         "describe again, read the new number and say it before committing to it.",
         # The consent half of the safety story, which used to be missing from

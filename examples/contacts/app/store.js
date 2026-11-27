@@ -1136,7 +1136,10 @@ export function createApp(onChange = () => {}, options = {}) {
         // checkbox in between, or a `snapshot` frame landing, and the commit
         // accepted a set nobody had counted. Now it cannot: the token binds the
         // `rev` and the selection's identity, and a commit presented with a
-        // stale one is refused with both numbers named.
+        // stale one is refused with both numbers named. Navigating does not
+        // spend it -- every screen in here publishes a `selectionId`, so an
+        // agent that goes back to the companies list to check which company it
+        // opened arrives at the commit with its receipt intact.
         //
         // `decline-selected` deliberately does NOT declare this, and the
         // contrast is the point rather than an oversight: a verb that has not

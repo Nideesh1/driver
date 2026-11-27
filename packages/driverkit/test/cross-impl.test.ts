@@ -33,8 +33,8 @@ import type { Readable } from "node:stream";
 
 import { HttpEventSource, getJson, postJson } from "./sse-client.ts";
 import { TabAuth, anonPrincipalId, mintAnonCredential } from "../src/relay/index.ts";
-import { renderSnapshot } from "../src/agent/index.ts";
-import type { Snapshot } from "../src/core/index.ts";
+import { renderResult, renderSnapshot } from "../src/agent/index.ts";
+import type { Result, Snapshot } from "../src/core/index.ts";
 
 const ROOT = new URL("../../../", import.meta.url).pathname;
 
@@ -304,6 +304,59 @@ test("both renderers say the same words about an empty selection, byte for byte"
     rendered,
     expected,
     "render.py and render.ts have drifted: the same screen reads differently depending on how the agent connected",
+  );
+});
+
+/**
+ * The results whose rendering carries a plan token, which is the line with the
+ * most words and the fewest readers: it reaches the model and nothing else.
+ *
+ * It got its own crossing when the token stopped dying on a read-only move. The
+ * two halves each hold their own copy of the sentence that tells an agent what
+ * does and does not spend a plan, and an agent told "navigating spends it"
+ * through one relay and "navigating is free" through the other would be driven
+ * differently by the same prompt — which is drift that no test in either
+ * language could see, because each half is self-consistent.
+ */
+const PLAN_RESULTS: Result[] = [
+  {
+    ok: true,
+    count: 3412,
+    plan: "dkplan.180.4.0f1a2b3c4d5e",
+    snapshot: { where: "contacts, filtered to Acme", screen: "contacts", rev: 180, selectedCount: 3412, rows: [] },
+  },
+  // A count of zero with a plan, because "commit on nothing" is a decision an
+  // agent makes and the renderers must agree about it too.
+  { ok: true, count: 0, plan: "dkplan.9.1.abcdef012345", snapshot: { where: "contacts", rev: 9, selectedCount: 0, rows: [] } },
+  // And the refusal, which is the other half of the same conversation.
+  {
+    ok: false,
+    refused: "stale-plan",
+    hint: "that plan was taken at rev 180 and the screen is now at rev 184.",
+    snapshot: { where: "contacts", rev: 184, selectedCount: 3418, rows: [] },
+  },
+];
+
+test("both renderers say the same words about a plan token, byte for byte", async (t) => {
+  const expected = PLAN_RESULTS.map((r) => renderResult(r)).join("\n--\n");
+
+  const script =
+    "import json,sys\n" +
+    "sys.path.insert(0, sys.argv[1])\n" +
+    "from driverkit import render_result\n" +
+    "from driverkit.types import Result\n" +
+    "cases=json.load(sys.stdin)\n" +
+    'sys.stdout.write("\\n--\\n".join(render_result(Result.from_dict(c)) for c in cases))\n';
+
+  const rendered = await renderInPython(script, JSON.stringify(PLAN_RESULTS));
+  if (rendered === null) {
+    t.skip("no python3 with driverkit importable from python/src");
+    return;
+  }
+  assert.equal(
+    rendered,
+    expected,
+    "render.py and render.ts have drifted on the plan token: an agent is told different rules depending on how it connected",
   );
 });
 

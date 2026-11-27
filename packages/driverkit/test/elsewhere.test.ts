@@ -133,6 +133,19 @@ function tab(backend: Backend, elsewhere?: ElsewhereChannel): Tab {
         describe: "read the contacts on screen",
         run: () => {},
       },
+      {
+        // `filter()` as a verb. A read that moves this tab's `rev` without
+        // refetching anything is what clears the notice, and it is also what
+        // a plan is now carried across -- so this file needs it as a CALL and
+        // not only as a helper, to pin that the two do not combine.
+        name: "goto",
+        kind: "read",
+        describe: "go to another screen of this app",
+        run: () => {
+          where = where === "contacts" ? "settings" : "contacts";
+          rev++;
+        },
+      },
     ],
   });
 
@@ -365,6 +378,35 @@ test("the notice clears when this app's own rev moves", async () => {
   );
   const allowed = await b.driver.call("accept-selected", {}, { plan: await counted(b) });
   assert.equal(allowed.ok, true);
+});
+
+test("a navigation carries no plan in a tab another tab has changed", async () => {
+  // The hole the carry would have opened on top of the notice's documented
+  // weakness. A read-only move does not spend a plan -- see `plansGoodAt` --
+  // and a read-only move also clears the `changed-elsewhere` notice, because
+  // `rev` is the only statement the core is entitled to believe. Carrying the
+  // plan across the same call would have made those two compose: the notice
+  // gone, the receipt still good, and a bulk commit going through in a tab the
+  // core had just been told was behind, with no fresh count anywhere.
+  //
+  // So the carry declines while a notice stands. The tab is not stuck -- it
+  // describes again and gets a new token, which is the documented weakness and
+  // no worse -- but the count gets read a second time, which is the one thing
+  // worth insisting on here.
+  const backend: Backend = { accepted: new Set() };
+  const bus = wire();
+  const a = tab(backend, bus);
+  const b = tab(backend, bus);
+
+  const held = await counted(b);
+  await a.driver.call("accept-selected", {}, { plan: await counted(a) });
+  assert.match(b.driver.snapshot().note ?? "", /another tab/);
+
+  assert.equal((await b.driver.call("goto")).ok, true);
+  assert.equal(b.driver.snapshot().note, undefined, "the notice outlived a rev move");
+
+  const out = await b.driver.call("accept-selected", {}, { plan: held });
+  assert.equal(out.ok === false && out.refused, "stale-plan");
 });
 
 test("a tab that listens and refetches never sees any of this fire", async () => {

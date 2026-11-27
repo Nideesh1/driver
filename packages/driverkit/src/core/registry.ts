@@ -1264,7 +1264,11 @@ export function mount(options: MountOptions): Driver {
     /** The `describe` that minted it. Named back in the refusal, so an agent
      *  told its plan is stale is told which call to make again. */
     verb: string;
-    /** The `rev` the count was taken at. The expiry rule; see `minted`. */
+    /** The `rev` the count was taken at. Named back in a refusal, and now ONLY
+     *  that: the expiry rule is `plansGoodAt`, which starts here and may be
+     *  carried forward over a read-only move. A carried plan still reports the
+     *  rev it was taken at, because that is the call the agent made and the
+     *  one it would have to make again. */
     rev: number;
     /** `Snapshot.selectionId` at that moment, or undefined in an app that does
      *  not publish one. */
@@ -1296,11 +1300,63 @@ export function mount(options: MountOptions): Driver {
   const planSalt = `${(planSeq += 1)}.${Math.random().toString(36).slice(2)}`;
 
   const plans = new Map<string, Plan>();
-  /** The `rev` every record in `plans` was minted at. A plan is only valid at
-   *  the rev it was taken at, so the map never needs to hold two revs' worth
-   *  and is cleared the moment a newer one mints. That is the expiry rule
-   *  paying for itself twice: as the check, and as the bound on the memory. */
+  /** The `rev` every record in `plans` was minted at, which is what keeps the
+   *  map to one rev's worth: it is cleared the moment a newer one mints. Not
+   *  the expiry check -- that is `plansGoodAt` -- so this stays the honest
+   *  answer to "when was this counted" and goes on bounding the memory. */
   let plansAt = -1;
+  /**
+   * The `rev` the outstanding plans are still good AT, which starts equal to
+   * `plansAt` and is the only thing `checkPlan` compares against.
+   *
+   * THE DEFECT THIS SPLITS IN TWO. `Snapshot.rev` means "the snapshot
+   * changed", and a read-only navigation genuinely changes the snapshot: the
+   * person is looking at a different screen. So one number was answering two
+   * questions. `stale` asks "is what you were looking at still what is on
+   * screen?" -- and navigation really does invalidate that, which is why the
+   * `stale` check still compares the raw `rev` and is untouched here. A plan
+   * token asks "is the selection you counted still the selection?" -- and
+   * navigation does not touch that at all. Conflating them priced the
+   * double-check above the blind commit: `select-where` then `goto` then
+   * `accept-selected` was refused `stale-plan` although nothing about the
+   * selection had moved, so the cheap path was to commit without re-reading.
+   * The whole mechanism exists to make an agent read the number before it
+   * moves 3,412 rows, and teaching it that looking first costs two extra calls
+   * teaches exactly the wrong habit.
+   *
+   * WHAT CARRIES IT FORWARD, and every clause is a safety condition rather
+   * than a convenience; see the carry in `call()`. A verb that DECLARED
+   * `kind: "read"` -- the kind whose own documentation says "changes no data
+   * and reports no count. It may still move what the person is looking at:
+   * navigation is a read" -- that moved `rev`, while the app publishes a
+   * `Snapshot.selectionId` and that string is unchanged across the call.
+   *
+   * WHAT DOES NOT. An app that publishes no `selectionId` carries nothing and
+   * behaves exactly as it did before this existed: its token still dies on the
+   * first `rev` move of any kind. That is the fail-safe direction and it is the
+   * reason this was done with `selectionId` rather than with a second counter
+   * an author has to remember to bump -- an author who forgot the counter would
+   * get a token that never expires, which is the 3,412-row bug. A `commit`
+   * carries nothing, since a commit is the thing a plan is a receipt against. A
+   * verb with no declared `kind` carries nothing, because an absent `kind`
+   * makes no safety claim in either direction. And a `rev` that moved with no
+   * verb behind it at all -- a websocket landing between two calls -- carries
+   * nothing, because the plan was already dead by the time the next verb
+   * started: the carry requires that the plans were still good at the rev the
+   * read STARTED from.
+   */
+  let plansGoodAt = -1;
+  /**
+   * The `Snapshot.selectionId` the outstanding plans were minted against, or
+   * undefined in an app that publishes none.
+   *
+   * Driver-level rather than per-plan because every outstanding plan shares it:
+   * `mint` clears the map whenever `rev` moves, so the map only ever holds
+   * plans taken at one rev, and one rev is one selection. It is kept separately
+   * from the plans all the same, so the carry can be decided when the map is
+   * empty and without picking an arbitrary entry out of it.
+   */
+  let plansSelection: string | undefined;
   let planCount = 0;
 
   /**
@@ -1340,6 +1396,12 @@ export function mount(options: MountOptions): Driver {
       plans.clear();
       plansAt = after.rev;
     }
+    // Reset on every mint, carried plans included. A fresh describe is a fresh
+    // count, so whatever a previous plan had been carried to is irrelevant from
+    // here; and the clear above means a carried plan from an older rev is
+    // retired by this mint exactly as it was before the carry existed.
+    plansGoodAt = after.rev;
+    plansSelection = after.selectionId;
     // A guard, not a policy. An app whose `rev` never moves could mint without
     // limit, and this driver may live for the life of a tab. The oldest goes,
     // and an agent holding it is refused `stale-plan` -- which is the right
@@ -1438,7 +1500,11 @@ export function mount(options: MountOptions): Driver {
       );
     }
 
-    if (plan.rev !== before.rev) {
+    // `plansGoodAt` and not `plan.rev`, which is the whole of the fix. The two
+    // are the same number until a read-only move carries them apart, and they
+    // are compared here rather than in `call()` so that the one refusal still
+    // names the rev the count was actually taken at.
+    if (plansGoodAt !== before.rev) {
       return (
         `that plan was taken at rev ${plan.rev} and the screen is now at rev ${before.rev}, so ` +
         `the selection it counted is not the selection on screen.${both} ${PLAN_REPAIR}`
@@ -1765,6 +1831,13 @@ export function mount(options: MountOptions): Driver {
     // at and the rev a person approved.
     trail.rev = before.rev;
     if (before.screen !== undefined) trail.screen = before.screen;
+    // Read HERE and kept, because the carry below needs it and the `read()`
+    // that produces `after` is where a lapsed notice is cleared. A read-only
+    // move clears the notice as a side effect -- a known weakness of `rev`,
+    // documented on `MountOptions.elsewhere` -- so asking afterwards would
+    // always answer no, and a plan would be carried across a navigation in a
+    // tab the core had just been told was behind. See the carry.
+    const behind = elsewhere !== null;
 
     // WHICH SCREEN comes before WHICH REV, which comes before the arguments.
     // Each check describes a wider mistake than the next, and the widest one is
@@ -1879,9 +1952,16 @@ export function mount(options: MountOptions): Driver {
     // useful to say about it until it is standing in the right place.
     //
     // But `stale-plan` is WIDER than `stale`, and that is why it goes above it
-    // rather than below. A token binds the `rev` it was taken at, so every
-    // stale `rev` is also a stale plan -- the set is strictly larger -- and the
-    // two repairs are not the same size. `stale` says "read again", and an
+    // rather than below. The two overlap on everything that moves the
+    // selection -- and where they do, the repairs are not the same size.
+    //
+    // They are no longer nested the way this comment once claimed. A read-only
+    // move is `stale` and is NOT `stale-plan`: the screen the agent echoed is
+    // not the screen on display, and the selection it counted is still the
+    // selection, so the narrower answer is the true one and it is the one that
+    // comes back. See `plansGoodAt`. The ordering is unchanged, because where
+    // both apply the plan is still the wider mistake. `stale` says "read
+    // again", and an
     // agent that reads again and carries on is the agent that accepts 3,418
     // rows after a person approved 3,412. `stale-plan` says "run the describe
     // again, read the new count, check it, then commit", which is the repair
@@ -2044,6 +2124,49 @@ export function mount(options: MountOptions): Driver {
     if (verb.kind === "commit") announce(name);
 
     const after = read();
+
+    // THE CARRY. A read-only move does not spend a plan.
+    //
+    // `Snapshot.rev` answers two questions and only one of them is the plan's;
+    // see `plansGoodAt` for the argument and for why this is gated on
+    // `selectionId` rather than on a second counter. What is left here is the
+    // list of conditions, each of which is the safe direction of one choice:
+    //
+    //  - `usesPlans` and a non-empty map: nothing to carry otherwise, and an
+    //    app with no consuming verb must not grow a line of behaviour it never
+    //    asked for.
+    //  - `kind === "read"`, read from the DECLARATION. `describe` is excluded
+    //    because it is the kind that changes what is selected -- and one that
+    //    counted has just minted a fresh plan anyway, which retires this one.
+    //    `commit` is excluded because it is the thing a plan is a receipt
+    //    against. An absent `kind` is excluded because it makes no claim.
+    //  - `before.rev === plansGoodAt`: the plans were still good when this
+    //    verb STARTED. A `rev` that had already moved for some other reason --
+    //    a websocket between two calls -- has already killed them, and a read
+    //    must not resurrect a plan by walking past the rev that buried it.
+    //  - `after.rev !== before.rev`: there is a move to forgive at all.
+    //  - `!behind`: no `changed-elsewhere` notice stands. The notice says this
+    //    tab's data may be stale at a `rev` that has not moved, and carrying a
+    //    plan over a navigation that silently cleared it would turn one extra
+    //    describe into none.
+    //  - a defined `selectionId`, unchanged across the call. This is the whole
+    //    guarantee: the plan counted a selection, and the app is saying that
+    //    the selection is the same one. An app that publishes nothing here
+    //    carries nothing and keeps the behaviour it has always had, which is
+    //    the fail-safe an un-adopted app needs -- and the core already warns
+    //    that author once, at their first plan check.
+    if (
+      usesPlans &&
+      verb.kind === "read" &&
+      plans.size > 0 &&
+      before.rev === plansGoodAt &&
+      after.rev !== before.rev &&
+      !behind &&
+      after.selectionId !== undefined &&
+      after.selectionId === plansSelection
+    ) {
+      plansGoodAt = after.rev;
+    }
 
     // The mint, and everything about when it happens is load-bearing.
     //

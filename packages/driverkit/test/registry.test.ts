@@ -1885,12 +1885,13 @@ function planned(
 ) {
   const ids = ["r1", "r2", "r3", "r4", "r5"];
   let rev = 1;
+  let screen = "rows";
   let selected = new Set<string>();
   let accepted = 0;
 
   const visible = (): Snapshot => ({
-    where: "rows",
-    screen: "rows",
+    where: screen === "rows" ? "rows" : "somewhere else",
+    screen,
     rev,
     rows: ids.map((id) => ({ id })),
     selected: [...selected],
@@ -1918,6 +1919,19 @@ function planned(
         kind: "read",
         describe: "look, and count nothing",
         run: () => {},
+      },
+      {
+        // The verb the carry exists for: a `read` that changes no data, counts
+        // nothing, and moves `rev` anyway -- because the person is now looking
+        // somewhere else. `look` cannot stand in for it; it leaves `rev` alone
+        // and so never reaches the question.
+        name: "goto",
+        kind: "read",
+        describe: "go and look at the other screen",
+        run: () => {
+          screen = screen === "rows" ? "other" : "rows";
+          rev += 1;
+        },
       },
       {
         name: "accept-selected",
@@ -1960,6 +1974,13 @@ function planned(
     /** The case `rev` cannot see: the selection moves and `rev` does not. */
     tickQuietly(id: string) {
       selected.add(id);
+    },
+    /** Data arriving with nobody calling anything: the rows behind the same
+     *  selection changed, so `rev` moves and the selection's identity does
+     *  not. The one thing `selectionId` cannot see, and the reason the carry
+     *  refuses to forgive a `rev` move it cannot attribute to a read. */
+    dataArrived() {
+      rev += 1;
     },
     accepted: () => accepted,
     rev: () => rev,
@@ -2054,6 +2075,135 @@ test("a plan taken at an older rev is refused, naming both revs", async () => {
   assert.match(out.ok === false ? out.hint! : "", new RegExp(`taken at rev ${was}`));
   assert.match(out.ok === false ? out.hint! : "", new RegExp(`now at rev ${a.rev()}`));
   assert.equal(a.accepted(), 0);
+});
+
+test("a read-only navigation between a describe and its commit does not spend the plan", async () => {
+  // THE DEFECT, as the sequence that found it: `select-where`, `goto`,
+  // `accept-selected` was refused `stale-plan` although nothing about the
+  // selection had moved. `Snapshot.rev` means "the snapshot changed" and a
+  // navigation genuinely changes the snapshot, so one number was answering two
+  // questions -- `stale`'s "is this still what is on screen?", which navigation
+  // really does invalidate, and the plan's "is this still the selection you
+  // counted?", which it does not.
+  //
+  // It is pinned because of what the old answer taught. The plan token exists
+  // to make an agent read the number before it moves 3,412 rows, and an agent
+  // that goes back to confirm its premise before an irreversible commit was
+  // paying a refusal and two recovery calls for it, while the agent that
+  // committed blind paid nothing. Caution must not be the expensive path.
+  const a = planned();
+  const picked = await a.driver.call("select-first", { n: 3 });
+  const token = picked.ok ? picked.plan! : "";
+  const was = picked.ok ? picked.snapshot.rev : -1;
+
+  const moved = await a.driver.call("goto");
+  assert.equal(moved.ok, true);
+  assert.notEqual(a.rev(), was, "`goto` left `rev` alone; the test proves nothing");
+
+  const done = await a.driver.call("accept-selected", {}, { plan: token });
+  assert.equal(done.ok, true, done.ok === false ? done.hint : "");
+  assert.equal(a.accepted(), 3);
+});
+
+test("a selection that moved across that same navigation is still refused", async () => {
+  // The twin, and the guarantee the carry is not allowed to weaken: a plan is
+  // refused when the selection it counted has actually changed, whether or not
+  // a navigation happened in the gap. Two orderings, because the carry reads
+  // the selection's identity on the way past and either side of it has to hold.
+  const quiet = planned();
+  const first = await quiet.driver.call("select-first", { n: 3 });
+  await quiet.driver.call("goto");
+  // After the navigation, and WITHOUT moving `rev` -- the case no amount of
+  // `rev` discipline catches, and the one the carry must not have swallowed.
+  quiet.tickQuietly("r5");
+  const after = await quiet.driver.call("accept-selected", {}, {
+    plan: first.ok ? first.plan! : "",
+  });
+  assert.equal(after.ok === false && after.refused, "stale-plan");
+  assert.match(after.ok === false ? after.hint! : "", /named a different selection/);
+  assert.equal(quiet.accepted(), 0, "a selection nobody counted was accepted");
+
+  // And before it: the plans were already dead when `goto` started, so the
+  // navigation has nothing to carry and cannot walk past the tick.
+  const loud = planned();
+  const second = await loud.driver.call("select-first", { n: 3 });
+  loud.tick("r4");
+  await loud.driver.call("goto");
+  const out = await loud.driver.call("accept-selected", {}, {
+    plan: second.ok ? second.plan! : "",
+  });
+  assert.equal(out.ok === false && out.refused, "stale-plan");
+  assert.equal(loud.accepted(), 0);
+});
+
+test("a `rev` that moved with no verb behind it is not forgiven by a later read", async () => {
+  // The hole the carry would have opened if it had simply stopped checking
+  // `rev`. `selectionId` identifies the selection by membership and cannot see
+  // the rows change underneath it: 112 rows selected as pending, fifty of them
+  // declined by somebody else, and the same 112 ids still selected. The count
+  // is still 112 and the identity is still equal, so nothing but `rev` knows.
+  //
+  // So the carry forgives only a move it can attribute to a `read` it just ran,
+  // and only when the plans were still good at the rev that read STARTED from.
+  // Data that arrived between two calls has already retired the plan, and a
+  // navigation afterwards must not resurrect it by walking past the rev that
+  // buried it.
+  const a = planned();
+  const picked = await a.driver.call("select-first", { n: 3 });
+  const token = picked.ok ? picked.plan! : "";
+  const was = picked.ok ? picked.snapshot.rev : -1;
+
+  a.dataArrived();
+  await a.driver.call("goto");
+
+  const out = await a.driver.call("accept-selected", {}, { plan: token });
+  assert.equal(out.ok === false && out.refused, "stale-plan");
+  // The rev the count was TAKEN at, not whatever the carry last moved to: that
+  // is the call the agent made and the one it has to make again.
+  assert.match(out.ok === false ? out.hint! : "", new RegExp(`taken at rev ${was}`));
+  assert.equal(a.accepted(), 0);
+});
+
+test("an app that publishes no `selectionId` carries nothing across a navigation", async () => {
+  // THE FAIL-SAFE, and the reason this was built on `selectionId` instead of a
+  // second counter for data. An author who had to remember to bump a data
+  // counter and forgot would get a token that never expires, which is the
+  // 3,412-row bug the whole mechanism exists to prevent. An author who has not
+  // filled in `selectionId` gets instead exactly the behaviour they have always
+  // had -- the token still dies on the first `rev` move of any kind -- and the
+  // core already tells them once, at their first plan check, that their token
+  // binds only the rev and the count.
+  const a = planned({ consumes: "plan", identity: false });
+  const picked = await a.driver.call("select-first", { n: 3 });
+  const token = picked.ok ? picked.plan! : "";
+
+  await a.driver.call("goto");
+
+  const out = await a.driver.call("accept-selected", {}, { plan: token });
+  assert.equal(out.ok === false && out.refused, "stale-plan");
+  assert.equal(a.accepted(), 0);
+});
+
+test("a describe after the navigation retires the plan the navigation carried", async () => {
+  // A carried plan is still one plan, and a fresh count still supersedes it.
+  // Pinned because the carry moves the number the expiry is measured against,
+  // and a mint that did not reset it would leave two live receipts for two
+  // different counts of the same selection.
+  const a = planned();
+  const picked = await a.driver.call("select-first", { n: 3 });
+  const stale = picked.ok ? picked.plan! : "";
+
+  await a.driver.call("goto");
+  const again = await a.driver.call("select-first", { n: 2 });
+  const fresh = again.ok ? again.plan! : "";
+  assert.notEqual(fresh, stale);
+
+  const old = await a.driver.call("accept-selected", {}, { plan: stale });
+  assert.equal(old.ok === false && old.refused, "stale-plan");
+  assert.equal(a.accepted(), 0);
+
+  assert.equal((await a.driver.call("accept-selected", {}, { plan: fresh })).ok, true);
+  assert.equal(a.accepted(), 2);
 });
 
 test("a plan minted by another driver, or edited, is not a plan this app has", async () => {

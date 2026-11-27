@@ -54,7 +54,9 @@ const COUNT_NOTE =
 const PLAN_NOTE =
   "Pass this `plan` back to the commit verb that acts on this selection. It is the receipt " +
   "for the count above: if anything moves the selection first the commit is refused as " +
-  "`stale-plan` rather than acting on rows nobody counted. One commit per plan.";
+  "`stale-plan` rather than acting on rows nobody counted. One commit per plan. Reading and " +
+  "navigating do not move the selection and do not spend this plan, so go and check whatever " +
+  "you need to before you commit.";
 
 /**
  * The screen as a short text block.

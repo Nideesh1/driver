@@ -182,7 +182,11 @@ sufficient — `accept-selected` re-reads "the current selection" when it runs, 
 can tick a row or a websocket can land, and the count the human approved is then not provably the set that moves.
 Django shipped that bug class for fifteen years. A `describe` that leaves a selection behind hands back a `plan`
 token beside its `count`; a `commit` declaring `consumes: "plan"` can only be called with one, and a token that is
-unknown, stale, spent, or taken over a different selection is refused `stale-plan` naming **both** counts.
+unknown, stale, spent, or taken over a different selection is refused `stale-plan` naming **both** counts. Reading
+and navigating do not spend it: a `kind: "read"` verb that moves `rev` and leaves `selectionId` unchanged keeps the
+plan good, so that checking a number before an irreversible commit is never the expensive path. **Publish
+`selectionId` if you consume plans** — an app that does not gets the old expiry, where any `rev` move kills the
+token, and the core says so once.
 
 ```ts
 visible: () => ({ …, selectedCount: store.selected.size,

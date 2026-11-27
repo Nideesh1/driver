@@ -353,6 +353,15 @@ or names a selection that is no longer the one on screen. The hint **names both
 counts** — "you were shown 3,412; the selection is now 3,418" — the way
 `wrong-screen` names both screens.
 
+A **read-only move is not an older `rev`.** `rev` means "the snapshot changed",
+and a navigation changes the snapshot without changing a row, so a plan is
+carried across a verb declaring `kind: "read"` whose call left
+`snapshot.selectionId` unchanged. Without that, `select-where`, `goto`,
+`accept-selected` was refused although nothing about the selection had moved —
+so going back to confirm a number before an irreversible commit cost a refusal
+and two recovery calls, and committing blind cost nothing. An app that publishes
+no `selectionId` carries nothing and keeps the expiry it has always had.
+
 A relay forwards all three untouched and compares none of them. It does not know
 which screen a tab is on, and a relay that decided would be a second set of rules
 beside the core's. `plan` is stronger still: the token is opaque to everything
@@ -668,13 +677,15 @@ count was read and approved, and the repair is strictly larger: run the
 asked for, and only then commit. An agent told `stale` re-reads and carries
 straight on, which is how 3,418 rows get accepted after a person approved 3,412.
 It carries a `snapshot` and it means the verb was **not reached and nothing
-changed**. The core checks it after `screen` and before `rev`, because every
-stale `rev` is also a stale plan — the token binds the `rev` it was taken at —
-so answering `stale` first would hand back the cheaper instruction for the more
-expensive mistake. A plan is good for **one** commit, and only at the `rev` it
-was taken at; there is no clock, because `rev` is the app's own account of
-something having changed and a wall-clock window is both too long to be safe and
-too short for a person reading three thousand rows before they answer.
+changed**. The core checks it after `screen` and before `rev`, because where
+both apply the plan is the wider mistake, and answering `stale` first would hand
+back the cheaper instruction for the more expensive one. The two are **not**
+nested: a read-only move is `stale` and is not `stale-plan`, because the screen
+the agent echoed is no longer on display and the selection it counted is still
+the selection. A plan is good for **one** commit, and only while the selection
+is the one it counted; there is no clock, because `rev` is the app's own account
+of something having changed and a wall-clock window is both too long to be safe
+and too short for a person reading three thousand rows before they answer.
 
 **`changed-elsewhere` is the one staleness the tab cannot see for itself, and
 it is answered above `stale` and `stale-plan`.** `rev` is the app's claim that

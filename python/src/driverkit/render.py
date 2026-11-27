@@ -260,7 +260,8 @@ def render_result(result: Result, kind: str | None = None) -> str:
                 "\nPass this `plan` back to the commit verb that acts on this selection. It is "
                 "the receipt for the count above: if anything moves the selection first the "
                 "commit is refused as `stale-plan` rather than acting on rows nobody counted. "
-                "One commit per plan."
+                "One commit per plan. Reading and navigating do not move the selection and do "
+                "not spend this plan, so go and check whatever you need to before you commit."
             )
     else:
         head = f"refused: {result.refused}"

@@ -113,9 +113,11 @@ const PLAN_NOTE =
   "REQUIRES A PLAN. This acts on the selection, so it may only be called with the `plan` " +
   "token that the app's `describe` verb returned beside its `count`. Run that describe, read " +
   "the count, check it is the number the person asked for, and pass the `plan` straight back " +
-  "here. If anything has moved the selection in between — the person ticked a row, the list " +
-  "paged, data arrived — this is refused as `stale-plan` and the refusal names both counts. " +
-  "That is the point of the token: the number you read is the number that moves.";
+  "here. If anything has moved the selection in between — the person ticked a row, data " +
+  "arrived — this is refused as `stale-plan` and the refusal names both counts. Reading and " +
+  "navigating do not move the selection and do not spend the plan, so go and confirm whatever " +
+  "you are unsure of first. That is the point of the token: the number you read is the number " +
+  "that moves.";
 
 const COMMIT_REVERSIBLE_NOTE =
   "COMMIT (reversible): this changes data, and the app says the change can be undone. " +
@@ -499,7 +501,9 @@ export function systemPrompt(manifest: Manifest, instructions?: string): string 
       "Some commit verbs say they REQUIRE A PLAN. Those return a `plan` token beside the " +
       "`count` of the describe that counted them, and you pass it straight back. Do not " +
       "hold one over for later and do not reuse one: a plan is good for one commit and " +
-      "only while nothing has moved the selection. `stale-plan` means the rows changed " +
+      "only while nothing has moved the selection. Looking is free: reading a screen or " +
+      "navigating to another one leaves the plan good, so go back and confirm anything you " +
+      "are unsure of before an irreversible commit. `stale-plan` means the rows changed " +
       "under you — it names the count you were shown and the count there is now — so run " +
       "the describe again, read the new number, and say it out loud before you commit to " +
       "it. That refusal is not an obstacle; it is the one that stops you from accepting a " +

@@ -273,6 +273,15 @@ export interface Verb<A extends Record<string, Scalar> = Record<string, Scalar>>
    * and names both counts in the hint, the way `wrong-screen` names both
    * screens.
    *
+   * **A READ-ONLY MOVE IS NOT AN OLDER `rev`.** Navigation bumps `rev` and
+   * changes no data, so a plan is carried across a `kind: "read"` verb whose
+   * call left `Snapshot.selectionId` unchanged. Without that, "go back and
+   * confirm the number before you move 3,412 rows" cost a refusal and two
+   * recovery calls, and committing blind cost nothing — pricing the
+   * double-check above the blind commit, which is the opposite of what this
+   * field is for. An app publishing no `selectionId` carries nothing and keeps
+   * the behaviour it had.
+   *
    * **The app does not mint the token and cannot**, which is the point of the
    * field being this small. An app that computed its own would have to get a
    * hash right, and a token an app can forge or accidentally reuse is worse
@@ -485,8 +494,20 @@ export interface Snapshot {
    * no claim rather than inventing one.
    */
   screen?: string;
-  /** Monotonic, bumped on every change. An agent echoes it back to prove it is
-   *  acting on what it saw; see `stale` in PROTOCOL.md. */
+  /**
+   * Monotonic, bumped on every change. An agent echoes it back to prove it is
+   * acting on what it saw; see `stale` in PROTOCOL.md.
+   *
+   * It means "the snapshot changed", which is a wider thing than "the data
+   * changed": a read-only navigation genuinely changes the snapshot, because
+   * the person is looking somewhere else. That is right for `stale` -- the
+   * question there is "is what you were looking at still what is on screen?"
+   * -- and it is why a plan token does NOT turn on this number alone. A plan
+   * asks a narrower question, "is the selection you counted still the
+   * selection", and navigation does not touch it. See `selectionId`, and
+   * `plansGoodAt` in the registry for what one number answering two questions
+   * cost.
+   */
   rev: number;
   /** Only the rows actually on screen. */
   rows?: Row[];
@@ -568,13 +589,25 @@ export interface Snapshot {
    * running value rather than re-hash a large set inside `visible()`, which
    * runs on every call.
    *
+   * IT IS ALSO WHAT MAKES LOOKING FREE. A plan token is refused when `rev` has
+   * moved, and `rev` moves on a read-only navigation — so an agent that went
+   * back to check its premise before an irreversible commit was refused, while
+   * one that committed blind was not. The core now carries a plan across a
+   * `kind: "read"` verb that moved `rev` **when this string is unchanged
+   * across the call**, because that is the app saying the selection is the same
+   * selection. This field is the whole of that permission.
+   *
    * Absent means the app does not identify its selection — NOT that nothing is
    * selected. A `commit` that declares `consumes: "plan"` in an app that omits
    * this still gets a token, and the token still binds the `rev` and the count,
    * which catches every change the app bumps its `rev` for. It cannot catch a
    * change the app made without bumping `rev`, and the core says so once at the
    * first such call rather than letting the weaker check pass for the stronger
-   * one.
+   * one. It also carries nothing across a navigation: an app that publishes no
+   * identity keeps exactly the expiry it has always had, which is the fail-safe
+   * direction, and the reason the permission above is hung on a field an app
+   * either publishes or does not rather than on a counter an author has to
+   * remember to bump.
    */
   selectionId?: string;
   /**
@@ -1744,6 +1777,14 @@ export interface MountOptions {
    * listen on the channel yourself and refetch. An app that does is an app
    * where none of this ever fires.
    *
+   * ONE THING IS HELD BACK WHILE A NOTICE STANDS: a plan is not carried across
+   * a read-only move. A plan surviving a navigation is a `selectionId` saying
+   * the selection is the same selection, and while a notice stands the core has
+   * been told that this tab's copy of the data is not. Those two would have
+   * composed into a bulk commit going through with the notice silently cleared
+   * and no fresh count read anywhere, so the carry declines and the agent has
+   * to describe again. See `plansGoodAt` in the registry.
+   *
    * See `ElsewhereChannel`, and `broadcastElsewhere()` in `driverkit/browser`
    * for the same-origin implementation that needs no server and no relay.
    */
@@ -1821,8 +1862,11 @@ export interface CallOptions {
    * at the client rejecting the call before the explanation can reach the
    * model.
    *
-   * Checked after `screen` and BEFORE `rev`; `call()` carries the argument for
-   * that order. Opaque: the core minted it and the core reads it, and every hop
+   * Checked after `screen` and BEFORE `rev`, which is the order where both
+   * apply; `call()` carries the argument for it. They are not nested: a
+   * read-only navigation is `stale` and is not `stale-plan`, since the screen
+   * moved and the selection did not. Opaque: the core minted it and the core
+   * reads it, and every hop
    * in between — both relays, `connect()`, the Python client — forwards the
    * string untouched, exactly as they do `rev` and `screen`.
    */
