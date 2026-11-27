@@ -37,7 +37,7 @@
     "that same install, so there is no second package to keep in step."
   ],
   "dependencies": {
-    "driverkit": "0.0.0"
+    "driverkit": "*"
   },
   "keywords": [
     "eval",
