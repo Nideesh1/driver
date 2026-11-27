@@ -424,13 +424,46 @@ python3 examples/contacts/server.py
 
 ## Status
 
-Early. The protocol, the registry and both relays are covered by tests and the
-end-to-end path has been driven for real, from a browser and from outside it.
-Treat the APIs as unstable until there is a tagged release.
+**0.1.0**, on [npm](https://www.npmjs.com/package/driverkit) and
+[PyPI](https://pypi.org/project/driverkit/).
 
 ```sh
-npm test          # TypeScript
-cd python && python3 -m unittest discover -s tests -t tests
+npm i driverkit          # the registry, the widget, the agent loop, the relay
+pip install driverkit    # the relay again, and the MCP server
+```
+
+Pre-1.0, and that number means what semver says it means: a minor version may
+change an API. The wire protocol in [`PROTOCOL.md`](PROTOCOL.md) is the part
+to depend on — it has two independent implementations that are tested against
+each other frame for frame, and a manifest carries a version so a tab and a
+relay that disagree say so rather than guessing.
+
+What stands behind it: 839 TypeScript tests, 311 Python, 64 checks against a
+running demo, and 18 in a real browser. Both drive paths have been run for
+real — a person typing in the corner panel, and an agent reaching a tab from
+another process over MCP. The eval suite replays plain-English instructions
+against a live model and asserts outcomes, including that a commit nobody
+asked for never happens.
+
+What it does **not** do, written down because a library that claims a
+guarantee it cannot keep is worse than one that says where it cannot see:
+
+- **Nothing reads your app's data.** If `visible()` reports a row as `new`
+  and the screen shows `accepted`, nothing catches it. The only oracle for
+  "is this what the person can see" is the rendered page.
+  [`driverkit/check`](packages/driverkit/src/check) verifies internal
+  consistency and names the nine holes it cannot close.
+- **An app that opts into nothing has the cross-tab hole silently.** Two tabs,
+  a commit in one, and the other's `rev` never moves — so `stale` passes.
+  `MountOptions.elsewhere` closes it; declaring nothing leaves it open, and
+  the core cannot detect that you have two tabs.
+- **The audit trail is fail-open.** No buffer, no retry. A page closed between
+  a commit and the next flush takes that record with it.
+
+```sh
+npm test                                                    # TypeScript
+cd python && python3 -m unittest discover -s tests -t tests  # Python
+docker compose up --build                                    # the demo
 ```
 
 MIT.

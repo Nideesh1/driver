@@ -97,9 +97,25 @@ each other, frame for frame.
 
 ## Status
 
-Early. Treat the APIs as unstable until there is a tagged release.
+**0.1.0.** Pre-1.0, and that means what semver says: a minor version may change
+an API. The wire protocol is the stable part — two independent implementations,
+tested against each other frame for frame.
+
+Behind it: 839 TypeScript tests, 311 Python, 64 against a running demo, 18 in a
+real browser, and an eval suite that replays plain-English instructions against
+a live model and asserts that a commit nobody asked for never happens.
+
+It does not read your app's data, so a `visible()` that reports a row wrongly
+is not caught by anything here — `driverkit/check` verifies what it can and
+names what it cannot. The repository's README lists the rest of the limits.
 
 The full README, the wire protocol, the design arguments and a 3,412-row demo
-that is drivable both ways live in the repository.
+that is drivable both ways live in the
+[repository](https://github.com/Nideesh1/driver), which comes up with one
+command:
+
+```sh
+docker compose up --build
+```
 
 MIT.

@@ -45,8 +45,11 @@ npm i driverkit          # the registry, the widget, the loop, the controls laye
 pip install driverkit    # only for the relay and the MCP server (case 2)
 ```
 
-**Neither of those works today.** Nothing is published to npm or PyPI; every version is `0.0.0`. Until there is a
-tagged release, an app consumes driverkit from a checkout of <https://github.com/Nideesh1/driver>:
+Both are published, at **0.1.0**. The Python half is stdlib-only and needs ≥ 3.11; use `uv`, not bare `pip`.
+
+Pre-1.0, so a minor version may change an API. Pin it if that matters to you.
+
+To work against unreleased changes, consume a checkout instead:
 
 ```sh
 # in the driverkit checkout — `dist/` is gitignored, so an unbuilt package resolves to nothing
@@ -56,11 +59,11 @@ npm install && npm run build
 npm i "file:../driverkit/packages/driverkit"
 ```
 
-Python half (stdlib only, needs ≥ 3.11): `uv pip install -e ./python`, or just `PYTHONPATH=python/src`. Use `uv`,
-not bare `pip`. Full detail, including `npm pack` and `pnpm link`:
-[`references/packaging.md`](skills/driverkit/references/packaging.md).
+and `uv pip install -e ./python`, or just `PYTHONPATH=python/src`. Full detail, including `npm pack` and
+`pnpm link`: [`references/packaging.md`](skills/driverkit/references/packaging.md).
 
 One package, with a subpath per area: `driverkit` (`mount`), `driverkit/widget`, `driverkit/agent`,
+`driverkit/react` (optional peer — React is handed in, never imported), `driverkit/check`, `driverkit/otel`,
 `driverkit/controls`, `driverkit/browser`, `driverkit/relay` and `driverkit/relay/serve` (**Node only** — a
 browser-targeted build asking for the relay fails at build time, on purpose).
 
