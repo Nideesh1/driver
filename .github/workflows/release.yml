@@ -49,10 +49,16 @@ jobs:
             *) echo "::error::tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH"; exit 1 ;;
           esac
           sed -i "s/^version = \".*\"/version = \"$V\"/" python/pyproject.toml
-          # `--no-git-tag-version`: the tag already exists, that is what
-          # started this run. `--allow-same-version` so a re-run of a release
-          # is not a failure.
-          (cd packages/driverkit && npm version "$V" --no-git-tag-version --allow-same-version)
+          # `npm pkg set`, NOT `npm version`. `npm version` in a workspace
+          # reconciles the root lockfile afterwards, which makes it resolve
+          # the package's CURRENT version from the registry -- here 0.0.0,
+          # which has never been published and never will be, because 0.0.0
+          # is the placeholder this very step exists to replace. It fails
+          # ETARGET with "No matching version found for driverkit@0.0.0",
+          # an error about the version it is replacing rather than the one
+          # it is setting, which is why it reads as nonsense. `npm pkg set`
+          # writes the field and nothing else: no lockfile, no network.
+          (cd packages/driverkit && npm pkg set version="$V")
           # Both halves, read back from the files, so a sed that silently
           # matched nothing is a failed release and not a published 0.0.0.
           PY=$(grep -m1 '^version = ' python/pyproject.toml | cut -d'"' -f2)
