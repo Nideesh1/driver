@@ -54,7 +54,22 @@ from .types import (
     VerbSpec,
 )
 
-__version__ = "0.0.0"
+# Read from the INSTALLED distribution rather than hand-written here, so it
+# cannot disagree with what pip reports. It used to be a literal, and 0.1.0
+# shipped with `__version__ == "0.0.0"`: the release rewrites
+# `pyproject.toml` and had no reason to know a second copy existed. A number
+# with one source cannot drift.
+#
+# The fallback is for a source checkout that was never installed -- running
+# out of `python/src` with `PYTHONPATH`, which is exactly what this repo's
+# own test suite does. "0.0.0" is the honest answer there: it is the
+# placeholder in `pyproject.toml`, and a checkout has no release version.
+try:  # pragma: no cover - trivial, and the except arm is the tested one
+    from importlib.metadata import PackageNotFoundError, version as _version
+
+    __version__ = _version("driverkit")
+except Exception:  # PackageNotFoundError, or no metadata at all
+    __version__ = "0.0.0"
 
 __all__ = [
     "APPROVAL_REFUSALS",
