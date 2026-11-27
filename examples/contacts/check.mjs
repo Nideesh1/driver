@@ -380,6 +380,50 @@ await check("the flow is declared, names only real verbs, and nothing runs it", 
   notes.push(`systemPrompt with the map and the flow: ${prompt.length} chars, cached once`);
 });
 
+await check("the flow says which steps are optional, and which step the plan comes from", async () => {
+  // THE THING THE FLAT LIST COULD NOT SAY. This recipe has five steps and only
+  // three of them are the job: the first two exist for the case where you do
+  // not already know which company it is. That used to be a clause in the
+  // middle of step one's hint -- prose about the shape of the recipe hidden
+  // inside prose about what `goto` is for -- so a reader could not tell from
+  // the structure which steps carry the work. Now two steps declare it and
+  // three do not.
+  const [flow] = driver.manifest().flows;
+  assert.deepEqual(
+    flow.steps.map((s) => Boolean(s.skipWhen)),
+    [true, true, false, false, false],
+  );
+  // A SENTENCE AND NOT AN EXPRESSION, and this app is why that is the right
+  // answer rather than a compromise: "the person already named the company" is
+  // a fact about what was ASKED, and no predicate over this app's state could
+  // evaluate it. The conditions that must be ENFORCED are enforced elsewhere --
+  // `accept-selected` declares `consumes: "plan"`, and the core refuses it
+  // without the token from the count.
+  const prompt = systemPrompt(driver.manifest());
+  assert.match(
+    prompt,
+    /\n {2}1\. `goto` \(OPTIONAL — skip it when the person already named the company, in which case go straight to `open-company`\) —/,
+  );
+  assert.match(prompt, /\n {2}2\. `sort-companies` \(OPTIONAL — skip it when you already know which company you want\) —/);
+  assert.match(prompt, /A step marked OPTIONAL may be skipped when the condition beside it holds/);
+
+  // And the one value that crosses two steps, named where the recipe is read.
+  // Step 4 counts and mints, step 5 commits and consumes; the mark is DERIVED
+  // from `kind` and `consumes` in the manifest, so the app declares it once, on
+  // the verb, where the core is the thing that checks it.
+  assert.match(
+    prompt,
+    /\n {2}5\. `accept-selected` \(takes the `plan` token step 4 returned\) —/,
+  );
+  const counting = driver.manifest().verbs.find((v) => v.name === "select-pending-here");
+  const committing = driver.manifest().verbs.find((v) => v.name === "accept-selected");
+  assert.equal(counting.kind, "describe");
+  assert.equal(committing.consumes, "plan");
+  notes.push(
+    `flow steps: 5, of which 2 optional; the plan handoff is step 4 → step 5`,
+  );
+});
+
 await check("select-where takes named fields with oneOf, not a predicate string", () => {
   const v = driver.manifest().verbs.find((x) => x.name === "select-where");
   assert.deepEqual(Object.keys(v.args), ["company", "status"]);

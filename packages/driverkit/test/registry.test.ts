@@ -2449,3 +2449,177 @@ test("a commit called with no plan at all is told to count what the person asked
   assert.match(other, /Do not re-send this one/);
   assert.ok(!other.includes("do NOT select something near enough"));
 });
+
+test("a step may say when it is skippable, and a `skipWhen` with no condition throws at mount", () => {
+  // The gap: a flat list of steps read as all-required, so the step that is
+  // only there for the case where you do not already know the answer had
+  // nowhere to say so and its condition went into the middle of a hint. Which
+  // steps carry the job is structural, so it gets a field.
+  //
+  // A SENTENCE AND NOT AN EXPRESSION, which is the decision this test pins by
+  // pinning what is checked: that the field is a non-empty one-line string,
+  // and nothing about what it MEANS. Nothing in this library executes a flow,
+  // so the only evaluator a predicate could have is the model reading it, and
+  // a predicate a model interprets is a sentence with brackets round it --
+  // worse than prose, because it looks like a check. The conditions that are
+  // enforced are enforced elsewhere, by `approve` and `consumes`.
+  const { driver } = mapped({
+    flows: [
+      {
+        id: "f",
+        describe: "do it",
+        steps: [
+          { verb: "goto", skipWhen: "you are already on the descent", hint: "open it" },
+          { verb: "accept", hint: "accept it" },
+        ],
+      },
+    ],
+  });
+  const [step, required] = driver.manifest().flows![0]!.steps;
+  assert.equal(step!.skipWhen, "you are already on the descent");
+  // Absent, not `false`: a step that says nothing is a step you take, and an
+  // app written before the field reads exactly as it did.
+  assert.equal("skipWhen" in required!, false);
+
+  // The empty one is the mistake worth catching, because PRESENCE is what makes
+  // a step optional: "skippable, no reason given" tells a model it may drop a
+  // step whenever it likes, which is the opposite of what the author meant.
+  assert.throws(
+    () =>
+      mapped({
+        flows: [{ id: "f", describe: "do it", steps: [{ verb: "accept", hint: "x", skipWhen: "" }] }],
+      }),
+    /has an empty `skipWhen`/,
+  );
+  // One line and within the `describe` budget, for the `describe` reason: it is
+  // read beside the step, not reasoned from.
+  assert.throws(
+    () =>
+      mapped({
+        flows: [
+          {
+            id: "f",
+            describe: "do it",
+            steps: [{ verb: "accept", hint: "x", skipWhen: "a".repeat(SIZE_LIMITS.describe + 1) }],
+          },
+        ],
+      }),
+    /must be one line of at most 1024 characters/,
+  );
+  assert.throws(
+    () =>
+      mapped({
+        flows: [
+          { id: "f", describe: "do it", steps: [{ verb: "accept", hint: "x", skipWhen: "a\nb" }] },
+        ],
+      }),
+    /with a line break/,
+  );
+  // And it counts against the flow's body budget, because it is rendered into
+  // the same cached prefix the hint is. Moving a sentence from one field to the
+  // other must not buy an author any room.
+  assert.throws(
+    () =>
+      mapped({
+        flows: [
+          {
+            id: "f",
+            describe: "do it",
+            steps: [
+              { verb: "accept", hint: "x".repeat(SIZE_LIMITS.body - 10), skipWhen: "y".repeat(100) },
+            ],
+          },
+        ],
+      }),
+    /characters of steps; the budget is 10000/,
+  );
+});
+
+test("a flow that commits a plan with no describe step before it throws at mount", () => {
+  // The one piece of data flow between steps that exists in this library,
+  // checked where it can be seen. A `commit` declaring `consumes: "plan"` can
+  // only be called with the token a `describe` returned, so a recipe that
+  // reaches it without one has exactly one possible ending -- `stale-plan`,
+  // after the navigation and before anything moves. That is the same dead end
+  // as a step naming a verb nobody implemented, found at the same worst moment,
+  // and it is statically visible from what the verbs already declare: so it
+  // fails at startup rather than in front of somebody who is waiting.
+  //
+  // Note what is NOT here: no step says it takes the token, and none needs to.
+  // The dependency is declared once, on the verb, and enforced by the core.
+  const base = {
+    app: "v",
+    visible: (): Snapshot => ({ where: "x", screen: "a", rev: 1, selectionId: "s" }),
+    verbs: [
+      { name: "count-them", kind: "describe" as const, describe: "select and count", run: () => ({ count: 2 }) },
+      {
+        name: "accept-selected",
+        kind: "commit" as const,
+        consumes: "plan" as const,
+        describe: "accept the selection",
+        run: () => {},
+      },
+    ],
+  };
+  assert.throws(
+    () =>
+      mount({
+        ...base,
+        flows: [
+          { id: "f", describe: "accept them", steps: [{ verb: "accept-selected", hint: "accept" }] },
+        ],
+      }),
+    /reaches `accept-selected`, which consumes a plan, with no earlier `describe` step/,
+  );
+  // With the counting step in front of it the same flow mounts, which is the
+  // point: the check is about the recipe being followable, not about the verb.
+  const ok = mount({
+    ...base,
+    flows: [
+      {
+        id: "f",
+        describe: "accept them",
+        steps: [
+          { verb: "count-them", hint: "read the count" },
+          { verb: "accept-selected", hint: "accept exactly that many" },
+        ],
+      },
+    ],
+  });
+  assert.equal(ok.manifest().flows![0]!.steps.length, 2);
+});
+
+test("`skipWhen` is in the fingerprint, and a flow without one hashes as it did", () => {
+  // In for the reason the hints are: a step that has become optional is a
+  // different recipe, and an agent holding the old cached copy is working from
+  // the version where it was required. It rides in free because the whole
+  // declared `flows` object is what gets hashed -- which is also why a flow
+  // that uses none of these fields cannot move.
+  const base = {
+    app: "v",
+    visible: (): Snapshot => ({ where: "x", screen: "a", rev: 1 }),
+    navigate: () => {},
+    verbs: [{ name: "accept", kind: "commit" as const, describe: "accept", run: () => {} }],
+    flows: [{ id: "f", describe: "do it", steps: [{ verb: "accept", hint: "accept it" }] }],
+  };
+  const plain = mount(base).manifest().version;
+  const optional = mount({
+    ...base,
+    flows: [
+      { id: "f", describe: "do it", steps: [{ verb: "accept", hint: "accept it", skipWhen: "already done" }] },
+    ],
+  }).manifest().version;
+  const reworded = mount({
+    ...base,
+    flows: [
+      { id: "f", describe: "do it", steps: [{ verb: "accept", hint: "accept it", skipWhen: "it is already done" }] },
+    ],
+  }).manifest().version;
+  assert.equal(new Set([plain, optional, reworded]).size, 3, "two different recipes hash the same");
+  // And the one that matters for everybody who already shipped a flow: the
+  // version of a flow that uses no new field is the version it had.
+  // The literal was computed from this library AS COMMITTED BEFORE `skipWhen`
+  // existed, which is what makes it a backward-compatibility assertion rather
+  // than a copy of today's output.
+  assert.equal(plain, "510abf969d73");
+});

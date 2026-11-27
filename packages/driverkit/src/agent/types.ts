@@ -139,6 +139,20 @@ export type StopReason =
   | "aborted"
   /** The same verb was refused the same way `refusalLimit` times. */
   | "stuck"
+  /**
+   * The app's own `MountOptions.budget` ceiling was reached, so the driver
+   * refused `budget-spent` and going on was pointless.
+   *
+   * A separate reason and not folded into `stuck`, which is what it would
+   * otherwise have become: the loop refuses the same way `refusalLimit` times
+   * and then reports "the same call kept being refused". That sentence is true
+   * and it is read as "the model is confused", which sends somebody to rewrite
+   * a prompt for an app that has simply run out of allowance — and it spends
+   * two more model round trips proving it, against the budget that just ran
+   * out. `budget-spent` is the one refusal in `RESERVED_REFUSALS` whose honest
+   * repair is "do not try again", so the loop stops on the first one.
+   */
+  | "over-budget"
   /** `think` returned neither prose nor calls. A broken adapter, usually. */
   | "silent";
 

@@ -29,6 +29,7 @@
 
 import { mountWidget } from "../../../packages/driverkit/dist/widget/widget.js";
 import { connect } from "../../../packages/driverkit/dist/browser/connect.js";
+import { broadcastElsewhere } from "../../../packages/driverkit/dist/browser/elsewhere.js";
 import { backendThink } from "../../../packages/driverkit/dist/agent/backend.js";
 import { createApp } from "./store.js";
 import { renderScreen } from "./screens.js";
@@ -87,6 +88,20 @@ const app = createApp(
     // tells it the outcome is unknown. An app whose approver is on a phone, or
     // whose gate is a webhook, sets one.
     approve: (req) => panel.approve(req),
+    // CROSS-TAB STALENESS, AND WHY THIS DEMO NEEDS IT MOST. Every tab of this
+    // page builds its own 3,412 contacts, so two tabs are two stores over what
+    // a real app would call one backend. Accept 403 rows in one tab and the
+    // other goes on showing them as `new` at a `rev` that has not moved — so
+    // its snapshot reads as current, a `stale` check against it passes, and a
+    // plan token minted there still verifies. That is the staleness machinery
+    // saying yes in the one situation it exists to say no in.
+    //
+    // One line fixes the lying, not the data: a commit in the second tab is
+    // refused `changed-elsewhere` and every snapshot it hands back says why.
+    // An app whose tabs share a real backend would also LISTEN on this channel
+    // and refetch, which is the actual fix; this demo has no backend to
+    // refetch from, so it is the honest half.
+    elsewhere: broadcastElsewhere(),
   },
 );
 
@@ -213,7 +228,13 @@ try {
     relay: "",
     app: "Northwind CRM",
     title: document.title,
-    url: `${location.pathname}${location.hash}`,
+    // No `url` passed, deliberately, and this is a fix rather than a tidy-up.
+    // It used to be `${location.pathname}${location.hash}` computed HERE, once,
+    // at page load — so `GET /dk/tabs` listed the route this tab had when it
+    // connected and never again, which for a hash-routed app like this one is
+    // the whole of what distinguishes two tabs. Left out, `connect()` reads
+    // `location` on every push instead, and a person asked "which tab?" is
+    // shown where each one actually is.
     onError: (err) => {
       connDot.dataset.state = "down";
       connText.textContent = "relay unreachable";

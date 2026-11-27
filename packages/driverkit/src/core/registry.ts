@@ -17,9 +17,13 @@ import type {
   ApprovalHook,
   ApprovalRequest,
   ArgSpec,
+  AuditEvent,
+  AuditHook,
   CallOptions,
   Driver,
   DriverApproval,
+  ElsewhereChannel,
+  ElsewhereNotice,
   Manifest,
   MountOptions,
   Refusal,
@@ -96,6 +100,40 @@ export const RESERVED_REFUSALS: readonly string[] = [
   // is exactly the move that accepts 3,418 rows after a person approved 3,412.
   // Two different repairs, so two slugs.
   "stale-plan",
+  // The one the cost ceiling added, and it is a WHAT IT COST slug rather than
+  // a WHERE YOU ARE or a WHAT YOU ARE ACTING ON one.
+  //
+  // Every other slug on this list describes something an agent can repair.
+  // `budget-spent` is the only one whose honest hint is "do not try again" —
+  // the ceiling was declared by whoever mounted the app, it does not reset, and
+  // the only thing that moves it is a person changing `MountOptions.budget`. It
+  // is reserved for the usual reason: an app that refused `budget-spent` on a
+  // business rule would be telling an agent to stop forever over something it
+  // could have phrased differently.
+  //
+  // ONE SLUG FOR BOTH CEILINGS, and the ladder is why. Two slugs earn their
+  // place when two repairs differ — `stale` versus `stale-plan` is the live
+  // example on this list. The call budget and the commit budget end in the
+  // identical repair, which is no repair: stop, and tell the person. So the
+  // slug is one and the HINT names which ceiling, with both numbers.
+  "budget-spent",
+  // The one cross-tab staleness added, and it is a WHAT YOU ARE ACTING ON slug
+  // like `stale` and `stale-plan` rather than a new kind of thing.
+  //
+  // It is the only slug on this list that the core originates from something it
+  // was TOLD rather than something it can see. Every other staleness check
+  // compares two values out of `visible()`; this one fires because another
+  // driver of the same app said a commit landed, which is a fact no value in
+  // this tab can carry. See `MountOptions.elsewhere`.
+  //
+  // WHY NOT `stale`. `stale` means "the number you echoed is not the number on
+  // screen, read again", and re-reading is a repair that WORKS. Here the number
+  // on screen matches and is wrong, so an agent told `stale` would re-read,
+  // get the same rev, believe itself current and commit — which is the silent
+  // failure this exists to end, re-created by reusing the slug. The repair is
+  // different and much larger: this tab's copy of the data is behind and only
+  // the app refreshing fixes it.
+  "changed-elsewhere",
 ];
 
 const RESERVED = new Set(RESERVED_REFUSALS);
@@ -113,6 +151,8 @@ const DECLINED = "declined-by-user";
 const APPROVAL_PENDING = "approval-pending";
 const APPROVAL_TIMEOUT = "approval-timeout";
 const STALE_PLAN = "stale-plan";
+const BUDGET_SPENT = "budget-spent";
+const CHANGED_ELSEWHERE = "changed-elsewhere";
 
 /** What a `stale-plan` refusal tells an agent to do when it HAD a plan and the
  *  plan is no longer good. Spelled once because four of the five reasons end in
@@ -158,6 +198,12 @@ const PLAN_PREFIX = "dkp1";
  *  Module-level because two drivers in one page must not agree. */
 let planSeq = 0;
 
+/** Counts mounted drivers, only so each one can tell its own cross-tab notices
+ *  from a sibling's. Module-level for the reason `planSeq` is: two drivers in
+ *  one page must not agree, and two drivers in one page is exactly the case a
+ *  test of this feature sets up. */
+let elsewhereSeq = 0;
+
 const DECLINED_HINT =
   "A person was asked to approve this and said no. Do not retry it, do not try another verb " +
   "that does the same thing, and do not press a control that does it — the answer was about " +
@@ -168,6 +214,17 @@ const PENDING_HINT =
   "this app is waiting for a person to approve something, so it is not taking calls. Nothing " +
   "ran. Wait for the answer and read the screen; in particular, pressing an approve or confirm " +
   "control yourself is not a way to answer the question, and that is why this is refused.";
+
+/**
+ * What stands in for a `sensitive` argument's value in an audit record.
+ *
+ * Fixed rather than configurable, and exported rather than private. A marker
+ * an app can change is a marker that the person reading somebody else's log
+ * cannot recognise, and a marker nobody can import is one every test and every
+ * sink spells out by hand and eventually spells differently. See
+ * `ArgSpec.sensitive`.
+ */
+export const REDACTED = "[redacted]";
 
 /**
  * A verb's `screen` as a list, whatever shape the app declared it in.
@@ -297,9 +354,13 @@ const GOTO_DESCRIBE =
  * having a budget at all, warns. See `mount`.
  */
 export const SIZE_LIMITS = {
-  /** `FlowSpec.describe` and `ScreenSpec.describe`: one line, at most this. */
+  /** `FlowSpec.describe` and `ScreenSpec.describe`: one line, at most this.
+   *  Also `FlowStep.skipWhen`, which is a one-line condition for the same
+   *  reason — it is read beside the step, not reasoned from. */
   describe: 1024,
-  /** A whole flow's steps — every `section`, `verb` and `hint` together. */
+  /** A whole flow's steps — every `section`, `verb`, `hint` and `skipWhen`
+   *  together. Everything rendered into the prefix counts, so moving a sentence
+   *  out of a `hint` and into a `skipWhen` buys no room. */
   body: 10_000,
   /** `MountOptions.instructions`. Warned about rather than refused. */
   instructions: 10_000,
@@ -467,6 +528,11 @@ export function checkArg(name: string, spec: ArgSpec, value: Scalar | undefined)
 export function mount(options: MountOptions): Driver {
   const verbs = new Map<string, Verb<any>>();
   let live = true;
+  /** How to stop listening on `MountOptions.elsewhere`, if the channel gave us
+   *  one. Held here rather than beside the channel because `unmount` is at the
+   *  bottom of the file and a subscription nothing unsubscribes is a leak per
+   *  mounted driver -- which in a hot-reloading dev server is one per save. */
+  let unlisten: (() => void) | undefined;
 
   // Thrown at mount, where a typo costs one stack trace at startup, and never
   // on a call path. A misspelt policy — `approve: "unnattended"`, or a truthy
@@ -487,6 +553,20 @@ export function mount(options: MountOptions): Driver {
     approveFn !== undefined ? "hook" : declared === "unattended" ? "unattended" : "none";
 
   /**
+   * Where the records go, or nowhere.
+   *
+   * Read once, into a `const`, because an app that passes no hook has to behave
+   * byte-identically to one mounted before audit existed -- and the test for
+   * that is `onAudit === undefined`, checked once per call rather than a field
+   * lookup on an options object somebody might mutate afterwards. Not validated
+   * at mount the way `approve` is: a misspelt policy makes an app believe it has
+   * a gate it has not got, which is a safety claim, while a hook that is not a
+   * function throws on the first call and is caught by `record` -- reported, the
+   * call unaffected. The asymmetry is the point.
+   */
+  const onAudit: AuditHook | undefined = options.onAudit;
+
+  /**
    * The verb an approval is open for, or null.
    *
    * The whole of point 3's strongest layer, and it is three lines because it
@@ -498,6 +578,38 @@ export function mount(options: MountOptions): Driver {
    * because the core clears this before it runs.
    */
   let pending: string | null = null;
+
+  // ---- the cost ceiling ---------------------------------------------------
+  //
+  // Two counters and a validation. `MountOptions.budget` carries the argument
+  // for what is bounded and what was rejected; what is here is the mechanism.
+  //
+  // Validated at mount for the reason the approval policy is: a budget of 0 or
+  // -1 means the app is never drivable, which nobody means, and discovering it
+  // as `budget-spent` on the very first call is the one shape where an author
+  // believes they configured a ceiling and have in fact configured a wall.
+  const budget = options.budget;
+  if (budget !== undefined) {
+    for (const field of ["calls", "commits"] as const) {
+      const limit = budget[field];
+      if (limit === undefined) continue;
+      if (!Number.isInteger(limit) || limit < 1) {
+        throw new Error(
+          `driverkit: \`budget.${field}\` is ${JSON.stringify(limit)}; it must be a positive ` +
+            `integer, or absent to mean no ceiling. A budget of ${JSON.stringify(limit)} is not ` +
+            `a tight ceiling, it is an app that refuses its first call — and it would do that ` +
+            `with a \`budget-spent\` hint, which reads as a runaway rather than as a typo.`,
+        );
+      }
+    }
+  }
+  /** Every `call()` that got past the approval lock, refused ones included.
+   *  Kept whether or not a ceiling was declared: `Driver.budget` reports it
+   *  either way, and a number somebody debugging a chatty app can read is
+   *  worth two increments. */
+  let callsUsed = 0;
+  /** `commit` verbs that actually reached `run`. */
+  let commitsUsed = 0;
 
   for (const verb of options.verbs as Verb<any>[]) {
     if (verbs.has(verb.name)) {
@@ -805,7 +917,13 @@ export function mount(options: MountOptions): Driver {
           `sentence, and \`instructions\` is where a sentence goes.`,
       );
     }
-    const body = flow.steps.map((s) => `${s.section ?? ""}${s.verb}${s.hint}`).join("");
+    // `skipWhen` is in the sum because it is rendered into the same cached
+    // prefix as the hint it was lifted out of. A flow that moved a sentence
+    // from one field to the other must not be able to grow a budget by doing
+    // it.
+    const body = flow.steps
+      .map((s) => `${s.section ?? ""}${s.verb}${s.hint}${s.skipWhen ?? ""}`)
+      .join("");
     if (body.length > SIZE_LIMITS.body) {
       throw new Error(
         `driverkit: the flow \`${flow.id}\` has ${body.length} characters of steps; the ` +
@@ -835,6 +953,66 @@ export function mount(options: MountOptions): Driver {
             `to do with it here, which is the part that makes this a recipe.`,
         );
       }
+      // An empty `skipWhen` is the one that has to be caught, because the field
+      // being PRESENT is what makes a step optional: a step marked skippable
+      // with no stated condition tells a model it may drop a step whenever it
+      // likes, which is the opposite of what an author who typed the field
+      // meant. The length and the newline are the `describe` rule, for the
+      // `describe` reason -- it is a one-line condition rendered beside the
+      // step, not a paragraph to reason from.
+      if (step.skipWhen !== undefined) {
+        if (typeof step.skipWhen !== "string" || step.skipWhen === "") {
+          throw new Error(
+            `driverkit: the step \`${step.verb}\` of the flow \`${flow.id}\` has an empty ` +
+              `\`skipWhen\`. Present means this step may be skipped, so the field has to say ` +
+              `WHEN — "the person already named the company". A skippable step with no ` +
+              `condition is an invitation to drop it for no reason.`,
+          );
+        }
+        if (step.skipWhen.length > SIZE_LIMITS.describe || /[\n\r]/.test(step.skipWhen)) {
+          throw new Error(
+            `driverkit: the \`skipWhen\` on the step \`${step.verb}\` of the flow ` +
+              `\`${flow.id}\` must be one line of at most ${SIZE_LIMITS.describe} characters ` +
+              `(got ${step.skipWhen.length}` +
+              `${/[\n\r]/.test(step.skipWhen) ? ", with a line break" : ""}). ` +
+              `See \`SIZE_LIMITS\`.`,
+          );
+        }
+      }
+    }
+
+    // THE ONE PIECE OF DATA FLOW BETWEEN STEPS, CHECKED WHERE IT CAN BE SEEN.
+    //
+    // A `commit` that declares `consumes: "plan"` can only be called with the
+    // token a `describe` returned beside its count. So a flow that reaches such
+    // a step without an earlier `describe` step is a recipe whose only possible
+    // ending is `stale-plan`: the agent follows it, arrives at the commit with
+    // no token, and is refused -- after the navigation and before anything
+    // moves, which is the same worst moment a step naming a missing verb is
+    // found at, and the same reason this throws rather than waits.
+    //
+    // Statically visible and therefore the core's job: the step order is fixed,
+    // the verbs' `kind` and `consumes` are declared, and nothing per-user is
+    // involved. It is also the whole of what a flow can honestly say about
+    // values crossing steps -- see the note under `FlowStep` for why there is
+    // no `from: "step2.slug"` to go with it.
+    //
+    // It throws on `flows`, which is new, by the rule stated at the
+    // `instructions` budget above: a new throw on an old field would break an
+    // app that mounted yesterday, and a new one cannot have mounted yet.
+    let minted: string | undefined;
+    for (const step of flow.steps) {
+      const verb = verbs.get(step.verb)!;
+      if (verb.consumes === "plan" && minted === undefined) {
+        throw new Error(
+          `driverkit: the flow \`${flow.id}\` reaches \`${step.verb}\`, which consumes a ` +
+            `plan, with no earlier \`describe\` step to mint one. A plan token comes from ` +
+            `the \`describe\` verb that counted the selection, so an agent following this ` +
+            `recipe arrives at the commit with nothing to pass and is refused ` +
+            `\`stale-plan\`. Put the counting step in the flow.`,
+        );
+      }
+      if (verb.kind === "describe") minted = step.verb;
     }
   }
 
@@ -947,7 +1125,132 @@ export function mount(options: MountOptions): Driver {
     ...(options.flows ? { flows: options.flows } : {}),
   };
 
-  const read = (): Snapshot => options.visible();
+  // ---- what another tab did ----------------------------------------------
+  //
+  // Six lines of state and a sentence, and the sentence is the point: see
+  // `ElsewhereChannel` for the hole, and `MountOptions.elsewhere` for what this
+  // does and does not buy.
+
+  const channel: ElsewhereChannel | undefined = options.elsewhere;
+
+  /** This driver's identity on the channel, so it can ignore its own notices.
+   *  A `BroadcastChannel` does not echo to the sender, but a websocket relay
+   *  fanning out to every subscriber does, and a channel that poisoned the tab
+   *  that committed would refuse the second half of every two-step job. */
+  const elsewhereId = `dke${(elsewhereSeq += 1)}.${Math.random().toString(36).slice(2)}`;
+
+  /**
+   * The notice this driver is sitting on, or null.
+   *
+   * `at` is the `rev` this app was showing when the notice arrived, and it is
+   * the whole expiry rule: the notice is outstanding for exactly as long as
+   * this app's own `rev` has not moved. One notice, not a list — a second
+   * commit elsewhere while the first is still outstanding tells an agent
+   * nothing new, and the repair is the same one.
+   */
+  let elsewhere: { verb: string; at: number } | null = null;
+
+  /** Said to the model, in the snapshot's own `note`, for as long as the notice
+   *  stands. The one sentence that turns a silent lie into a visible one. */
+  const elsewhereNote = (verb: string): string =>
+    `WARNING: another tab of this app committed \`${verb}\` after this screen was read, so ` +
+    `the rows and the rev above may be out of date even though the rev has not moved. ` +
+    `A commit here is refused as \`changed-elsewhere\` until this tab refreshes.`;
+
+  /**
+   * `visible()`, plus the notice if there is one.
+   *
+   * EVERY read goes through here -- `driver.snapshot()`, the snapshot on every
+   * `Result`, the one an approval hook is handed, the one `connect()` pushes to
+   * the relay -- because a warning that reached some of those and not others
+   * would be a guarantee that holds on one path, which is the defect
+   * `MountOptions.approve` was moved into the core to fix.
+   *
+   * Carried in `note`, which is already "anything else the agent needs and the
+   * rows cannot carry", and which BOTH renderers already print. The
+   * alternatives were a new field on `Snapshot` -- app-published, and this is
+   * the core speaking, not the app -- or a second channel to the model that
+   * only one of the two renderers knew about.
+   *
+   * The app's own `note` is kept and appended to, never replaced: the app may
+   * be saying something the person needs and this is not more important than
+   * that.
+   *
+   * The clear lives here rather than in a timer because this is the only place
+   * the core learns what `rev` is now. An app that never reads is an app
+   * nothing is being driven in.
+   */
+  function read(): Snapshot {
+    const snap = options.visible();
+    if (elsewhere === null) return snap;
+    if (snap.rev !== elsewhere.at) {
+      elsewhere = null;
+      return snap;
+    }
+    const sentence = elsewhereNote(elsewhere.verb);
+    return { ...snap, note: snap.note ? `${snap.note} ${sentence}` : sentence };
+  }
+
+  if (channel !== undefined) {
+    const stop = channel.listen((notice: ElsewhereNotice) => {
+      // Its own notice, or a malformed one. Dropped rather than warned about:
+      // a channel shared with a future version of this library may carry
+      // frames this one does not understand, and taking a driver out of service
+      // over one is how a forward-compatible addition becomes an outage.
+      if (!notice || typeof notice.verb !== "string" || notice.from === elsewhereId) return;
+      if (!live) return;
+      // `options.visible()` and not `read()`: this is where `at` is set, so
+      // reading through the annotator would be asking what the note says in
+      // order to decide what the note says.
+      let now: number;
+      try {
+        now = options.visible().rev;
+      } catch {
+        // `visible()` threw outside a call, which is an app bug the core
+        // cannot report to anybody here. The notice is kept against a rev
+        // nothing can equal, so it stands until a successful read clears it --
+        // the safe direction.
+        now = Number.NaN;
+      }
+      elsewhere = { verb: notice.verb, at: now };
+    });
+    if (typeof stop === "function") unlisten = stop;
+  }
+
+  /**
+   * Tell the other tabs a commit landed here.
+   *
+   * POSTED AFTER `run`, and only for a `commit`, and not when the verb refused.
+   * Each of those three is a decision:
+   *
+   *  - after rather than before, because a notice sent first is a claim about a
+   *    change that has not happened yet, and the sibling tab would clear it on
+   *    its next `rev` move -- possibly before the write landed;
+   *  - `commit` only, because `read` and `describe` promise no data moves and
+   *    announcing them would refuse every commit in every other tab for every
+   *    read anybody did, which is a warning on everything;
+   *  - not on an app refusal, because the app saying no means nothing moved.
+   *    A verb that THREW does get announced: it may have changed half a
+   *    selection, which is the same reason the plan token is burned on
+   *    entering `run` rather than on returning from it.
+   */
+  function announce(name: string): void {
+    if (channel === undefined) return;
+    try {
+      channel.post({ verb: name, from: elsewhereId });
+    } catch (err) {
+      // A commit that already happened is not turned into a failure because
+      // the announcement could not go out. Said once, in the app author's
+      // console, because a channel that never delivers makes the whole check
+      // silently absent -- which is the one thing this feature must not be.
+      warn(
+        `the \`elsewhere\` channel threw while announcing \`${name}\` ` +
+          `(${err instanceof Error ? err.message : String(err)}), so other tabs of this app ` +
+          `were not told. The commit itself ran.`,
+      );
+    }
+  }
+
 
   // ---- the plan token ----------------------------------------------------
   //
@@ -1190,6 +1493,7 @@ export function mount(options: MountOptions): Driver {
     name: string,
     args: Record<string, Scalar>,
     before: Snapshot,
+    trail: Trail,
   ): Promise<Result | null> {
     const req: ApprovalRequest = { name, args, verb: entries.get(name)!, snapshot: before };
     const was = pending;
@@ -1205,7 +1509,20 @@ export function mount(options: MountOptions): Driver {
       pending = was;
     }
 
-    if (decision === undefined || decision === true) return null;
+    // The answer, written down as one of four words before it is turned into a
+    // refusal. Four and not three because `declined` and `not-asked` are the
+    // two an audit reader must never confuse -- one is a person refusing, the
+    // other is a gate that was not there -- and a hook that THREW is recorded
+    // as `declined`, deliberately, because that is the decision the core made
+    // from it: a failed ask is a no.
+    if (decision === undefined || decision === true) {
+      trail.approval = "allowed";
+      return null;
+    }
+    trail.approval =
+      typeof decision === "object" && decision !== null && decision.timedOut === true
+        ? "timed-out"
+        : "declined";
     if (decision === false) return no(DECLINED, DECLINED_HINT, read());
     if (typeof decision === "string") return no(DECLINED, decision, read());
     if (typeof decision === "object" && decision !== null && decision.timedOut === true) {
@@ -1234,10 +1551,150 @@ export function mount(options: MountOptions): Driver {
     );
   }
 
+  /**
+   * What `decide` writes down as it goes, for the record `call` emits after.
+   *
+   * It exists because of one rule: the record must not be a second source of
+   * truth about what happened. Most of an `AuditEvent` is read straight off the
+   * `Result` that is about to be returned, so it cannot disagree with it — but
+   * four facts are decided inside `decide` and are gone by the time it returns.
+   * The `rev` and `screen` the call RAN AGAINST, which on a successful commit
+   * are not the ones in the result's snapshot; the approval answer, which the
+   * gate alone knows; and the two plan tokens. Each is written down by the step
+   * that decides it, which is the alternative to re-deriving it afterwards from
+   * a second reading of the app.
+   */
+  interface Trail {
+    rev?: number;
+    screen?: string;
+    approval: AuditEvent["approval"];
+    plan?: string;
+    minted?: string;
+  }
+
+  /**
+   * Hand one record to the app's hook, and survive the hook.
+   *
+   * NOT AWAITED, and not deadlined. See `MountOptions.onAudit`: an approval is
+   * asked before the decision and its answer IS the decision, so it has to be
+   * waited for; a record is emitted after the outcome is settled and, for a
+   * commit, after the data has moved, so waiting on the sink can only delay the
+   * agent and failing the call would make a broken logging backend into a
+   * broken app. A thrown error — synchronous or from the promise — is reported
+   * once rather than swallowed, because a record that vanished in silence is
+   * the one failure an audit trail cannot survive.
+   */
+  function record(
+    name: string,
+    args: Record<string, Scalar>,
+    opts: CallOptions,
+    trail: Trail,
+    result: Result,
+    started: number,
+  ): void {
+    // The DECLARED facts, from the manifest entry, exactly as the approval hook
+    // is handed them: a record of what the app claimed about this verb, and no
+    // reach into `run`.
+    const entry = entries.get(name);
+    const shown: Record<string, Scalar> = {};
+    const redacted: string[] = [];
+    for (const [key, value] of Object.entries(args)) {
+      // Declared `sensitive`, so the value is replaced HERE -- before the hook,
+      // which is the boundary a record is most likely to leave the box
+      // across -- and the field is named, so `"[redacted]"` can never be read
+      // as a string the agent actually sent. See `ArgSpec.sensitive`.
+      if (entry?.args?.[key]?.sensitive === true) {
+        shown[key] = REDACTED;
+        redacted.push(key);
+      } else {
+        shown[key] = value;
+      }
+    }
+
+    const at = Date.now();
+    const event: AuditEvent = {
+      at,
+      ms: at - started,
+      app: options.app,
+      verb: name,
+      args: shown,
+      // The rev the call ran against, falling back to the one in the result's
+      // own snapshot for the three refusals that answer before `visible()` is
+      // read for comparison -- unmounted, approval-pending, unknown-verb. For
+      // those the two are the same read, so this is not a guess.
+      rev: trail.rev ?? result.snapshot.rev,
+      ok: result.ok,
+      approval: trail.approval,
+      policy,
+    };
+    const screen = trail.screen ?? result.snapshot.screen;
+    if (screen !== undefined) event.screen = screen;
+    if (entry?.kind !== undefined) event.kind = entry.kind;
+    if (entry?.reversible !== undefined) event.reversible = entry.reversible;
+    if (redacted.length > 0) event.redacted = redacted;
+    if (opts.rev !== undefined || opts.screen !== undefined) {
+      event.claimed = {
+        ...(opts.rev === undefined ? {} : { rev: opts.rev }),
+        ...(opts.screen === undefined ? {} : { screen: opts.screen }),
+      };
+    }
+    if (result.ok) {
+      if (result.count !== undefined) event.count = result.count;
+    } else {
+      event.refused = result.refused;
+    }
+    if (trail.plan !== undefined) event.plan = trail.plan;
+    if (trail.minted !== undefined) event.minted = trail.minted;
+
+    try {
+      const answered = onAudit!(event);
+      if (answered !== undefined && typeof (answered as Promise<void>).then === "function") {
+        void (answered as Promise<void>).catch((err: unknown) => audited(name, err));
+      }
+    } catch (err) {
+      audited(name, err);
+    }
+  }
+
+  /** Said out loud, once per distinct message, when a record did not get out. */
+  function audited(name: string, err: unknown): void {
+    warn(
+      `the \`onAudit\` hook threw on \`${name}\`, so that call's audit record was lost: ` +
+        `${err instanceof Error ? err.message : String(err)}. The call itself was unaffected — ` +
+        `a record is emitted after the outcome is decided, so there is nothing left to refuse — ` +
+        `but a record that vanishes in silence is the one failure an audit trail cannot survive.`,
+    );
+  }
+
+  /**
+   * `decide`, and then the record of what it decided.
+   *
+   * The split is what makes the record impossible to disagree with the
+   * `Result`: there is one `Result` object, `decide` produced it at whichever
+   * of its dozen exits applied, and the event is built from THAT object rather
+   * than from a second look at the app. A per-exit emit would have been a dozen
+   * places to forget one.
+   *
+   * With no hook this is the function it was before audit existed, plus one
+   * object literal and one comparison: no clock is read and no record is built.
+   */
   async function call(
     name: string,
     args: Record<string, Scalar> = {},
     opts: CallOptions = {},
+  ): Promise<Result> {
+    const trail: Trail = { approval: "not-asked" };
+    const started = onAudit === undefined ? 0 : Date.now();
+    const result = await decide(name, args, opts, trail);
+    if (onAudit !== undefined) record(name, args, opts, trail, result, started);
+    return result;
+  }
+
+  async function decide(
+    name: string,
+    args: Record<string, Scalar>,
+    opts: CallOptions,
+    trail: Trail,
   ): Promise<Result> {
     if (!live) return no("unmounted", "this driver was unmounted", read());
 
@@ -1259,6 +1716,38 @@ export function mount(options: MountOptions): Driver {
       );
     }
 
+    // AFTER the approval lock and BEFORE the verb lookup, and both halves of
+    // that position are decisions.
+    //
+    // After the lock, because a call refused `approval-pending` reached nothing
+    // and must not be charged for: a confused agent polling while a person
+    // reads a dialog would otherwise eat the whole ceiling without a single
+    // verb running, and the ceiling is for spend, not for impatience.
+    //
+    // Before the lookup, because a spent budget is the widest true thing there
+    // is to say about this call. Every other check in here answers "this
+    // particular call is wrong, here is the repair"; this one answers "nothing
+    // will work again, and no repair exists at this end". Answering
+    // `unknown-verb` to a call made past the ceiling would send an agent off to
+    // find a verb name that was never the problem — which is the same ordering
+    // argument `wrong-screen` is above `stale` for, taken one step further out.
+    //
+    // Charged for whatever happens next, refusals included. See `Budget`: an
+    // agent looping on `bad-argument` is the runaway this field exists for, and
+    // a counter that only counted successful calls would watch it spin.
+    if (budget?.calls !== undefined && callsUsed >= budget.calls) {
+      return no(
+        BUDGET_SPENT,
+        `this app allows ${budget.calls} verb call${budget.calls === 1 ? "" : "s"} per mounted ` +
+          `session and all ${budget.calls} are spent, so \`${name}\` was not run. This is a ` +
+          `ceiling the app set, not a rate limit: it does not refill, and waiting or retrying ` +
+          `will not change it. Stop, and say what you had got through and what is left — ` +
+          `somebody has to decide whether to raise it.`,
+        read(),
+      );
+    }
+    callsUsed++;
+
     const verb = verbs.get(name);
     if (!verb) {
       // The known names are listed. An outside agent may be holding a manifest
@@ -1269,6 +1758,13 @@ export function mount(options: MountOptions): Driver {
     }
 
     const before = read();
+    // Written down HERE, at the one read every check below compares against, so
+    // the record says what the call ran against and not what the screen looked
+    // like afterwards. On a successful bulk commit those are different revs,
+    // and the one worth keeping is this one: it is the rev the count was taken
+    // at and the rev a person approved.
+    trail.rev = before.rev;
+    if (before.screen !== undefined) trail.screen = before.screen;
 
     // WHICH SCREEN comes before WHICH REV, which comes before the arguments.
     // Each check describes a wider mistake than the next, and the widest one is
@@ -1325,6 +1821,53 @@ export function mount(options: MountOptions): Driver {
       }
     }
 
+    // WHAT ANOTHER TAB DID comes after WHICH SCREEN and above every staleness
+    // check, including `stale-plan`, and the ladder's own rule is why.
+    //
+    // The ladder is widest first, because the widest answer's repair subsumes
+    // the narrower ones'. This is the widest staleness there is: `stale` says
+    // the rev moved, `stale-plan` says the selection moved, and both are
+    // repaired by reading this tab again -- which is exactly the repair that
+    // DOES NOT WORK here, because what moved is the data behind a tab whose
+    // `rev` is unchanged. Answering `stale` or `stale-plan` first would hand an
+    // agent a repair that appears to succeed and leaves it believing it is
+    // current: it reads again, gets the same rev, and commits. That is the
+    // silent failure this check exists to end, so it has to be answered before
+    // either of them.
+    //
+    // ONLY A `commit`, and that is the one real judgement in here. A `read` or
+    // a `describe` in a tab that is behind still returns the rows the person is
+    // actually looking at, and its snapshot now says in words that they may be
+    // behind -- see `read()`. Refusing those as well would make a tab whose app
+    // does not refetch completely undrivable, and would do it by sending an
+    // agent round a loop: refused, read again, same rev, refused. A commit is
+    // the one call whose cost is not paid back by reading again, which is the
+    // same line `MountOptions.approve` draws for the same reason.
+    //
+    // WHATEVER `rev` THE AGENT CLAIMED, including none. `rev` and `screen` are
+    // checks an agent opts out of by making no claim, because an agent that
+    // claims nothing has at least not claimed something false. This is not of
+    // that kind: it is not a claim being checked, it is the core knowing the
+    // data moved. `consumes: "plan"` already makes the same exception for the
+    // same reason -- a guarantee a caller can decline is not a guarantee.
+    // `before` was produced by `read()` above, which is where a notice whose rev
+    // has moved on is cleared. So a non-null `elsewhere` here has already been
+    // checked against the live rev, and calling `read()` again in this
+    // condition would be asking the question that answers itself -- and would
+    // null the field between the two halves of the `&&`.
+    if (verb.kind === "commit" && elsewhere !== null) {
+      return no(
+        CHANGED_ELSEWHERE,
+        `another tab of this app committed \`${elsewhere.verb}\` after this screen was read. ` +
+          `This tab is at rev ${elsewhere.at} and has not moved, so its rows -- and any count ` +
+          `taken from them -- may describe data that has already changed. Reading this screen ` +
+          `again will NOT fix that: the rev will be the same and it will still be behind. ` +
+          `Say what happened and let the person refresh the page or switch to the tab that ` +
+          `made the change; do not retry this commit here.`,
+        before,
+      );
+    }
+
     // WHICH SELECTION comes after WHICH SCREEN and BEFORE WHICH REV, and this
     // is the one ordering decision in `call()` that is not obvious, so here is
     // the argument.
@@ -1350,6 +1893,10 @@ export function mount(options: MountOptions): Driver {
     // discussing. And it is before the approval gate, which is last, so nobody
     // is ever asked to approve a commit that was already going to be refused.
     if (verb.consumes === "plan") {
+      // Recorded BEFORE the check and whatever the check says. A token that was
+      // refused is the interesting one: it is how an audit reader finds the
+      // agent that tried to spend a receipt for a count that had moved.
+      if (opts.plan !== undefined && opts.plan !== "") trail.plan = opts.plan;
       const stale = checkPlan(name, opts.plan, before);
       if (stale) return no(STALE_PLAN, stale, before);
     }
@@ -1378,10 +1925,33 @@ export function mount(options: MountOptions): Driver {
     // a stale rev, a wrong screen or a missing argument is asking them to
     // approve something that was never going to happen — and the second time
     // that happens they stop reading the question.
+    //
+    // The commit ceiling is checked HERE, one line above the gate, and the
+    // order is the gate's own argument reused: nobody is asked to approve a
+    // commit that was already going to be refused. It is also the last check
+    // before `run`, which is where a bound on data moved belongs — a commit
+    // refused for a stale plan did not move anything and must not be charged
+    // for one.
+    if (verb.kind === "commit" && budget?.commits !== undefined && commitsUsed >= budget.commits) {
+      return no(
+        BUDGET_SPENT,
+        `this app allows ${budget.commits} commit${budget.commits === 1 ? "" : "s"} per mounted ` +
+          `session and all ${budget.commits} have run, so \`${name}\` was not run and no data ` +
+          `moved. Reads and describes may still work; it is commits that are spent. This ` +
+          `ceiling does not refill — stop, and say which commits went through.`,
+        before,
+      );
+    }
+
     if (verb.kind === "commit" && approveFn !== undefined) {
-      const refused = await askApproval(name, args, before);
+      const refused = await askApproval(name, args, before, trail);
       if (refused) return refused;
     }
+
+    // Charged on ENTERING `run`, beside the plan token and for the same reason:
+    // a commit that changes half a selection and then throws has moved data,
+    // and a counter that only counted clean returns would not know it.
+    if (verb.kind === "commit") commitsUsed++;
 
     // Burned HERE, between the last check and `run`, and the position is the
     // decision rather than an accident of where it fitted.
@@ -1408,6 +1978,11 @@ export function mount(options: MountOptions): Driver {
     try {
       outcome = await verb.run(args, ctx);
     } catch (err) {
+      // Announced, because a commit that threw may have moved half a selection
+      // -- the same reason the plan token is burned on entering `run`. The
+      // other tabs are told something changed and the agent is told the call
+      // failed, and both of those are true at once.
+      if (verb.kind === "commit") announce(name);
       // An app bug is reported as a failed call rather than allowed to
       // propagate. The alternative kills the websocket pump in the relay, and
       // a driver that dies on one bad verb takes every other verb with it.
@@ -1462,6 +2037,12 @@ export function mount(options: MountOptions): Driver {
     // because a `describe` verb that matched nothing must report `0` and not
     // silently become "I do not count" — those are different answers, and the
     // difference decides whether a commit should follow.
+    // Before `read()`, so the snapshot this call returns is the one the OTHER
+    // tabs are being warned about -- and after the refusal branches above, so
+    // an app that said no has announced nothing. A driver ignores its own
+    // notice, so this does not annotate the result below.
+    if (verb.kind === "commit") announce(name);
+
     const after = read();
 
     // The mint, and everything about when it happens is load-bearing.
@@ -1493,6 +2074,12 @@ export function mount(options: MountOptions): Driver {
       usesPlans && verb.kind === "describe" && counted !== undefined
         ? mint(name, after, counted)
         : undefined;
+    // The other half of the join. The event carrying this as `minted` is the
+    // one that reported the count; the event carrying the same string as `plan`
+    // is the commit that spent it. Together they are the answer to "3,412 rows
+    // were counted here, approved here, and moved here", which is the question
+    // the whole record exists for and the one no single event can answer.
+    if (plan !== undefined) trail.minted = plan;
 
     return {
       ok: true,
@@ -1528,8 +2115,32 @@ export function mount(options: MountOptions): Driver {
         }
       },
     },
+    // Offered whether or not a ceiling was declared, so a panel renders one
+    // shape. A fresh object per read: handing out a live one would let a UI
+    // mutate the app's own accounting.
+    budget: () => ({
+      calls: { used: callsUsed, ...(budget?.calls === undefined ? {} : { limit: budget.calls }) },
+      commits: {
+        used: commitsUsed,
+        ...(budget?.commits === undefined ? {} : { limit: budget.commits }),
+      },
+    }),
     unmount: () => {
       live = false;
+      // Before `live` could matter again: a channel implementation that holds a
+      // `BroadcastChannel` open keeps this driver's listener -- and through the
+      // closure, this driver -- alive for the life of the page.
+      const stop = unlisten;
+      unlisten = undefined;
+      try {
+        stop?.();
+      } catch (err) {
+        warn(
+          `the \`elsewhere\` channel threw on unmount ` +
+            `(${err instanceof Error ? err.message : String(err)}); the driver is unmounted ` +
+            `either way.`,
+        );
+      }
     },
   };
 }

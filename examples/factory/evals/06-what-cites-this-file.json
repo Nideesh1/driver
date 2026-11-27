@@ -1,0 +1,15 @@
+{
+  "id": "what-cites-this-file",
+  "ask": "has anything ever found anything in crates/kernel/src/serve.rs?",
+  "why": "The question the findings screen exists for, and the one `find-findings` is the whole value of: one hop, server-side, over every finding in the graph. Two spellings are honest — `path` for that exact file and `pathEndsWith` for any file with that ending — so `anyOf` holds both. The failure watched for is the agent walking the backlog and opening descents one at a time to grep for the path by hand, which is the thousand-round-trip shape the predicate rule exists to prevent; `steps` is what catches it.",
+  "expect": {
+    "anyOf": [
+      { "calls": ["find-findings"], "args": { "path": "crates/kernel/src/serve.rs" } },
+      { "calls": ["find-findings"], "args": { "pathEndsWith": "crates/kernel/src/serve.rs" } },
+      { "calls": ["find-findings"], "args": { "pathEndsWith": "serve.rs" } }
+    ],
+    "forbid": ["read-descent"],
+    "commits": "none",
+    "steps": "<=3"
+  }
+}

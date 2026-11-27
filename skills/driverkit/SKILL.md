@@ -18,6 +18,14 @@ talks to the relay over MCP). One npm package with subpaths: `driverkit` (the re
 and `driverkit` on PyPI (relay + MCP + auth). One install, one version for everything.
 `PROTOCOL.md` at the repo root is the wire contract and is the thing to read first.
 
+## The procedure is one file: `INTEGRATING.md`
+
+Adopting driverkit — install, draft the verb list, **prune it with the human**, import it, write `/api/chat`,
+write the eval cases — is written down once, in `INTEGRATING.md`: [at the driverkit repo
+root](../../INTEGRATING.md), or beside this file when this skill was installed. **Open it before drafting
+anything**, rather than reconstructing the steps from this file. Everything below is for choosing a path and for
+not getting the dangerous things wrong.
+
 ## State of the library — say this before recommending it
 
 - **Unpublished.** Nothing is on npm or PyPI; versions are all `0.0.0`. `npm install driverkit` and
@@ -25,8 +33,9 @@ and `driverkit` on PyPI (relay + MCP + auth). One install, one version for every
 - **Never used on a real app.** The only integration that exists is `examples/contacts`, written by the author.
   Expect to be the first person to hit any given edge.
 - **Proven:** both paths driven end to end — the widget against a live Anthropic model in a real browser, and the
-  relay path from another process — plus 462 TS tests and the Python suite, with the two relay implementations
-  (TS and Python) tested against each other.
+  relay path from another process — plus the TypeScript and Python suites (574 and 250 tests at the last count),
+  with the two relay implementations (TS and Python) tested against each other, and the demo driven in real
+  Chrome.
 - **Not proven:** `driverkit.fastmcp_server` (MCP over HTTP) **has never been executed once** — its own docstring
   lists the five things a human must check. Auth is unit-tested but has never run in a multi-user deployment.
   The APIs are unstable; treat a verb rename as a breaking change to stored prompts.
@@ -35,7 +44,8 @@ and `driverkit` on PyPI (relay + MCP + auth). One install, one version for every
 
 | The user wants to ... | Do | Details |
 |---|---|---|
-| **write or review a verb list for their app** (the hard part) | read the repo, then draft verbs | [authoring-verbs.md](references/authoring-verbs.md) |
+| **adopt driverkit at all** — install, draft, prune, wire, measure | follow the six steps | **[`INTEGRATING.md`](../../INTEGRATING.md)** |
+| **write or review a verb list for their app** (the hard part) | read the repo, then draft verbs | `INTEGRATING.md` §2, then [authoring-verbs.md](references/authoring-verbs.md) |
 | see that procedure run on a messy app | a worked draft, verb by verb, with the `kind` reasoning | [worked-example.md](references/worked-example.md) |
 | write `visible()` honestly (`rev`, `page`, `selected`) | the snapshot contract and its three `page` states | [snapshot.md](references/snapshot.md) |
 | **adopt an app with more than one screen** | `Verb.screen`, `Snapshot.screen`, `CallOptions.screen`, `instructions`, `Manifest.screens` + `goto` | [screens.md](references/screens.md) |
@@ -53,7 +63,8 @@ Read the matching reference before editing code.
 ## The verb list is the whole job
 
 Installing driverkit is ten minutes. **Writing the verb list is a judgement call over somebody's codebase**, and
-getting it wrong is what costs them. In short, and at length in [authoring-verbs.md](references/authoring-verbs.md):
+getting it wrong is what costs them. The five things to hold in mind while reading their code; the procedure and
+the rules are [`INTEGRATING.md`](../../INTEGRATING.md) §2–§3:
 
 1. **Find the actions that already exist as functions** — a store, an API client, a `lib/` layer. Those are the
    verbs worth having. For one trapped inside a JSX click handler, mark the button `data-dk="name"` and write the
@@ -87,11 +98,16 @@ getting it wrong is what costs them. In short, and at length in [authoring-verbs
 - **A flow is a recipe, not a call.** The agent reads `Manifest.flows` and follows the steps with ordinary verbs;
   nothing executes one, so it can still adapt when step three finds the record already accepted. Budgets, from
   Apple's app skills: a `describe` is one line ≤1024 chars, a flow's steps ≤10,000, `instructions` ≤10,000.
+- **A step's `skipWhen` is a sentence, not an expression**, because nothing evaluates a flow — a predicate a model
+  interprets is counterfeit precision. Conditions that decide whether DATA MOVES belong in `approve` and
+  `consumes`, where the core holds the gate; `skipWhen` only says which steps are not load-bearing. There is no
+  iteration construct and no `from: "step2.output"`, both on purpose: see [screens.md](references/screens.md).
 - Keep the snapshot to a screenful. A snapshot near the relay's 1 MiB body limit is a bug in `visible()`.
 - Never fill `Snapshot.selected` with every selected id — on-screen ids only, with `selectedCount` for the size.
-- A verb may not be named — or refuse with — a reserved slug: `stale`, `wrong-screen`, `unknown-verb`,
-  `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`, `declined-by-user`. `mount()`
-  throws on a reserved verb name or a reserved declared refusal. `wrong-screen` is the one an app is most likely to
+- A verb may not be named — or refuse with — a reserved slug: `stale`, `stale-plan`, `wrong-screen`,
+  `unknown-verb`, `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`,
+  `declined-by-user`, `approval-pending`, `approval-timeout` (`RESERVED_REFUSALS`, exported by `driverkit`, is the
+  authority). `mount()` throws on a reserved verb name or a reserved declared refusal. `wrong-screen` is the one an app is most likely to
   have invented for itself; `Verb.screen` replaces that guard — [screens.md](references/screens.md).
 - A tab id is a capability. Do not log it, print it in the UI, or paste it into a chat.
 - `allow_remote` without `auth=` or `resolve_principal=` refuses to start. That is deliberate; do not work around it.

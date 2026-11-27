@@ -1246,3 +1246,99 @@ class ThePlanTokenOnTheWire(unittest.TestCase):
         self.assertNotIn("plan", relay.last_body or {})
         dk.call(TAB, "accept-selected", {}, plan="")
         self.assertNotIn("plan", relay.last_body or {})
+
+
+class AConditionalStepAndThePlanHandoff(unittest.TestCase):
+    """``FlowStep.skip_when`` and the plan mark, over the wire and into the
+    server instructions.
+
+    The strings asserted here are quoted from
+    ``packages/driverkit/src/agent/tools.ts``, whose own tests assert the same
+    ones. An agent arriving over MCP and an agent in the page read one recipe
+    or they read two, and these are what keep it one.
+    """
+
+    #: A recipe with the two things a flat list of ``{verb, hint}`` could not
+    #: say: a step that is not always needed, and a commit that can only run
+    #: with the token the step before it minted.
+    MAPPED = dict(
+        MANIFEST,
+        flows=[
+            {
+                "id": "prune-a-descent",
+                "describe": "open a descent and prune it",
+                "steps": [
+                    {
+                        "verb": "goto",
+                        "skipWhen": "the person already named the descent",
+                        "hint": "go to the descents list to find which one it is",
+                    },
+                    {"verb": "select-where", "hint": "selects the lane and reports the count"},
+                    {"verb": "accept-selected", "hint": "acts on the selection, so that count moves"},
+                ],
+            }
+        ],
+        verbs=[
+            # `accept-selected` with the receipt it would carry in a real app.
+            dict(v, **({"consumes": "plan"} if v["name"] == "accept-selected" else {}))
+            for v in MANIFEST["verbs"]
+        ],
+    )
+
+    def test_skip_when_round_trips_under_its_wire_name(self):
+        # The wire name is the contract: `skipWhen` is what the TS core
+        # serialises and fingerprints, and `skip_when` is only how Python
+        # spells it. A client that renamed it would render a recipe the app
+        # being driven does not have.
+        manifest = Manifest.from_dict(self.MAPPED)
+        steps = manifest.flow("prune-a-descent").steps
+        self.assertEqual(steps[0].skip_when, "the person already named the descent")
+        # None, not "": a step that says nothing is a step you take, and a flow
+        # written before the field reads exactly as it did.
+        self.assertIsNone(steps[1].skip_when)
+        self.assertNotIn("skipWhen", steps[1].to_dict())
+        self.assertEqual(manifest.to_dict()["flows"], self.MAPPED["flows"])
+
+    def test_the_optional_mark_and_the_plan_mark_are_in_the_server_instructions(self):
+        from driverkit.mcp_core import instructions_for
+
+        text = instructions_for(Manifest.from_dict(self.MAPPED))
+        # Beside the verb, so a model skimming numbered lines can see which
+        # steps carry the job without reading every hint.
+        self.assertIn(
+            "  1. `goto` (OPTIONAL — skip it when the person already named the descent) — go to",
+            text,
+        )
+        # And what kind of thing that condition is. Nothing in this library
+        # executes a flow, so the condition is a sentence the model judges, and
+        # the default when it is unclear has to be stated.
+        self.assertIn("A step marked OPTIONAL may be skipped when the condition beside it holds", text)
+        self.assertIn("not a rule something checks: when it is not clearly true, take the step", text)
+        # The one value that crosses two steps, named where the recipe is read.
+        # Derived from `kind` and `consumes`, which the manifest already
+        # carries, so there is no second declaration to keep in step.
+        self.assertIn(
+            "  3. `accept-selected` (takes the `plan` token step 2 returned) — acts on",
+            text,
+        )
+
+    def test_a_flow_with_no_optional_step_gets_the_text_it_got_before(self):
+        from driverkit.mcp_core import instructions_for
+
+        # The additive claim about the CACHED PREFIX. Everything in this note is
+        # paid for once per session of every user, which is the cost that is
+        # easiest to stop weighing, so a paragraph about a construct the app
+        # does not use is not rendered at all.
+        plain = dict(
+            MANIFEST,
+            flows=[
+                {
+                    "id": "prune-a-descent",
+                    "describe": "open a descent and prune it",
+                    "steps": [{"verb": "goto", "hint": "go to the descents list"}],
+                }
+            ],
+        )
+        text = instructions_for(Manifest.from_dict(plain))
+        self.assertNotIn("OPTIONAL", text)
+        self.assertIn("it did not expect — then say so.\n\n`prune-a-descent`", text)

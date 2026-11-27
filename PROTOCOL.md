@@ -66,12 +66,45 @@ repurposing one is breaking.
 { "t": "hello", "tab": "7f3a-...", "app": "Contacts",
   "manifest": { "version": "a3f2...", "app": "Contacts", "verbs": [...] },
   "snapshot": { "where": "contacts", "screen": "contacts", "rev": 7, "rows": [...] },
-  "title": "Contacts — Acme", "url": "/contacts?company=Acme" }
+  "title": "Contacts — Acme", "url": "/contacts?company=Acme#/acme",
+  "focus": "focused" }
 ```
 
 The `tab` id is minted by the tab, not the relay, so a reconnect can resume the
-same identity. `title` and `url` exist only so a human can tell two tabs apart
-when asked "which one?".
+same identity. `title`, `url` and `focus` exist so a human — or a client acting
+for one — can tell two tabs apart when asked "which one?".
+
+`focus` is optional and is one of exactly three strings. It answers the question
+`--tab <id>` could never express: **which tab is the person actually looking
+at.**
+
+```
+"focused"   the active tab of the frontmost window. The person is looking at
+            THIS one: document.visibilityState === "visible" AND document.hasFocus()
+"visible"   the active tab of its window, but the window is not frontmost — the
+            person is in another application. Visible, not looked at.
+"hidden"    a background tab, or a minimised window.
+```
+
+Three states and not a boolean, because a boolean would have to lie about the
+middle one: calling it focused sends an agent to a window nobody is in front of,
+and calling it hidden throws away the only honest answer to "which one was I
+last in?".
+
+**Only the page may originate it.** `document.hasFocus()` is visible to the
+document and to nothing else — not to a relay, not to a server, not to the other
+tab. A relay carries the string and has no opinion about it, exactly as it
+carries `rev`; a relay that decided which tab was active would be a second place
+that decides, beside the only process that can see.
+
+**Absent is UNKNOWN and not `"hidden"`.** A tab driven by a hand-written `fetch`
+loop, or a page that chose not to report, says nothing — and a client that read
+silence as "not the one" would quietly stop being able to drive it at all. A
+relay must not fill the field in.
+
+`url` is path-relative and **includes the hash**, which for a hash-routed app is
+the entire route. It is never the origin: the relay knows that already, and a
+full url in a listing is an inventory of where somebody has been.
 
 The manifest is the static half and carries five optional fields a relay only
 forwards, all of them cacheable for the life of the app:
@@ -141,8 +174,18 @@ forwards, all of them cacheable for the life of the app:
   `goto` exists; a tab with no map does not have one.
 - `flows` — **the app's recipes**: the multi-step jobs its verbs are usually
   combined into, as `{ id, describe, steps[] }` with each step
-  `{ verb, hint, section? }`. `verb` names a verb in the same manifest, and a
-  flow naming one that does not exist is refused where the app mounts.
+  `{ verb, hint, section?, skipWhen? }`. `verb` names a verb in the same
+  manifest, and a flow naming one that does not exist is refused where the app
+  mounts. So is a flow that reaches a step whose verb `consumes` a plan with no
+  earlier `describe` step to mint one: the token can only come from one of
+  those, so the recipe could only ever end in `stale-plan`.
+
+  `skipWhen` is **a sentence and not an expression**, and a client must render it
+  as one: "the person already named the company". Present means the step may be
+  skipped when that holds, absent means take it. Nothing evaluates it — nothing
+  evaluates any part of a flow — so a client that parsed it into a predicate
+  would be claiming a check that does not exist. The conditions that ARE enforced
+  live elsewhere: `consumes` on the verb, and the app's own approval gate.
 
   **A flow is read and followed by the agent. Nothing calls it, and a client
   must not turn one into a tool.** That is the design and not a missing feature:
@@ -214,8 +257,26 @@ is required of it here beyond not stripping unknown fields.
 
 ```json
 { "t": "snapshot", "tab": "7f3a-...",
-  "snapshot": { "where": "contact c-8821", "screen": "contact", "rev": 8, ... } }
+  "snapshot": { "where": "contact c-8821", "screen": "contact", "rev": 8, ... },
+  "url": "/contacts#/c-8821", "focus": "visible" }
 ```
+
+`url` and `focus` are optional here and mean the same as in `hello`, upserted by
+the same rule: a field that is present wins, and an absent one leaves the stored
+value alone.
+
+They are here because `hello` is sent once per stream and **a single-page app
+navigates without reconnecting** — so a `url` learned from `hello` alone was
+wrong from the first client-side route change and had no way back. A push is
+already going out whenever the page moves, so carrying the current url on it
+costs one short string. A tab must also push when its `focus` changes and
+nothing else has, which is the one case where this frame is sent for a reason
+other than the data moving; it should not push on an event that does not move
+the value, since the relay forwards every `snapshot` frame to every watcher
+without deduplicating.
+
+**A field, not a frame.** A relay or a client written before `focus` existed
+reads the same `snapshot` frame it always read and ignores one key.
 
 `snapshot.screen` is optional and is a stable, kebab-case screen id beside
 `where`. `where` is prose for a human and carries the filter, the sort and, on
@@ -346,8 +407,8 @@ And the two the tab uses, which an agent never touches:
 ```json
 { "tabs": [
   { "tab": "7f3a-...", "app": "Contacts", "title": "Contacts — Acme",
-    "url": "/contacts?company=Acme", "manifestVersion": "a3f2c1d40e9b",
-    "rev": 7, "since": "2026-11-25T18:04:11Z" }
+    "url": "/contacts?company=Acme#/acme", "manifestVersion": "a3f2c1d40e9b",
+    "rev": 7, "focus": "focused", "since": "2026-11-25T18:04:11Z" }
 ] }
 ```
 
@@ -356,6 +417,34 @@ without breaking a parser. The id field is `tab`, spelled the same as in the
 `hello` frame — one name for one thing. `manifestVersion` is lifted out so a
 client can tell whether its cached manifest is current without fetching the
 whole thing, which is the entire point of the version existing.
+
+`focus` is whatever the tab last reported, and is omitted entirely for a tab
+that reported nothing.
+
+#### Picking a tab when the person did not name one
+
+"Omit `--tab` when exactly one tab is connected" is not a rule that survives two
+tabs, and **the rule belongs in the client, not in the relay** — which is also
+what keeps two conforming relays behaviourally identical about it: neither of
+them implements it. A client that must choose one, in this order:
+
+1. **One tab connected** — that one, even if it reports no focus. This is the
+   behaviour from before the field existed and must not change.
+2. **Exactly one tab says `"focused"`** — that one. It is claiming the person is
+   looking at it, which is a stronger statement than a tab that says nothing.
+3. **Nobody says `"focused"` and exactly one says `"visible"`** — that one. This
+   is the person being in another application entirely, and the answer is still
+   unambiguous: with one window, exactly one tab of an app is on screen and the
+   rest are `"hidden"`. "The one I was last in" is what they will mean when they
+   come back.
+4. **Anything else — ask.** Two windows each with a focused tab (which should
+   not happen, and is exactly why it must not be guessed at when it does), two
+   tabs reporting nothing, a relay from before the field: in all of them the
+   honest answer is a question, and the listing above is what it is asked from.
+
+A client must **not** fall back to the first tab, the newest tab or the one that
+sorts first. Each of those makes the ambiguous case look handled, and the
+failure is a commit landing in a window nobody was watching.
 
 ### `GET /dk/tabs/:tab/snapshot` serves what it has, not what is true now
 
@@ -551,8 +640,10 @@ The relay answers with a `WireResult` whose `snapshot` is **absent** and whose
 | `timeout` | the tab accepted the call and did not answer within the deadline |
 
 These three slugs, plus `stale`, `wrong-screen`, `stale-plan`, `unknown-verb`,
-`bad-argument`, `unmounted` and `threw` from the core, and `declined-by-user`,
-`approval-pending` and `approval-timeout` from the core's approval gate, are
+`bad-argument`, `unmounted` and `threw` from the core, `declined-by-user`,
+`approval-pending` and `approval-timeout` from the core's approval gate,
+`budget-spent` from the core's cost ceiling, and `changed-elsewhere` from its
+cross-tab check, are
 **reserved**. (`wrong-screen` is the core's answer
 to a call aimed at a screen the app is not on — either because the verb declared
 a `screen` of its own and the live one is something else, or because the call
@@ -584,6 +675,56 @@ expensive mistake. A plan is good for **one** commit, and only at the `rev` it
 was taken at; there is no clock, because `rev` is the app's own account of
 something having changed and a wall-clock window is both too long to be safe and
 too short for a person reading three thousand rows before they answer.
+
+**`changed-elsewhere` is the one staleness the tab cannot see for itself, and
+it is answered above `stale` and `stale-plan`.** `rev` is the app's claim that
+its data has not moved, and it is bumped by the app's own mutation path — so two
+tabs of one app over one backend have a hole in the middle of it. An agent
+commits in tab A; tab B's data has changed and **B's `rev` has not moved**,
+because B's store never heard. B's snapshot then reports stale rows as current,
+a `stale` check against B's `rev` passes because the number is unchanged, and a
+plan token minted in B still verifies — the staleness machinery passing in
+exactly the situation it exists to catch, which is worse than having none.
+
+Nothing inside tab B can see it. `rev`, `selectionId`, a count, a hash of the
+rows: all four come out of B's `visible()`, and B's copy of the data is the thing
+that is wrong. So the fact has to arrive from outside, and the only thing that
+knows is the core that ran the commit in tab A. An app opts in by giving
+`mount()` an `elsewhere` channel — `BroadcastChannel` same-origin, or anything
+the app already has — and from then on a `commit` in a tab that has heard about
+another tab's commit, and whose own `rev` has not moved since, is refused
+`changed-elsewhere`: the verb was **not reached and nothing changed**.
+
+**This is not on the wire and no relay implements it.** It is named here because
+the slug is reserved and a client has to recognise it, but the mechanism is
+deliberately not the relay's: the relay is a dumb pipe that grants no authority
+and knows nothing about verbs, so deciding that a call was a commit would mean
+reading `kind` out of a manifest — a second place that decides what a commit is.
+And a relay could not help the case that needs help most, since an app driven by
+its own in-page panel has no relay at all.
+
+**The repair is not "read again", and that is why it is not `stale`.** Reading
+the tab again returns the same `rev` and the same stale rows, so an agent told
+`stale` would re-read, believe itself current, and commit — the silent failure,
+re-created by answering the cheaper slug. The honest repair is to say what
+happened and let the person refresh or switch tabs. Reads and describes are
+**not** refused: they return the rows the person is actually looking at, and the
+snapshot's `note` says in words that they may be behind. Refusing those as well
+would make a tab whose app does not refetch undrivable, and would do it by
+sending an agent round a loop.
+
+**`budget-spent` is the one slug whose honest repair is "do not try again."** It
+says the ceiling an app declared on what one mounted session may spend has been
+reached — see `MountOptions.budget` — so the verb was **not reached and nothing
+changed**, and nothing else on this driver will run either. It is not a rate
+limit and does not refill: waiting changes nothing, and the only thing that
+moves it is a person changing the app's configuration. There is deliberately
+**one** slug for both ceilings the core keeps (total calls, and total commits)
+rather than two, because the repair is identical — stop, and tell the person
+what got through — and the `hint` names which one is spent along with both
+numbers. An agent that reads this should report progress and stop; a client
+should show the person that a limit was reached rather than a run that appears
+to have died.
 
 **`approval-timeout` is not `timeout` and the difference is the point.** The
 relay's `timeout` means the call was accepted and no answer came back, so the

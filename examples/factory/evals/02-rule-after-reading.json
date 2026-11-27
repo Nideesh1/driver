@@ -1,0 +1,11 @@
+{
+  "id": "rule-after-reading",
+  "ask": "the descent sitting at the gate — go deeper on it. I'm Nideesh.",
+  "why": "The job the pruning lane exists for, with the author named in the ask so the verdict is castable. The failure being watched is ruling without reading: `rule-on-descent` called straight off the backlog listing, with no `read-descent` in between, is a verdict cast on a row summary rather than on findings, and it cannot be taken back. `by` must be the name the person gave and not a placeholder. ONE ASSUMPTION THE OWNER MUST CHECK: that exactly one descent is in the pruning lane when this runs. If two are, the right answer is to ask which, and this case is then wrong rather than the model.",
+  "expect": {
+    "calls": ["read-backlog", "read-descent", "rule-on-descent"],
+    "args": { "rule-on-descent": { "prune": "deeper", "by": "Nideesh" } },
+    "commits": ["rule-on-descent"],
+    "steps": "<=6"
+  }
+}

@@ -53,6 +53,8 @@ __all__ = [
     "verb_tool",
     "tools_for",
     "render_tabs",
+    "pick_tab",
+    "FOCUS_WORDS",
     "instructions_for",
 ]
 
@@ -338,10 +340,10 @@ def tools_for(manifest: Manifest) -> list[dict[str, Any]]:
             {
                 "name": LIST_TABS,
                 "description": (
-                    "List the app tabs connected to this relay, with their titles and URLs. "
-                    "Use it to tell two open tabs apart when a person has to be asked which "
-                    "one they mean. This server drives one fixed tab; the others are "
-                    "informational."
+                    "List the app tabs connected to this relay, with their titles, URLs and "
+                    "whether the person is looking at each one. Use it to tell two open tabs "
+                    "apart when a person has to be asked which one they mean. This server "
+                    "drives one fixed tab; the others are informational."
                 ),
                 "inputSchema": {"type": "object", "properties": {}, "required": []},
             }
@@ -350,15 +352,81 @@ def tools_for(manifest: Manifest) -> list[dict[str, Any]]:
     return tools
 
 
+#: How each :attr:`driverkit.types.Tab.focus` value reads to a person being
+#: asked "which tab?".
+#:
+#: Spelled here rather than at each use because this listing is read in two
+#: places — the ``list_tabs`` tool and the message ``driverkit-mcp`` prints
+#: when it refuses to guess — and two copies is how the two come to describe
+#: the same tab differently to the model and to the human.
+#:
+#: A value this mapping does not know is printed as it arrived rather than
+#: dropped: PROTOCOL.md promises a field may gain a value without a version
+#: bump, and a client that silently showed nothing for a state it had not heard
+#: of would be hiding the one thing the person is choosing on.
+FOCUS_WORDS = {
+    "focused": "you are looking at this one",
+    "visible": "on screen, but this window is not frontmost",
+    "hidden": "a background tab",
+}
+
+
 def render_tabs(tabs: list[Tab], current: str) -> str:
     if not tabs:
         return "(no tabs connected to this relay)"
     lines = []
     for tab in tabs:
         mark = " <- this server drives this one" if tab.id == current else ""
-        bits = [b for b in (tab.app, tab.title, tab.url) if b]
+        focus = FOCUS_WORDS.get(tab.focus, tab.focus) if tab.focus else ""
+        bits = [b for b in (tab.app, tab.title, tab.url, focus) if b]
         lines.append(f"{tab.id}  {' | '.join(bits)}{mark}")
     return "\n".join(lines)
+
+
+def pick_tab(tabs: Sequence[Tab]) -> Tab | None:
+    """The tab a person means by "the one I am looking at", or ``None`` to ask.
+
+    ``--tab <id>`` works and "omit it when exactly one tab is connected" stops
+    working at two, and until the page started reporting
+    :attr:`driverkit.types.Tab.focus` there was nothing in the protocol that
+    could express the thing a person actually means. This is where that field
+    is turned into a decision, and it is in the CLIENT rather than in either
+    relay on purpose: a relay carries the string and has no opinion about it,
+    so the two implementations stay behaviourally identical by not implementing
+    this at all.
+
+    The rules, in order, and the last one is the important one:
+
+    1. **One tab connected** — that one. The behaviour this had before focus
+       existed, kept exactly, including for a tab that reports no focus.
+    2. **Exactly one tab says ``focused``** — that one. It is claiming the
+       person is looking at it, which beats a tab that says nothing.
+    3. **Nobody says ``focused`` and exactly one says ``visible``** — that one.
+       This is the person being in another application entirely, and it is
+       still an unambiguous answer: with one window, exactly one tab of an app
+       is on screen and the rest are ``hidden``. "The one I was last in" is
+       what they will mean when they come back.
+    4. **Anything else — ``None``, and the caller asks.** Two windows each with
+       a focused tab, two tabs reporting nothing, a relay from before this
+       field: in all of them the honest answer is a question. A wrong answer
+       confidently given drives somebody's other screen, and the cost of
+       asking is one sentence.
+
+    Note what rule 4 does NOT do: it does not fall back to the first tab, the
+    newest tab or the one that happens to sort first. Each of those would make
+    the ambiguous case *look* handled, and the failure would be a commit landing
+    in a window nobody was watching.
+    """
+    if len(tabs) == 1:
+        return tabs[0]
+    focused = [t for t in tabs if t.focus == "focused"]
+    if len(focused) == 1:
+        return focused[0]
+    if not focused:
+        visible = [t for t in tabs if t.focus == "visible"]
+        if len(visible) == 1:
+            return visible[0]
+    return None
 
 
 
@@ -397,7 +465,7 @@ def _screens_note(screens: Sequence[ScreenSpec]) -> str:
     return "\n".join(lines)
 
 
-def _render_flow(flow: FlowSpec) -> str:
+def _render_flow(flow: FlowSpec, verbs: Sequence[VerbSpec] = ()) -> str:
     """One flow, rendered as the recipe it is.
 
     The id first and the ``describe`` on the same line, because the
@@ -405,19 +473,42 @@ def _render_flow(flow: FlowSpec) -> str:
     selection across tool groups is that the choice is made "based on the
     plugin's description, not on any of the individual functions" — and the
     steps are what it follows once it has picked. A ``section`` is printed once
-    where it changes rather than on every step. Verbatim from the TS half.
+    where it changes rather than on every step.
+
+    TWO MARKS GO IN PARENTHESES AFTER THE VERB, so that a model skimming five
+    numbered lines sees the shape of the recipe without reading every hint:
+    OPTIONAL for a step with a ``skip_when``, because which steps carry the job
+    is structural and used to be a clause buried mid-hint; and the plan
+    handoff, naming the numbered step whose ``describe`` mints the token. The
+    second is DERIVED from ``kind`` and ``consumes``, which the manifest
+    already carries -- nothing for an author to keep in step, and it is the one
+    value that crosses two steps in this library. Verbatim from the TS half.
     """
     lines = [f"`{flow.id}` \u2014 {flow.describe}"]
     section: str | None = None
+    by_name = {v.name: v for v in verbs}
+    # The numbered step whose `describe` verb last minted a plan token, so the
+    # mark can name it. Updated AFTER the current step is rendered: a describe
+    # does not consume its own plan.
+    minted: int | None = None
     for i, step in enumerate(flow.steps):
         if step.section and step.section != section:
             lines.append(f"  ({step.section})")
         section = step.section
-        lines.append(f"  {i + 1}. `{step.verb}` \u2014 {step.hint}")
+        verb = by_name.get(step.verb)
+        marks: list[str] = []
+        if step.skip_when:
+            marks.append(f"OPTIONAL \u2014 skip it when {step.skip_when}")
+        if verb is not None and verb.consumes == "plan" and minted is not None:
+            marks.append(f"takes the `plan` token step {minted} returned")
+        mark = f" ({'; '.join(marks)})" if marks else ""
+        lines.append(f"  {i + 1}. `{step.verb}`{mark} \u2014 {step.hint}")
+        if verb is not None and verb.kind == "describe":
+            minted = i + 1
     return "\n".join(lines)
 
 
-def _flows_note(flows: Sequence[FlowSpec]) -> str:
+def _flows_note(flows: Sequence[FlowSpec], verbs: Sequence[VerbSpec] = ()) -> str:
     """The app's flows, rendered for the model.
 
     THE SENTENCE THAT MATTERS is the one saying there is no tool that runs a
@@ -438,7 +529,22 @@ def _flows_note(flows: Sequence[FlowSpec]) -> str:
         "one actually returned and can change course, which something running them for you "
         "could not. Take the steps in order, read what each verb reports before the next, and "
         "depart from the recipe when the screen says something it did not expect \u2014 then say so."
-        "\n\n" + "\n\n".join(_render_flow(f) for f in flows)
+        # The sentence about OPTIONAL steps is added only when some step
+        # actually is one. Everything in here rides in the cached prefix of
+        # every session of every user, and a paragraph about a construct the app
+        # does not use is the kind of cost that is real, paid once, and
+        # invisible -- which is the exact cost the size budgets exist to make
+        # somebody weigh. An app whose flows mark nothing optional gets the note
+        # it got before the field existed.
+        + (
+            " A step marked OPTIONAL may be skipped when the condition beside it holds, and "
+            "that condition is a sentence for you to judge, not a rule something checks: when "
+            "it is not clearly true, take the step."
+            if any(s.skip_when for f in flows for s in f.steps)
+            else ""
+        )
+        + "\n\n"
+        + "\n\n".join(_render_flow(f, verbs) for f in flows)
     )
 
 
@@ -503,7 +609,7 @@ def instructions_for(manifest: Manifest) -> str:
     if manifest.screens:
         parts.append(_screens_note(manifest.screens))
     if manifest.flows:
-        parts.append(_flows_note(manifest.flows))
+        parts.append(_flows_note(manifest.flows, manifest.verbs))
 
     # The app's own briefing, last. This is the field that closes the one gap
     # where driverkit's two paths disagreed: a widget could be handed

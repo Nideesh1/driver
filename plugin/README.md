@@ -16,6 +16,13 @@ Install from a checkout (nothing is published):
 /plugin install driverkit
 ```
 
+## The procedure the commands sit inside
+
+Adopting driverkit is six steps — install, draft the verb list, **have a human prune it**, import it once, write
+the `/api/chat` endpoint the in-page panel needs, and write a handful of eval cases and run them. They are written
+down once, in `INTEGRATING.md` at the repository root, and `/driverkit:draft-verbs` is **step 2 of the six**. It
+says so, and it names what remains when it finishes.
+
 ## Why these four
 
 The hard part of adopting driverkit is not starting a process, it is **writing the verb list**: deciding what

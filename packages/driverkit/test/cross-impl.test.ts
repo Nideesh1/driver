@@ -33,6 +33,8 @@ import type { Readable } from "node:stream";
 
 import { HttpEventSource, getJson, postJson } from "./sse-client.ts";
 import { TabAuth, anonPrincipalId, mintAnonCredential } from "../src/relay/index.ts";
+import { renderSnapshot } from "../src/agent/index.ts";
+import type { Snapshot } from "../src/core/index.ts";
 
 const ROOT = new URL("../../../", import.meta.url).pathname;
 
@@ -240,3 +242,93 @@ test("a token the TypeScript minter made is accepted by the Python relay", async
   );
   assert.equal(anonPrincipalId(visitor).startsWith("anon:"), true);
 });
+
+/**
+ * Snapshots covering every branch of the selection line, as wire JSON.
+ *
+ * Wire JSON and not `Snapshot` literals because the Python half has to parse
+ * them: `selectedCount` is the contract and `selected_count` is only how
+ * Python spells it, and a renderer branch that cannot be reached from the wire
+ * is a branch that looks covered and is not.
+ */
+const SELECTION_SCREENS: unknown[] = [
+  // The three states this file exists to keep in step.
+  { where: "contacts", rev: 1, selectedCount: 0, rows: [{ id: "c-1" }] },
+  { where: "contacts", rev: 1, selectedCount: 0, selected: [], rows: [{ id: "c-1" }] },
+  { where: "settings", rev: 1, rows: [{ id: "s-1" }] },
+  { where: "contacts", rev: 1, selected: [], rows: [{ id: "c-1" }] },
+  // And the non-empty wordings either side of them, so a change to the new
+  // branch that quietly moved an old sentence fails here too.
+  { where: "contacts", rev: 1, selected: ["c-1"], selectedCount: 1, rows: [{ id: "c-1" }] },
+  {
+    where: "contacts",
+    rev: 1,
+    selected: ["c-0", "c-1", "c-2"],
+    selectedCount: 10000,
+    rows: [{ id: "c-0" }],
+    page: { index: 0, size: 1, total: 10000 },
+  },
+  { where: "contacts", rev: 1, selectedCount: 1200, rows: [] },
+  { where: "d", screen: "dashboard", rev: 3, selectedCount: 0, note: "a note", rows: undefined },
+];
+
+test("both renderers say the same words about an empty selection, byte for byte", async (t) => {
+  // `render.ts` and `render.py` are kept string-for-string on purpose: the
+  // Python half renders for an MCP client driving the app from outside and the
+  // TS half for a chatbot inside the page, and a prompt that works through one
+  // and misbehaves through the other is a bug with no stack trace. Eyeballing
+  // the two files is how they drifted before; this runs both.
+  //
+  // The selection branches get their own crossing because they are the newest
+  // and the only ones where silence used to be the output: a half that stays
+  // quiet about an empty selection would pass every single-language test it
+  // has and still tell one of the two agents nothing.
+  const expected = SELECTION_SCREENS.map((s) => renderSnapshot(s as Snapshot)).join("\n--\n");
+
+  const script =
+    "import json,sys\n" +
+    // `python/src` comes in on argv rather than `PYTHONPATH` because `-I`
+    // below ignores the environment, which is most of the point of `-I`.
+    "sys.path.insert(0, sys.argv[1])\n" +
+    "from driverkit import render_snapshot\n" +
+    "from driverkit.types import Snapshot\n" +
+    "cases=json.load(sys.stdin)\n" +
+    'sys.stdout.write("\\n--\\n".join(render_snapshot(Snapshot.from_dict(c)) for c in cases))\n';
+
+  const rendered = await renderInPython(script, JSON.stringify(SELECTION_SCREENS));
+  if (rendered === null) {
+    t.skip("no python3 with driverkit importable from python/src");
+    return;
+  }
+  assert.equal(
+    rendered,
+    expected,
+    "render.py and render.ts have drifted: the same screen reads differently depending on how the agent connected",
+  );
+});
+
+/** Run a one-off script against `python/src`, or null if there is no usable
+ *  interpreter. Skipped and not failed, for the reason in this file's header:
+ *  the TypeScript suite must stay runnable with no Python on the machine. */
+function renderInPython(script: string, stdin: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      // `-I` so nothing is imported out of the current directory and no
+      // environment variable can redirect the import; the one path this is
+      // meant to read is handed to it explicitly.
+      child = spawn("python3", ["-I", "-c", script, `${ROOT}python/src`], {
+        cwd: ROOT,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch {
+      return resolve(null);
+    }
+    let out = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (text: string) => (out += text));
+    child.on("error", () => resolve(null));
+    child.on("exit", (code) => resolve(code === 0 ? out : null));
+    child.stdin.end(stdin);
+  });
+}

@@ -38,6 +38,7 @@ from .mcp_core import (
     TabTools,
     arg_schema,
     instructions_for,
+    pick_tab,
     render_tabs,
     tools_for,
     verb_tool,
@@ -54,6 +55,7 @@ __all__ = [
     "verb_tool",
     "tools_for",
     "render_tabs",
+    "pick_tab",
     "McpServer",
     "main",
 ]
@@ -213,7 +215,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tab",
         default=None,
-        help="tab id to drive. Omit it when exactly one tab is connected.",
+        help="tab id to drive. Omit it for the tab the person is looking at: with several "
+        "connected, the focused one is used, and if that is ambiguous this refuses and prints "
+        "the tabs rather than guessing.",
     )
     args = parser.parse_args(argv)
 
@@ -225,17 +229,30 @@ def main(argv: list[str] | None = None) -> int:
         except DriverkitError as err:
             print(f"driverkit: {err}", file=sys.stderr)
             return 1
-        if len(tabs) != 1:
-            # Guessing would mean driving somebody's other screen. The relay
-            # reports titles and urls precisely so a human can be asked which.
-            # Note the listing is already scoped to this token's principal, so
-            # "connected" here means "connected and yours".
+        # `pick_tab` holds the whole rule, including the cases where it declines
+        # to answer; see it for the four of them. Guessing here would mean
+        # driving somebody's other screen. Note the listing is already scoped
+        # to this token's principal, so "connected" here means "connected and
+        # yours".
+        chosen = pick_tab(tabs)
+        if chosen is None:
+            # ASKED, NOT GUESSED, and the listing is the question. A person who
+            # is told which tabs are open and which one they are looking at can
+            # answer in one line; a server that picked the first one gives them
+            # nothing to notice until a commit lands in the wrong window.
             print(
-                "driverkit: pass --tab. connected:\n" + render_tabs(tabs, ""),
+                "driverkit: cannot tell which tab you mean, so pass --tab. "
+                + (
+                    "More than one tab is focused or none of them reports focus"
+                    if tabs
+                    else "No tabs are connected"
+                )
+                + ". connected:\n"
+                + render_tabs(tabs, ""),
                 file=sys.stderr,
             )
             return 1
-        tab = tabs[0].id
+        tab = chosen.id
 
     McpServer(client, tab).serve()
     return 0

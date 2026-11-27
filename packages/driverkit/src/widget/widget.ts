@@ -383,6 +383,16 @@ const STOP_NOTE: Record<StopReason, string | null> = {
   // like a run that is still thinking.
   "max-steps": "Stopped: this took more steps than allowed. Ask again, more specifically.",
   stuck: "Stopped: the same call kept being refused, so going on would not have helped.",
+  // The one stop reason that is about the APP and not about the run, which is
+  // why it names the limit rather than suggesting the person rephrase. A panel
+  // that said "ask again, more specifically" here would be sending somebody to
+  // reword a request against an app that will refuse the next one too — and a
+  // panel that said nothing would be the silent mid-job stop that
+  // `MountOptions.budget` is written to avoid. The settings view shows the
+  // numbers; this says which thing happened.
+  "over-budget":
+    "Stopped: this app's limit on what one session may spend is reached. Asking again will " +
+    "not help — the limit is set by the app, not by the panel.",
   aborted: "Stopped.",
 };
 
@@ -745,6 +755,59 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
    * and the model would win, so the next answer would refer to a conversation
    * the person is looking at the absence of.
    */
+  /**
+   * What this session has spent, and against what ceiling — SHOWN, never
+   * offered.
+   *
+   * This row is the whole reason `Driver.budget` exists. `MountOptions.budget`
+   * is declared by whoever mounted the app and a viewer must not be able to
+   * raise their own ceiling, so this is the only thing in the settings view
+   * with no control beside it: everything above it is a comfort (speed, step
+   * mode, confirmations) and this is somebody else's money.
+   *
+   * It is here rather than in the header for the reason the ceiling exists at
+   * all. A run that stops mid-job and does not say why is read as a broken
+   * app, and `STOP_NOTE["over-budget"]` says which thing happened — but that
+   * only appears AFTER the ceiling is hit. This is where a person who is
+   * wondering whether they are close can look before they are.
+   *
+   * Absent when the app declared no ceiling. A row reading "no limit" would be
+   * one more thing to read in a view of four, and the counter is still on
+   * `Driver.budget` for anybody debugging.
+   */
+  const spend = driver.budget?.();
+  const budgetRow =
+    spend && (spend.calls.limit !== undefined || spend.commits.limit !== undefined)
+      ? setRow(
+          "This session's limit",
+          "Set by the app, not by this panel, so it cannot be changed from here. It counts " +
+            "steps for the whole time this page has been open and does not refill.",
+        )
+      : undefined;
+  const budgetText = budgetRow ? el("div", "dk-set-budget") : undefined;
+  if (budgetRow && budgetText) {
+    budgetRow.appendChild(budgetText);
+    settingsView.appendChild(budgetRow);
+  }
+
+  /** Repaint the spend numbers. Read on every open rather than subscribed to:
+   *  the numbers only matter while somebody is looking at them, and a listener
+   *  on every call would be work done for a view that is usually closed. */
+  const paintBudget = (): void => {
+    if (!budgetText) return;
+    const now = driver.budget?.();
+    if (!now) return;
+    const parts: string[] = [];
+    if (now.calls.limit !== undefined) {
+      parts.push(`${now.calls.used} of ${now.calls.limit} steps used`);
+    }
+    if (now.commits.limit !== undefined) {
+      parts.push(`${now.commits.used} of ${now.commits.limit} changes to data used`);
+    }
+    budgetText.textContent = parts.join(" · ");
+  };
+  paintBudget();
+
   const clearRow = setRow(
     "Clear conversation",
     "Throw away everything in this panel and start over. Nothing in the app changes and steps that already ran stay run. A run in flight is stopped, because a transcript the model still remembers and the panel does not is worse than no transcript.",
@@ -1494,6 +1557,9 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
 
   function setSettingsOpen(next: boolean): void {
     isSettings = next;
+    // Before the paint, so the numbers a person reads are the numbers as of the
+    // moment they opened the view and not as of whenever the panel was built.
+    if (next) paintBudget();
     gear.setAttribute("aria-expanded", next ? "true" : "false");
     paintWrap();
     // Focus follows, in both directions, and lands on the first thing worth

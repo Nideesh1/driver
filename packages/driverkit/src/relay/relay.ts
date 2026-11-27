@@ -74,6 +74,7 @@ import type {
   RelayRefusal,
   Scalar,
   Snapshot,
+  TabFocus,
   TabSummary,
   UpFrame,
   WatchFrame,
@@ -130,6 +131,85 @@ export interface RelayOptions {
   resolvePrincipal?: (headers: Record<string, string | string[] | undefined>) => string | undefined;
   /** Called with anything thrown while writing to a stream. Default: ignore. */
   onError?: (err: unknown) => void;
+  /**
+   * Where this relay's own audit records go. One per `/call` it handled; see
+   * `RelayAuditEvent`.
+   *
+   * WHY THE RELAY EMITS AT ALL, when `MountOptions.onAudit` already records
+   * every call that reaches a driver. Because of one fact the in-page hook
+   * cannot know and this one cannot help knowing: WHICH PRINCIPAL asked. The
+   * core sees a `call()` and has no idea whether it came from the panel in
+   * front of a person, a cron job, or somebody else's agent holding a token;
+   * the relay resolved the credential itself, so it is the only place in the
+   * library where "who" is a fact rather than a guess.
+   *
+   * AND WHY IT SAYS SO LITTLE. It does not report what the verb did. The
+   * driver decided that, in another process, and a copy of somebody else's
+   * decision is the second source of truth that can disagree with the first —
+   * a relay that logged `ok` for a call whose tab died mid-commit would be
+   * asserting an outcome nobody observed. So this records what the RELAY
+   * decided: that a call arrived, from whom, for which tab and verb, and
+   * whether it was delivered or stopped here. What happened to the data is in
+   * the driver's own record, where it was decided. The two are not two
+   * countings of one event; see `RelayAuditEvent.outcome`.
+   *
+   * Called and not awaited, like the core's hook, and a throw is passed to
+   * `onError` rather than allowed to fail the call: a relay that returned a
+   * 500 because its logging backend was down would turn an audit trail into
+   * an outage.
+   */
+  onAudit?: (event: RelayAuditEvent) => void;
+}
+
+/**
+ * One call this relay handled, and nothing about what the app did with it.
+ *
+ * The fields are the relay's own knowledge and stop there. `principal` is the
+ * one an in-page hook cannot have; `outcome` is the relay's own verdict and
+ * never the driver's.
+ *
+ * KEPT IDENTICAL IN THE PYTHON RELAY, field for field and name for name, by
+ * the same standing promise that governs the rest of these two files: there
+ * are two independent implementations of this protocol and a difference
+ * between them is a difference nobody finds until an operator switches.
+ */
+export interface RelayAuditEvent {
+  /** `Date.now()` when the call settled, in milliseconds since the epoch. */
+  at: number;
+  /** How long the relay held the call, in milliseconds: the round trip to the
+   *  tab, which on a gated commit includes the time a person spent deciding. */
+  ms: number;
+  /** Who asked, as the relay resolved them — a token's subject, a host's own
+   *  session id, or `LOCAL_PRINCIPAL` on an unconfigured loopback relay, where
+   *  everything is one principal and this field says so rather than implying
+   *  an identity nobody established. */
+  principal: string;
+  /** The tab the call was addressed to. Present even when no such tab was
+   *  found: an agent calling a tab id it does not own is the thing worth
+   *  having in a log. */
+  tab: string;
+  /** The verb, as asked for. Not checked against any manifest — the relay does
+   *  not hold one it trusts — so this is the agent's word for what it wanted. */
+  verb: string;
+  /**
+   * What the RELAY did with it, which is never what the app did.
+   *
+   *   `delivered`      the tab answered. What it answered is in the driver's
+   *                    own audit record, which is where it was decided; this
+   *                    relay deliberately does not copy it.
+   *   `no-such-tab`    no tab of this principal's by that id. Nothing ran.
+   *   `tab-went-away`  the stream was gone, or went while the call was in
+   *                    flight. The verb MAY have run; see `RelayRefusal`.
+   *   `timeout`        no answer inside the deadline. Outcome unknown.
+   *
+   * So `delivered` is the one value that means "ask the other log", and the
+   * other three are the cases where there is no other log to ask because the
+   * call never reached, or never returned from, a driver. That is the line
+   * that keeps the two records from being two countings of one call: COUNT
+   * COMMITS FROM THE DRIVER'S RECORDS, and read this one for who asked and for
+   * the calls that never arrived.
+   */
+  outcome: "delivered" | RelayRefusal;
 }
 
 export interface Relay {
@@ -204,7 +284,18 @@ const NO_SUCH_TAB_HINT = "no such tab is connected";
 const LOCAL: Principal = { id: LOCAL_PRINCIPAL };
 
 interface Pending {
-  settle: (r: WireResult) => void;
+  /**
+   * Answer the call, once, saying what the RELAY decided.
+   *
+   * The outcome is a required argument rather than something derived from `r`,
+   * and that is deliberate: a relay refusal is recognisable from a `WireResult`
+   * only by its missing `snapshot`, which is a type-level invariant that the
+   * wire can violate, and an audit record must not rest on one. Required also
+   * means the compiler finds every place a call can be settled -- there are
+   * five, two of them nowhere near the dispatch -- so a sixth added later
+   * cannot forget to say what it is.
+   */
+  settle: (r: WireResult, outcome: RelayAuditEvent["outcome"]) => void;
   timer: ReturnType<typeof setTimeout>;
 }
 
@@ -231,6 +322,9 @@ interface Tab {
   app?: string;
   title?: string;
   url?: string;
+  /** Where the tab said its person's attention is. Stored as the tab sent it
+   *  and never computed: the relay cannot see `document.hasFocus()`. */
+  focus?: TabFocus;
   manifest?: Manifest;
   snapshot?: Snapshot;
   /** ISO 8601. Formatted once, at connect, rather than on every list. */
@@ -247,6 +341,31 @@ export function createRelay(options: RelayOptions = {}): Relay {
   const auth = options.auth;
   const resolvePrincipal = options.resolvePrincipal;
   const onError = options.onError ?? (() => {});
+  const onAudit = options.onAudit;
+
+  /**
+   * Hand one record to the host, and survive the host.
+   *
+   * A throw goes to `onError`, which is where everything else this relay
+   * cannot help goes, rather than to the caller: a 500 because the logging
+   * backend is down would make an audit trail into an outage. Not awaited --
+   * nothing here is async, and a hook that wants to be is the host's business.
+   */
+  const audit = (
+    principal: string,
+    tab: string,
+    verb: string,
+    started: number,
+    outcome: RelayAuditEvent["outcome"],
+  ): void => {
+    if (onAudit === undefined) return;
+    const at = Date.now();
+    try {
+      onAudit({ at, ms: at - started, principal, tab, verb, outcome });
+    } catch (err) {
+      onError(err);
+    }
+  };
 
   if (allowRemote && !auth && !resolvePrincipal) {
     // Thrown at construction, before a socket exists, for the same reason
@@ -403,7 +522,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
       // context to try something else.
       for (const [, p] of tab.pending) {
         clearTimeout(p.timer);
-        p.settle(relayRefusal("tab-went-away", `tab \`${tabId}\` closed its stream`));
+        p.settle(relayRefusal("tab-went-away", `tab \`${tabId}\` closed its stream`), "tab-went-away");
       }
       tab.pending.clear();
     };
@@ -445,6 +564,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
         if (frame.app !== undefined) tab.app = frame.app;
         if (frame.title !== undefined) tab.title = frame.title;
         if (frame.url !== undefined) tab.url = frame.url;
+        if (frame.focus !== undefined) tab.focus = frame.focus;
         if (frame.manifest !== undefined) tab.manifest = frame.manifest;
         if (frame.snapshot !== undefined) {
           tab.snapshot = frame.snapshot;
@@ -454,6 +574,15 @@ export function createRelay(options: RelayOptions = {}): Relay {
       }
       case "snapshot": {
         tab.snapshot = frame.snapshot;
+        // The same upsert rule `hello` uses, on the two fields a push may now
+        // carry. `url` is here because it had no other way of ever being
+        // right: it came from `hello` alone, and a single-page app navigates
+        // without reconnecting, so a tab's url in `/dk/tabs` was whatever it
+        // had been at page load. Absent leaves the stored value alone, which
+        // is what keeps a tab connected by a hand-written loop -- or by a
+        // driverkit older than this field -- reading exactly as it did.
+        if (frame.url !== undefined) tab.url = frame.url;
+        if (frame.focus !== undefined) tab.focus = frame.focus;
         // Always forwarded, even at an unchanged rev. This frame is the tab
         // SAYING the page moved, and second-guessing it here would make the
         // relay the thing that decides what counts as a change -- which is the
@@ -497,7 +626,9 @@ export function createRelay(options: RelayOptions = {}): Relay {
           // `rev`, so a refusal that moved nothing stays quiet.
           push(tab);
         }
-        pending.settle(frame.result);
+        // `delivered`, and nothing more. The tab answered; what it answered is
+        // the driver's own record to make, in the process where it was decided.
+        pending.settle(frame.result, "delivered");
         return { ok: true };
       }
     }
@@ -514,6 +645,10 @@ export function createRelay(options: RelayOptions = {}): Relay {
     // for a `bad-request` slug that the closed set does not contain.
     if (typeof body.name !== "string" || !body.name) return null;
 
+    // Before the lookup, so `ms` is the time the agent actually waited and not
+    // the time minus whatever the registry cost.
+    const started = Date.now();
+
     const tab = owned(who, tabId);
     if (!tab) {
       // Shaped like every other answer. An agent holding a tab id from a
@@ -524,6 +659,11 @@ export function createRelay(options: RelayOptions = {}): Relay {
       // refusal an agent reads as "that window is gone", identical in status,
       // slug and hint to one for an id that was never minted. A 403 here would
       // turn /call into a membership test for other people's tab ids.
+      // Recorded, and this is the half of the trail the driver cannot have:
+      // nothing reached a tab, so no `onAudit` anywhere else in the library
+      // will ever hear about this call. An agent working through tab ids it
+      // does not own leaves its marks only here.
+      audit(who.id, tabId, body.name, started, "no-such-tab");
       return Promise.resolve(
         relayRefusal("no-such-tab", `${NO_SUCH_TAB_HINT}; GET /dk/tabs to list them`),
       );
@@ -557,9 +697,14 @@ export function createRelay(options: RelayOptions = {}): Relay {
 
     return new Promise<WireResult>((resolve) => {
       let done = false;
-      const settle = (r: WireResult) => {
+      const settle = (r: WireResult, outcome: RelayAuditEvent["outcome"]) => {
         if (done) return;
         done = true;
+        // ONE record per call, from the one place a call can be answered. The
+        // `done` guard above is what makes it one: the deadline and a late
+        // `result` frame race, and the loser must not log a second outcome for
+        // a call that has already been answered.
+        audit(who.id, tabId, frame.name, started, outcome);
         resolve(r);
       };
       const timer = setTimeout(() => {
@@ -571,6 +716,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
         // every client ends up inventing a different guess.
         settle(
           relayRefusal("timeout", `tab \`${tabId}\` did not answer \`${frame.name}\` within ${timeoutMs}ms`),
+          "timeout",
         );
       }, timeoutMs);
       timer.unref?.();
@@ -579,7 +725,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
       if (!send(tab, frame)) {
         tab.pending.delete(id);
         clearTimeout(timer);
-        settle(relayRefusal("tab-went-away", `writing to tab \`${tabId}\` failed`));
+        settle(relayRefusal("tab-went-away", `writing to tab \`${tabId}\` failed`), "tab-went-away");
       }
     });
   }
@@ -827,6 +973,11 @@ export function createRelay(options: RelayOptions = {}): Relay {
       ...(t.app === undefined ? {} : { app: t.app }),
       ...(t.title === undefined ? {} : { title: t.title }),
       ...(t.url === undefined ? {} : { url: t.url }),
+      // Forwarded exactly as the tab said it, including not at all. Absence is
+      // "the tab did not say", which a client must not read as "not the one";
+      // see `TabFocus`. The relay has no opinion here and originates no value,
+      // for the same reason it does not interpret `rev`.
+      ...(t.focus === undefined ? {} : { focus: t.focus }),
       // The version, not the manifest. Listing tabs is the cheap call an agent
       // makes often; inlining every manifest would make it the expensive one.
       ...(t.manifest === undefined ? {} : { manifestVersion: t.manifest.version }),
@@ -940,7 +1091,7 @@ export function createRelay(options: RelayOptions = {}): Relay {
         clearInterval(tab.ping);
         for (const [, p] of tab.pending) {
           clearTimeout(p.timer);
-          p.settle(relayRefusal("tab-went-away", "the relay is shutting down"));
+          p.settle(relayRefusal("tab-went-away", "the relay is shutting down"), "tab-went-away");
         }
         tab.pending.clear();
         try {

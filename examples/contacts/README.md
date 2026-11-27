@@ -33,6 +33,17 @@ Nothing calls the flow and there is no tool for it, which is the point —
 `select-pending-here` reports a number and what to do about a number that is
 not what the person asked for is a judgement, not a branch.
 
+Only three of the five steps are the job. The first two carry a `skipWhen` —
+"the person already named the company" — because they exist for the case where
+you do not already know which company it is, and a flat list of steps could not
+say that: the condition used to be a clause in the middle of step one's hint.
+It is a sentence rather than an expression on purpose. Whether the person named
+the company is a fact about what was asked, and no predicate over this app's
+state could evaluate it; the condition that genuinely has to be enforced here —
+do not accept a count nobody read — is `consumes: "plan"` on `accept-selected`,
+where the core refuses the commit instead of trusting the recipe. The rendered
+recipe says which step the token comes from, derived from the verbs.
+
 ## Run it
 
 ```sh

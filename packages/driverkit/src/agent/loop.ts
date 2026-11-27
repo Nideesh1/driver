@@ -84,6 +84,18 @@ import type {
  */
 export const DECLINED = "declined-by-user";
 
+/**
+ * The core's cost-ceiling slug, spelled here because this file has to
+ * recognise it. The same arrangement as `DECLINED` above: the string is
+ * PROTOCOL.md's rather than either file's, and the core exports the whole
+ * reserved list rather than a constant per slug.
+ *
+ * Recognised and never emitted. The loop cannot run out of somebody else's
+ * budget on its own — only `call()` can say this — so a match here is always
+ * the driver talking.
+ */
+const BUDGET_SPENT = "budget-spent";
+
 const DECLINED_HINT =
   "The person was asked to confirm this and declined. Do not retry it, and do not try " +
   "another verb that does the same thing. Tell them what you were about to do and ask " +
@@ -238,7 +250,7 @@ export function pruneScreens(messages: Turn[]): Turn[] {
  *   onBeforeCommit: ({ verb, snapshot }) =>
  *     confirm(`${verb.describe}\n\n${snapshot.selected?.length ?? 0} selected. Go ahead?`),
  * });
- * out.stop; // "answered" | "max-steps" | "aborted" | "stuck" | "silent"
+ * out.stop; // "answered" | "max-steps" | "aborted" | "stuck" | "over-budget" | "silent"
  * ```
  */
 export async function drive(driver: Driver, options: DriveOptions): Promise<DriveOutcome> {
@@ -420,6 +432,9 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
 
     let stuck = false;
     let aborted = false;
+    /** Set by the first `budget-spent`. Separate from `stuck` because the two
+     *  say different things to the person watching; see `StopReason`. */
+    let spent = false;
     /** Calls the loop decided not to run. Each one still owes the model a
      *  result; see `abandoned`. */
     let unrun: ToolCall[] = [];
@@ -511,7 +526,22 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
       // first thing cut if it were appended after the screen.
       let body = outcome.head;
 
-      if (outcome.result && !outcome.result.ok) {
+      if (outcome.result && !outcome.result.ok && outcome.result.refused === BUDGET_SPENT) {
+        // Before the refusal counter and not through it. `refusalLimit` exists
+        // to notice a model repeating a mistake, and this is not a mistake the
+        // model made or can fix — the ceiling was set by whoever mounted the
+        // app. Letting it accumulate would spend two more model round trips to
+        // reach a conclusion the first refusal already stated, and spend them
+        // against the budget that has just run out.
+        //
+        // The app's own hint is already in the tool turn, which matters for a
+        // caller who resumes this conversation later: the transcript says which
+        // ceiling and that it does not refill.
+        body +=
+          `\n\n(stopped: this app's spend ceiling is reached. It does not refill, and no ` +
+          `other verb will run either. Say what got through and what is left.)`;
+        spent = true;
+      } else if (outcome.result && !outcome.result.ok) {
         const key = `${call.name}:${outcome.result.refused}`;
         const seen = (refusals.get(key) ?? 0) + 1;
         refusals.set(key, seen);
@@ -529,7 +559,7 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
       }
 
       messages.push({ role: "tool", callId: call.id, name: call.name, text: screened(body) });
-      if (stuck) {
+      if (stuck || spent) {
         unrun = calls.slice(i + 1);
         break;
       }
@@ -542,6 +572,13 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
 
     if (aborted) {
       stop = "aborted";
+      break;
+    }
+    // Before `stuck`, which it cannot be at the same time -- the two are set in
+    // exclusive branches -- and first anyway, because a budget is the wider
+    // fact: `stuck` is about one verb and this is about the whole app.
+    if (spent) {
+      stop = "over-budget";
       break;
     }
     if (stuck) {

@@ -103,6 +103,39 @@ export function renderSnapshot(snapshot: Snapshot): string {
           ? `the ${selected.length} ids above are only the ones on screen`
           : "none of them are on screen"),
     );
+  } else if (selected.length === 0) {
+    // An absent value reads as a claim — the same defect already fixed on
+    // `page` and on `rows`, in the one remaining place it was still live.
+    //
+    // This block used to be nothing at all: the selection was described only
+    // when it was non-empty, so a screen with nothing selected said NOTHING
+    // about selections, and silence cannot be told from "this screen does not
+    // report selections". The library's own rule is that a commit is never
+    // made on a count nobody read, so a model asked to accept the selection
+    // here obeyed the rule against a screen that told it nothing — and went
+    // navigating other screens hunting for the number. Observed in an eval
+    // run, not imagined.
+    //
+    //   selectedCount: 0            the app counts, and the answer is none
+    //   count absent, selected []   the app says which ids on screen are
+    //                               selected and none are, but does not count,
+    //                               so a row off screen may still be selected
+    //   both absent                 the app does not report selections at all
+    //
+    // Three sentences because they are three different facts, and the whole
+    // bug was one of them being rendered as another. The middle one is the
+    // weakest claim and the one nobody thinks about; conflating it with the
+    // first would say "nothing is selected" on the strength of a window.
+    if (snapshot.selectedCount === 0) {
+      lines.push("selected: none (0 rows; this screen counts the selection)");
+    } else if (snapshot.selected === undefined) {
+      lines.push("(this screen reports no selection)");
+    } else {
+      lines.push(
+        "selected: none on screen; this screen does not count the selection, so rows off " +
+          "screen may be selected",
+      );
+    }
   }
 
   if (snapshot.note) lines.push(`note: ${snapshot.note}`);

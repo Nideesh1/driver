@@ -31,6 +31,37 @@ export interface ArgSpec {
   oneOf?: Scalar[];
   /** Absent means required. */
   optional?: boolean;
+  /**
+   * `true` when this argument's VALUE must never appear in an audit record.
+   *
+   * The one half of redaction the library cannot work out for itself. An
+   * argument is whatever the app declared — a row id, a filter, a company
+   * name, and on some app somewhere an API key or a one-time code — and only
+   * the author who typed the `describe` knows which. A library that guessed
+   * would guess by name, which is how `token` gets redacted and
+   * `otp_material` does not.
+   *
+   * So the app declares it and the CORE does the replacing, before the hook
+   * is called: `AuditEvent.args` carries `"[redacted]"` in this field's place
+   * and `AuditEvent.redacted` names the field, so a reader cannot mistake the
+   * marker for a string the agent actually sent. The alternative — hand the
+   * hook everything and let the host strip it — puts the secret on the far
+   * side of the one boundary where a record is most likely to leave the box,
+   * and makes the DANGEROUS case the one you get by doing the obvious thing.
+   * A host that wires `onAudit` straight to its tracer should not thereby
+   * ship a key to a vendor.
+   *
+   * It changes nothing else. The value reaches `run` untouched — this is a
+   * statement about the record, not about the call — and nothing renders it
+   * to the model.
+   *
+   * It IS in the manifest, and so in `fingerprint()`, like the rest of an
+   * `ArgSpec`. That is consistent rather than a leak: it is static, it is the
+   * same bytes for every user forever, and it carries no value — only the
+   * claim that this field has one worth hiding. An app that declares none
+   * hashes exactly what it hashed before this field existed.
+   */
+  sensitive?: true;
 }
 
 /**
@@ -782,7 +813,125 @@ export interface FlowStep {
    *  "check the numbers". From #340's shape. Several consecutive steps may
    *  share one. */
   section?: string;
+  /**
+   * When this step may be skipped, in one line: "the person already named the
+   * company". Present means the step is NOT load-bearing; absent means take it.
+   *
+   * THE GAP THIS CLOSES. A flow was a flat list in which every step read as
+   * required, so a recipe with an optional first step had nowhere to say so and
+   * the condition went into the `hint` — the worked example's own step one said
+   * "If the person named the company, you can skip straight to `open-company`"
+   * in the middle of a sentence about what `goto` is for. A reader cannot tell
+   * from the structure which steps carry the job and which are there for the
+   * case where you do not already know the answer, and neither can a model
+   * skimming five of them.
+   *
+   * **IT IS A SENTENCE AND NOT AN EXPRESSION, AND THAT IS THE DESIGN.** The
+   * obvious thing to put here is a machine-readable predicate — Arazzo has
+   * `successCriteria`, VS Code has `when` clauses, and a `{ fact: "count", gt:
+   * 500 }` would look like the same move. It is not, because **nothing in this
+   * library evaluates a flow.** A flow is read and followed by the model (see
+   * `FlowSpec`), so the only evaluator a predicate could ever have is the
+   * reader it is written for, and a predicate read by a model is a sentence
+   * with brackets round it: all of the precision is in the notation and none of
+   * it is in the enforcement. That is worse than prose rather than better,
+   * because a condition that LOOKS checkable gets trusted like one. A string
+   * admits in its own type that this is a judgement call.
+   *
+   * WHERE THE CONDITIONS THAT MUST BE ENFORCED ACTUALLY LIVE, because "if the
+   * count is over 500, ask first" is the example everybody reaches for and it
+   * is already expressible in the one place where the core and not the model
+   * holds the gate:
+   *
+   *     approve: (req) => (req.snapshot.selectedCount ?? 0) > 500
+   *       ? askTheHuman(req)
+   *       : true
+   *
+   * `ApprovalHook` runs at the moment of the commit, on the snapshot the core
+   * read itself, and a model cannot route around it. `Verb.consumes` is the
+   * same shape of answer for "do not commit a count you have not read". A
+   * threshold written HERE instead would be a second, weaker copy of a gate the
+   * library already enforces, and the copy is the one the model can misread.
+   * So: conditions that decide whether DATA MOVES go in `approve`; conditions
+   * that decide WHICH STEPS YOU TAKE go here, in words.
+   *
+   * One line, at most `SIZE_LIMITS.describe` characters, no newline, and it
+   * counts against the flow's `SIZE_LIMITS.body` budget like a `hint` does —
+   * it is rendered into the same cached prefix. An empty string is refused at
+   * `mount()`: a step that is skippable for no stated reason is a step the
+   * author has not decided about, and "optional" with no condition tells a
+   * model it may drop a step whenever it likes.
+   *
+   * In `fingerprint()` with the rest of the flow, for the reason the steps are:
+   * a step that has become optional is a different recipe, and an agent holding
+   * the old cached copy is working from the version where it was required.
+   */
+  skipWhen?: string;
 }
+
+/**
+ * WHY THERE IS NO ITERATION CONSTRUCT, since "do this for every company" is
+ * the second thing anybody tries to write down here.
+ *
+ * It was considered and refused, and not on grounds of effort: a `forEach` over
+ * a step list is small. It is refused because it is **against the grain of the
+ * one safety mechanism this library actually enforces.** "For every company,
+ * accept its pending contacts" is N commits. The whole `describe` → read the
+ * `count` → `commit` apparatus, and the plan token that binds the second to the
+ * first, exists to make ONE commit over many rows safe *instead of* many
+ * commits over few — one count a person can check, one approval that names a
+ * real number, one receipt. A declared loop would be the library's own manifest
+ * teaching an agent to do the thing the plan token was built to stop: N
+ * approvals that each look small, with nobody ever shown the total.
+ *
+ * And it is unnecessary in the case it is wanted for, because `Verb` already
+ * answers it one level down: a verb that operates on many rows **takes a
+ * predicate and resolves it inside the app**, where the rows already are. The
+ * app that needs "every pending contact everywhere" declares
+ * `select-where(status: "pending")` and gets one count and one commit; the
+ * worked example has exactly that verb beside its per-company one. If an app
+ * cannot express the job as a predicate, the loop is a judgement call about
+ * data the agent has to look at between iterations — which is the argument in
+ * `FlowSpec` for why nothing executes a flow, applied to the one construct that
+ * would need to.
+ *
+ * So the honest form of "do this for every company" is a flow whose `describe`
+ * says the job is per-company and whose steps are the one company's, plus the
+ * agent repeating it and being gated each time. That repetition is not a gap
+ * the notation should close. It is N approvals because it is N commits.
+ *
+ * WHY THERE IS NO `from: "step2.slug"` EITHER — no reference from one step to
+ * an earlier step's output. It would require a named output to refer to:
+ * `Verb.returns` or similar, since a verb's body returns `void | Refusal |
+ * Report` and the only named things in a `Report` are a `count` and a `note`.
+ * A half-wired reference — a `from` the model has to guess the meaning of
+ * because no verb declares what it hands back — is the worst of the available
+ * outcomes, so the choice was properly or not at all, and it is not at all:
+ *
+ *   - Carrying a value between steps means the AGENT holds it, and `Verb` is
+ *     written against exactly that: "the agent should never learn an id it did
+ *     not need". The steps of the worked example's own flow pass nothing —
+ *     `open-company` moves the screen, `select-pending-here` needs no slug
+ *     because it means *this* company, `accept-selected` needs no ids because
+ *     it means *this* selection. The app holds the state between steps. That is
+ *     not a missing feature of the flow notation; it is where this library
+ *     decided state lives, and a `from` field would be the first thing to
+ *     argue the other way.
+ *
+ *   - The ONE value that genuinely has to cross two steps is the plan token,
+ *     and it is already declared — per verb, in the cached half, as
+ *     `Verb.consumes` — and already *enforced* by the core rather than
+ *     interpreted by the reader. A second declaration of it on the step would
+ *     be a weaker copy of a check that works.
+ *
+ * What a flow now does about that one dependency is the little that can be done
+ * honestly: `mount()` refuses a flow whose plan-consuming step has no earlier
+ * `describe` step to mint the token (a recipe that cannot be followed, found at
+ * startup instead of at the commit), and the renderer prints which step the
+ * token comes from. Both are derived from what the verbs already declare. No
+ * new field, nothing for an author to keep in step, and nothing claimed that
+ * the core does not check.
+ */
 
 /**
  * A declared, static, READABLE recipe: the level above a single verb.
@@ -844,6 +993,16 @@ export interface FlowSpec {
    * a verb nobody implemented is a dead end whose only symptom is an agent
    * halfway through a job getting `unknown-verb`, after the navigation and
    * before the commit, which is the worst place to find out.
+   *
+   * The same argument gets a second check: a step whose verb declares
+   * `consumes: "plan"` must have an earlier step whose verb is a `describe`,
+   * because the token can only come from one of those. A flow that commits
+   * without counting first is a recipe whose only possible ending is
+   * `stale-plan` — the same dead end, found at the same worst moment — and the
+   * core can see it statically, from what the verbs already declare, so it says
+   * so at `mount()` instead. Nothing new is written down for this: it is the
+   * one piece of data flow between steps that exists, and it is declared on the
+   * verb. See the note under `FlowStep` for why there is no other.
    */
   steps: FlowStep[];
 }
@@ -940,6 +1099,34 @@ export interface Manifest {
 }
 
 /**
+ * Where a tab stands in the person's attention, as the page itself reports it.
+ *
+ * Three states and not a boolean, because the honest answer has three cases
+ * and a boolean would have to lie about one of them:
+ *
+ *   `"focused"`  the active tab of the frontmost window. The person is looking
+ *                at THIS. `document.visibilityState === "visible"` AND
+ *                `document.hasFocus()`.
+ *   `"visible"`  the active tab of its window, but the window is not frontmost
+ *                — the person is in another application. Visible, not looked
+ *                at. This is the state a two-state field would have had to
+ *                call either "focused" (and send an agent to a window nobody
+ *                is in front of) or "hidden" (and lose the only honest answer
+ *                to "which one was I last in?").
+ *   `"hidden"`   a background tab, or a minimised window.
+ *
+ * It is reported by the page and never inferred by a relay: the only process
+ * that can see `document.hasFocus()` is the document. A relay carries the
+ * string and has no opinion about it, exactly as it carries `rev`.
+ *
+ * ABSENT IS UNKNOWN, NOT HIDDEN. A tab driven by a hand-written `fetch` loop,
+ * or a page that passed `focus: false` to `connect()`, reports nothing — and a
+ * client that read absence as "not the one" would quietly stop being able to
+ * drive it at all.
+ */
+export type TabFocus = "focused" | "visible" | "hidden";
+
+/**
  * One row of `GET /dk/tabs`.
  *
  * Declared here rather than left in the protocol document because this is the
@@ -960,6 +1147,15 @@ export interface TabInfo {
   url?: string;
   manifestVersion?: string;
   rev?: number;
+  /**
+   * Where the person's attention is, as the page itself last reported it.
+   *
+   * The field that answers "the one I am looking at" — which is what a person
+   * means when they say which tab, and the one thing `--tab <id>` could never
+   * express. See `TabFocus` for the three states, and PROTOCOL.md for the rule
+   * a client applies when more than one tab is a candidate.
+   */
+  focus?: TabFocus;
   /** ISO 8601. A string on purpose: nothing computes with it, and parsing it
    *  would invent a failure mode for a field only ever shown to a person. */
   since?: string;
@@ -1056,6 +1252,298 @@ export interface DriverApproval {
    * the lock before it runs `run`.
    */
   hold: <T>(verb: string, ask: () => Promise<T>) => Promise<T>;
+}
+
+/**
+ * One thing an agent did to this app, as it happened.
+ *
+ * WHY THIS EXISTS. The library commits data on a person's behalf — the whole
+ * design is about making a 3,412-row bulk accept safe — and until this it kept
+ * no record that it happened. Who approved it, which plan token, what count,
+ * at what `rev`, on which screen: "what did the agent do yesterday?" had no
+ * answer. RPA tools have had an audit log for twenty years.
+ *
+ * WHY A HOOK AND NOT A SINK. The host already has somewhere for this to go:
+ * one adopter runs OpenTelemetry, the next has Datadog, the next a table in
+ * their own database. A library that picks your logging backend is a library
+ * you fight, so this one emits a structured record and owns nothing else.
+ * `driverkit/otel` is one such sink, kept behind its own entry point that
+ * nothing in here imports.
+ *
+ * AND WHY THE SINK CANNOT BE THE RELAY OR THE PYTHON PACKAGE. The in-page
+ * widget — the case most likely to commit data, because somebody is sitting
+ * there — has no relay and no Python in it at all. An audit trail that only
+ * existed for the relay case would be worse than none, because it would look
+ * complete.
+ *
+ * WHERE IT IS EMITTED FROM, which is the property that makes it worth
+ * trusting: the record is built from the `Result` that `call()` is about to
+ * return, in the same place that `Result` is decided, and every field it
+ * carries beyond the result was written down by the step that decided it — the
+ * approval answer by the gate, the plan by the mint and the burn. Nothing here
+ * is reconstructed by a second reading of the app, because a log that can
+ * disagree with the `Result` is worse than no log.
+ *
+ * ONE EVENT PER `call()`, whichever path the call came in on — the in-page
+ * loop, a relay frame, a test with no transport — including the calls that
+ * never reached a verb at all. A refused call is the most interesting line in
+ * an audit trail: `declined-by-user` is a person saying no, `stale-plan` is an
+ * agent trying to spend a receipt for a count that moved, and a log that only
+ * recorded successes would have nothing to say about either.
+ */
+export interface AuditEvent {
+  /** `Date.now()` when the call settled. Milliseconds since the epoch, not an
+   *  ISO string: a host formats it its own way, and a number cannot be
+   *  mistaken for a timezone-bearing claim this library is not making. */
+  at: number;
+  /** How long the call took, in milliseconds, approval included. The gap
+   *  between a question being asked and a person answering it is the part of a
+   *  bulk commit a reader most often wants back. */
+  ms: number;
+  /** `MountOptions.app`. Two drivers can be mounted on one page — a widget and
+   *  an embedded view — and an unattributed record is one you cannot act on. */
+  app: string;
+  /** The verb. `goto` is the core's own and appears here like any other. */
+  verb: string;
+  /** As DECLARED. Absent means the app made no safety claim about this verb,
+   *  which is a fact worth keeping in the record rather than defaulting away:
+   *  an auditor asking "what commits ran" must be able to see that some verbs
+   *  never said. */
+  kind?: VerbKind;
+  /** As declared. Absent makes no claim; see `Verb.reversible`. */
+  reversible?: true;
+  /**
+   * The arguments AS SENT, with one exception, named by `redacted`.
+   *
+   * As sent, not as validated: an argument of the wrong type, or one the verb
+   * never declared, is exactly what an audit reader is looking for when a call
+   * went wrong. The core does not strip undeclared arguments from the record
+   * for the same reason it does not strip them from the call.
+   */
+  args: Record<string, Scalar>;
+  /** The argument names whose values were replaced with `REDACTED`, because
+   *  the verb declared them `ArgSpec.sensitive`. Present only when something
+   *  was replaced, so the absence of this field means the `args` above are
+   *  the whole truth. */
+  redacted?: string[];
+  /** `Snapshot.screen` the call ran against, read once, before the verb. */
+  screen?: string;
+  /** `Snapshot.rev` the call ran against. With `screen`, this is what the
+   *  record needs to be re-readable later: "3,412 rows at rev 180 of the
+   *  contacts screen" is a claim somebody can go and check. */
+  rev: number;
+  /** What the agent CLAIMED it was acting on, when it claimed anything. Kept
+   *  beside the two above rather than folded into them, because the difference
+   *  between them is the whole of a `stale` or a `wrong-screen`, and a record
+   *  that kept only one side could not show why the call was refused. */
+  claimed?: { rev?: number; screen?: string };
+  /** `Result.ok`. */
+  ok: boolean;
+  /** The refusal slug, present exactly when `ok` is false. The app's own slug
+   *  or a reserved one; see `RESERVED_REFUSALS`. */
+  refused?: string;
+  /** `Result.count` — what a `describe` reported it matched. The number a
+   *  person approves, and the reason this field is in the record. */
+  count?: number;
+  /** The plan token this call PRESENTED, when the verb consumes one. Recorded
+   *  whether or not it was accepted: a rejected token is how you find the
+   *  agent that tried to spend a stale receipt. */
+  plan?: string;
+  /** The plan token this call MINTED, on a `describe` that counted. The join
+   *  key for the two halves of a gated bulk commit: the event that carries
+   *  this one as `minted` reported the count, and the event that carries it as
+   *  `plan` is the commit that spent it. That pair is the answer to "who
+   *  approved 3,412 rows, and was 3,412 the number that moved". */
+  minted?: string;
+  /**
+   * How the approval question was answered.
+   *
+   *   `allowed`    a hook said yes.
+   *   `declined`   a hook said no — a person deciding.
+   *   `timed-out`  nobody answered. The verb did not run.
+   *   `not-asked`  nobody was asked, and `policy` says why.
+   *
+   * Four values, not three, because "declined" and "never asked" are the two
+   * an auditor must never confuse: one is a person refusing and one is a gate
+   * that was not there.
+   */
+  approval: "allowed" | "declined" | "timed-out" | "not-asked";
+  /** What the app declared at `mount()`. It is what turns a `not-asked` from a
+   *  silence into a sentence: `unattended` is an app saying out loud that
+   *  commits here run with nobody in front of them, and `none` is an app that
+   *  never said. */
+  policy: DriverApproval["policy"];
+}
+
+/**
+ * Where the records go. See `MountOptions.onAudit`.
+ *
+ * Returns nothing. A promise is tolerated and is NOT awaited; see the hook's
+ * own documentation for why this one differs from `ApprovalHook`, which is.
+ */
+export type AuditHook = (event: AuditEvent) => void | Promise<void>;
+
+/**
+ * What one driver tells the other drivers of the same app when a commit lands.
+ *
+ * The whole payload, and it is deliberately two strings of the core's OWN
+ * making. `verb` is a name out of this driver's verb table and `from` is the
+ * driver's own identity; neither is app data, neither is a row, neither is a
+ * count. A notice that carried the new rows would be a cross-tab replication
+ * protocol, which is the app's problem and not a library's — and it would be a
+ * leak besides, since the two tabs may not be showing the same person's data
+ * if the app got that wrong.
+ *
+ * It says "something changed, and it was not your copy that changed it". That
+ * is the only fact a sibling tab cannot work out for itself, and it is enough
+ * to stop that tab claiming freshness it has not got.
+ */
+export interface ElsewhereNotice {
+  /** The `commit` verb that ran. Named so a refusal can say what happened
+   *  rather than "something changed somewhere", which an agent cannot act on. */
+  verb: string;
+  /** The driver that sent it. A driver ignores its own notices; without this
+   *  a `BroadcastChannel` that echoed to the sender would make every commit
+   *  poison the tab that made it. Opaque, and minted per `mount()`. */
+  from: string;
+}
+
+/**
+ * How the drivers of one app in different tabs hear about each other's commits.
+ *
+ * THE HOLE THIS EXISTS TO CLOSE. `Snapshot.rev` is the app's claim that its
+ * data has not moved, and it is bumped by the app's own mutation path. Two
+ * tabs of the same app over one backend: an agent commits in tab A, tab B's
+ * data has changed, and B's `rev` has not moved, because B's store never heard.
+ * So B's snapshot reports stale rows as current, a `stale` check against B's
+ * `rev` PASSES, and a plan token minted in B still verifies — the whole
+ * staleness machinery passing in exactly the situation it exists to catch.
+ *
+ * Nothing inside tab B can see that. Every value a check could be built from —
+ * `rev`, `selectionId`, a count, a hash of the rows — comes out of `visible()`,
+ * which reads B's own store, and B's own store is the thing that is wrong. The
+ * fact has to arrive from outside, and the core's own commit is the only thing
+ * that knows it.
+ *
+ * SO THIS IS A TRANSPORT AND NOT A POLICY. Two functions, no server, no
+ * authority. `driverkit/browser` ships `broadcastElsewhere()`, a
+ * `BroadcastChannel` implementation that works same-origin with no relay at all
+ * — which matters, because an app driven only by its own in-page panel has no
+ * relay to route anything through. An app that already has a websocket or a
+ * service worker implements the same two functions over it and gets the same
+ * check. The relay deliberately does NOT do this: it grants no authority and
+ * knows nothing about verbs, and a relay that read `kind` out of a manifest to
+ * decide what to announce would be a second place that decides what a commit
+ * is.
+ *
+ * WHAT IT BUYS, STATED HONESTLY. It does not make tab B's data correct — only
+ * the app refetching does that, and an app that listens on this channel itself
+ * and refetches is the real fix. What it buys is that B stops lying in the
+ * window before that happens: a `commit` in B is refused `changed-elsewhere`,
+ * and every snapshot B hands back says so in words. See `MountOptions.elsewhere`.
+ */
+export interface ElsewhereChannel {
+  /**
+   * Broadcast a notice. Called by the core after a `commit` verb's body runs.
+   *
+   * Must not throw usefully — the core catches and warns, because a failed
+   * broadcast is not a reason to turn a commit that already happened into an
+   * error.
+   */
+  post: (notice: ElsewhereNotice) => void;
+  /**
+   * Subscribe. Called once at `mount()`.
+   *
+   * The returned function, if there is one, is called at `unmount()`. Returning
+   * nothing is allowed so that a three-line channel in a test need not invent
+   * one.
+   */
+  listen: (heard: (notice: ElsewhereNotice) => void) => (() => void) | void;
+}
+
+/**
+ * A hard ceiling on what one mounted driver will ever spend.
+ *
+ * `DriveOptions.maxSteps` bounds ONE run. Nothing bounded runs. An agent in a
+ * loop re-enters `drive()` with a fresh `maxSteps` every time, and a widget
+ * somebody leaves open in a tab over a long weekend has no bound at all — so
+ * the app's API and somebody's token budget were both unprotected by
+ * construction, not by oversight.
+ *
+ * WHY THIS IS IN `mount()` AND NOT IN THE WIDGET'S SETTINGS. The settings view
+ * owns what a VIEWER is comfortable with: the pace, step mode, whether the
+ * panel explains itself. A spend limit is not a comfort, it is somebody else's
+ * money, and a viewer who can raise their own ceiling does not have one. So it
+ * is declared where the app is declared, by the person who pays. The settings
+ * view may SHOW it — see `Driver.budget`, which exists so it can — and must
+ * not offer to change it.
+ *
+ * WHAT IS BOUNDED, AND WHAT WAS REJECTED.
+ *
+ *   `calls`   — every `call()` this driver ever accepts, refused ones
+ *               included. This is the bound that matters. It is a bound on the
+ *               app's own API, because every verb body is behind it, and it is
+ *               a bound on tokens, because an agent spends a model round trip
+ *               to produce each one. Refused calls count on purpose: an agent
+ *               spinning on `bad-argument` is precisely the runaway this
+ *               exists for, and a counter that only counted successes would
+ *               never fire on it.
+ *
+ *   `commits` — `kind: "commit"` verbs that actually ran. A second counter
+ *               rather than a stricter first one, because the two bound
+ *               different costs: a thousand reads costs tokens, and a
+ *               thousand commits costs DATA. An app may happily allow the
+ *               first and not the second, and one number cannot say that.
+ *
+ * REJECTED: **runs per minute**, or calls per minute, or any rolling window.
+ * It is the one that looks most like a cost control and is the least like one.
+ * A rate limit converts an unbounded spend into a slower unbounded spend — the
+ * runaway loop still runs forever, just politely — so it bounds instantaneous
+ * load and not cost, and it is a ceiling nobody can ever hit and therefore a
+ * ceiling that never says anything. An app that genuinely needs load shedding
+ * has it at the server, where a client-side limiter is advisory anyway.
+ *
+ * REJECTED: **model round trips.** It is the thing an author actually wants to
+ * cap, and the core cannot see one. `call()` is the only place every path
+ * converges; a round-trip count would have to be reported by the loop, and the
+ * loop is the consumer being limited. A number the limited thing reports about
+ * itself is not a limit. `calls` is the honest proxy, and the relationship is
+ * close: one tool call is one round trip in every tool-use API there is.
+ *
+ * REJECTED: **total steps per session** as a third field. That is `calls`
+ * under another name — `drive()`'s steps are verb calls — and two fields for
+ * one quantity is two fields that come to disagree.
+ *
+ * Absent, or a field absent, means no ceiling: an app mounted before this
+ * existed behaves byte-identically, and the manifest and its fingerprint do
+ * not move, because a spend limit is a runtime arrangement and not part of the
+ * surface an agent caches.
+ */
+export interface Budget {
+  /** Most calls this driver will ever accept. Omitted means no bound. A
+   *  non-positive number is refused at `mount()`: it means the app is never
+   *  drivable, which nobody means, and it would make every call fail with no
+   *  hint that a budget was the cause. */
+  calls?: number;
+  /** Most `commit` verbs this driver will ever run. Omitted means no bound. */
+  commits?: number;
+}
+
+/**
+ * What a mounted driver has spent, for a UI to show a person.
+ *
+ * READ-ONLY and that is the field's whole design. The widget's settings view
+ * shows this and offers no control beside it; see `Budget` for why a viewer
+ * must not be able to raise their own ceiling.
+ *
+ * `used` without `limit` is the normal case — an app with no budget still
+ * reports what it has spent, which is the number somebody debugging a runaway
+ * actually wants. `left` is deliberately absent: it is `limit - used`, and a
+ * second way to say one thing is a second thing to get wrong.
+ */
+export interface BudgetState {
+  calls: { used: number; limit?: number };
+  commits: { used: number; limit?: number };
 }
 
 export interface MountOptions {
@@ -1175,6 +1663,91 @@ export interface MountOptions {
    * unlike the relay's `timeout`, which means nobody knows.
    */
   approvalTimeout?: number;
+  /**
+   * Where this app's audit records go. One call per `call()`; see `AuditEvent`.
+   *
+   * WHAT IT COSTS TO LEAVE OUT. Nothing: an app that passes no hook behaves
+   * byte-identically to one mounted before this field existed — no record is
+   * built, no clock is read, and the manifest and its fingerprint do not move,
+   * because an audit trail is a runtime arrangement and not part of the
+   * surface an agent caches.
+   *
+   * A THROWING OR SLOW HOOK MUST NOT TAKE THE APP DOWN, and this hook is
+   * shaped by that rather than by politeness. It is called and NOT awaited: a
+   * returned promise has a `catch` attached and is otherwise left alone, and a
+   * synchronous throw is caught. Either way the failure is reported once
+   * through the same `console.warn` channel the rest of the core's authoring
+   * mistakes use — because a record that vanished silently is the one failure
+   * an audit trail cannot survive — and the call's `Result` is returned
+   * unchanged.
+   *
+   * WHY THIS IS NOT `ApprovalHook`, which is awaited, deadlined and whose
+   * failure is a refusal. An approval is asked BEFORE the decision and its
+   * answer IS the decision, so there is nothing to do but wait for it, and a
+   * failed ask has to be a no. An audit record is emitted AFTER the outcome is
+   * decided and, for a commit, after the data has already moved: there is
+   * nothing left to refuse, so waiting on the sink can only delay the agent,
+   * and failing the call because the logger is down would turn a broken
+   * logging backend into a broken application. Hence no deadline here, and
+   * hence no timer — which is also why this hook cannot repeat the bug
+   * `deadline()` carries a comment about.
+   *
+   * FAIL-OPEN IS A REAL LIMIT AND NOT A SHRUG. If you need a commit to be
+   * impossible unless it has been recorded, the place to put that is the
+   * `approve` hook, which runs before the verb and whose no means no. This one
+   * cannot give you that guarantee and does not claim to.
+   */
+  onAudit?: AuditHook;
+  /**
+   * A hard ceiling on what this driver will ever spend. See `Budget`, which
+   * carries the argument for what is bounded and what was rejected.
+   *
+   * Off by default and costs nothing to leave out: with no `budget` the
+   * counters are not kept, nothing is compared, and the call path is the one
+   * it was before this field existed.
+   *
+   * When a ceiling is reached, the call is refused `budget-spent` with the
+   * numbers in the hint. That refusal is the point as much as the stopping is:
+   * `approvalTimeout` waits forever by default because "a deadline that denies
+   * while somebody is reading teaches them the dialog is a race", and a ceiling
+   * has the same hazard pointing the other way — a job that stops halfway and
+   * does not say why is read as a broken app, and the next thing somebody does
+   * is run it again. So nothing here is silent: the agent is told which
+   * ceiling and that it does not reset, `Driver.budget` lets a panel show the
+   * person the same thing, and `drive()` ends the run with `over-budget`
+   * rather than grinding through its refusal limit first.
+   */
+  budget?: Budget;
+  /**
+   * How this driver hears that another tab of the same app committed.
+   *
+   * Absent makes NO claim and changes nothing — the default, and deliberately
+   * the default: a single-tab app, or an app that already invalidates across
+   * tabs so that `rev` moves on its own, gains nothing from this and should pay
+   * nothing for it. An app that passes a channel gets two things:
+   *
+   *  - a `commit` is refused `changed-elsewhere` while a notice from another
+   *    driver is outstanding, which closes the hole described on
+   *    `ElsewhereChannel`: the one case where `stale` passed, the plan token
+   *    verified, and the data had moved anyway;
+   *  - every `Snapshot` this driver hands back says so, in `note`, so a read is
+   *    no longer silently wrong either.
+   *
+   * WHEN IT CLEARS: when this app's own `rev` moves. `rev` is the only
+   * statement the core is entitled to believe about this app's data, and a
+   * second staleness rule beside it would be a second set of rules — the thing
+   * `call()` exists not to have. The cost is stated rather than hidden: a `rev`
+   * that moves for an unrelated reason (the person typed in a filter) clears
+   * the notice without the data having been refetched. That is the SAME
+   * weakness `rev` already has — an app that bumps `rev` without refetching has
+   * already broken `stale` — so this adds none. The fix for both is the same:
+   * listen on the channel yourself and refetch. An app that does is an app
+   * where none of this ever fires.
+   *
+   * See `ElsewhereChannel`, and `broadcastElsewhere()` in `driverkit/browser`
+   * for the same-origin implementation that needs no server and no relay.
+   */
+  elsewhere?: ElsewhereChannel;
 }
 
 export interface Driver {
@@ -1194,6 +1767,18 @@ export interface Driver {
    * `approval: { policy: "unattended", hold: (_, ask) => ask() }`.
    */
   approval?: DriverApproval;
+  /**
+   * What this driver has spent, and against what ceiling. See `BudgetState`.
+   *
+   * Offered whatever the app declared, including no budget at all, so a panel
+   * has one shape to render instead of two — and so the numbers are there for
+   * somebody debugging an app that is making more calls than they thought.
+   *
+   * Optional on the interface for the reason `approval` is: a hand-written
+   * driver must remain possible, and a reader treats an absent one as "this
+   * driver does not account for itself".
+   */
+  budget?: () => BudgetState;
   /** Stop serving. Idempotent. */
   unmount: () => void;
 }

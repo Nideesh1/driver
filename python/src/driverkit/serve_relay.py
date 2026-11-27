@@ -480,6 +480,7 @@ def serve(
     auth: TabAuth | None = None,
     resolve_principal: Any = None,
     on_error: Any = None,
+    on_audit: Any = None,
     start: bool = True,
 ) -> RelayServer:
     """Bind a relay to ``host:port``. ``port=0`` takes an ephemeral one.
@@ -511,6 +512,9 @@ def serve(
         ping_s=ping_s,
         allow_remote=allow_remote,
         on_error=on_error,
+        # Passed straight through, like `auth`: the relay owns the record's
+        # shape and this function owns the socket. See `Relay.__init__`.
+        on_audit=on_audit,
         auth=auth,
         resolve_principal=resolve_principal,
     )

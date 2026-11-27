@@ -81,7 +81,7 @@ from typing import Any
 
 from .auth import TabAuth
 from .client import Driverkit, DriverkitError
-from .mcp_core import TabTools, instructions_for, tools_for
+from .mcp_core import TabTools, instructions_for, pick_tab, tools_for
 
 __all__ = ["FASTMCP_AVAILABLE", "TabTokenVerifier", "build_server", "main"]
 
@@ -223,16 +223,27 @@ def _only_tab(client: Driverkit) -> str:
     the error message.
     """
     tabs = client.tabs()
-    if len(tabs) == 1:
-        return tabs[0].id
     if not tabs:
         raise ToolError("driverkit: no tab of yours is connected to this relay")
+    # The same rule `driverkit-mcp` applies, from the same function, so a person
+    # with two tabs open gets the one they are looking at whichever server they
+    # are going through. See `pick_tab` for the four cases, including the ones
+    # where it declines to answer — and note that it declines here too rather
+    # than falling back to the first tab.
+    chosen = pick_tab(tabs)
+    if chosen is not None:
+        return chosen.id
     # Guessing would mean driving somebody's other screen — and here "somebody"
     # may be the same person, which is no better.
+    # The focus each tab reported is named beside its id, including when it
+    # reported none: "unknown" is why this could not be answered, and an
+    # operator who cannot see that will think the feature is broken rather than
+    # that their page is not reporting.
+    listed = ", ".join(f"{t.id} (focus: {t.focus or 'unknown'})" for t in tabs)
     raise ToolError(
-        "driverkit: this server drives one tab and you have "
-        f"{len(tabs)} connected: {', '.join(t.id for t in tabs)}. Use a tab-bound token, "
-        "or run a server per tab."
+        "driverkit: this server drives one tab and cannot tell which of your "
+        f"{len(tabs)} connected tabs you mean: {listed}. Use a tab-bound token, or run a "
+        "server per tab."
     )
 
 

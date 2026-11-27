@@ -350,6 +350,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .dk-set-row { display: flex; flex-direction: column; gap: 5px; }
 .dk-set-label { font-weight: 600; }
 .dk-set-why { font-size: 12px; color: var(--dk-dim); }
+/* The spend row's numbers. Full-strength text under a dimmed reason, which is
+   the opposite weighting of every other row in this view -- on those the
+   control is the thing and the words explain it, and on this one there is no
+   control and the number IS the thing. */
+.dk-set-budget { font-size: 12px; font-variant-numeric: tabular-nums; margin-top: 4px; }
 .dk-speeds { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
 .dk-speed {
   border: 1px solid var(--dk-line);

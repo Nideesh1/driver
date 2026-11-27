@@ -230,6 +230,94 @@ class Reads(ClientTest):
         self.assertIsNone(snapshot.selected_count)
         self.assertNotIn("selectedCount", snapshot.to_dict())
 
+    def test_an_empty_selection_says_the_app_counted_and_got_none_not_nothing_at_all(self):
+        # The defect this pins: the selection line used to be printed only when
+        # the selection was non-empty, so a screen with nothing selected said
+        # NOTHING about selections. Silence cannot be told from "this screen
+        # does not report selections", and an absent value reads as a claim —
+        # the same class of bug already fixed on ``page`` and on ``rows``.
+        #
+        # It cost real behaviour, in an eval run rather than in theory: asked
+        # to accept the selected contacts with nothing selected, the model said
+        # accepting needs a count it had read first and it would not change
+        # data blind — obeying this library's own safety rule — then spent two
+        # extra steps navigating to other screens hunting for a number the
+        # screen could perfectly well have told it.
+        rendered = render_snapshot(
+            Snapshot.from_dict(
+                {"where": "contacts", "rev": 2, "selectedCount": 0, "rows": [{"id": "c-1"}]}
+            )
+        )
+        self.assertIn("selected: none (0 rows; this screen counts the selection)", rendered)
+        # `0` is a real answer whether or not the app also sends the (empty)
+        # list of on-screen ids, so both spellings render the same sentence.
+        self.assertIn(
+            "selected: none (0 rows; this screen counts the selection)",
+            render_snapshot(
+                Snapshot.from_dict(
+                    {"where": "contacts", "rev": 2, "selectedCount": 0, "selected": [], "rows": []}
+                )
+            ),
+        )
+
+    def test_a_screen_that_reports_no_selection_at_all_says_so_rather_than_none(self):
+        # A DIFFERENT sentence from ``selectedCount: 0``, and keeping them
+        # apart is the whole point. `0` is an app that counts; both fields
+        # absent is an app that does not report selections, and a model that
+        # reads the second as the first commits on a count nobody ever took.
+        rendered = render_snapshot(
+            Snapshot.from_dict({"where": "settings", "rev": 3, "rows": [{"id": "s-1"}]})
+        )
+        self.assertIn("(this screen reports no selection)", rendered)
+        self.assertNotIn("0 rows", rendered)
+
+    def test_ids_on_screen_with_no_count_is_the_weakest_claim_and_says_only_that(self):
+        # The third state, and the one nobody thinks about: the app says which
+        # of the ids in front of the model are selected and none of them are,
+        # but it does not count, so a row off screen may still be selected.
+        # Folding this into "nothing is selected" would assert an empty
+        # selection on the strength of one window — the ``page``-absent
+        # mistake, in the selection.
+        rendered = render_snapshot(
+            Snapshot.from_dict(
+                {"where": "contacts", "rev": 4, "selected": [], "rows": [{"id": "c-1"}]}
+            )
+        )
+        self.assertIn(
+            "selected: none on screen; this screen does not count the selection, so rows off "
+            "screen may be selected",
+            rendered,
+        )
+        self.assertNotIn("0 rows", rendered)
+        self.assertNotIn("reports no selection", rendered)
+
+    def test_the_three_state_selection_line_never_displaces_a_real_selections_wording(self):
+        # The large-selection split is the wording a bulk commit turns on, and
+        # the new branch must be unreachable whenever there is anything to say
+        # the old way. Pinned here as well because the two now share a branch.
+        big = render_snapshot(
+            Snapshot.from_dict(
+                {
+                    "where": "contacts",
+                    "rev": 5,
+                    "selected": ["c-0", "c-1", "c-2"],
+                    "selectedCount": 10_000,
+                    "rows": [{"id": "c-0"}],
+                }
+            )
+        )
+        self.assertIn("selected: c-0, c-1, c-2\n", big)
+        self.assertIn("selected 10,000 rows in all; the 3 ids above are only the ones on screen", big)
+        self.assertNotIn("selected: none", big)
+
+        # A selection entirely off screen keeps its own sentence rather than
+        # falling into "none": this is the case where "none" would be false.
+        off_screen = render_snapshot(
+            Snapshot.from_dict({"where": "contacts", "rev": 5, "selectedCount": 1200, "rows": []})
+        )
+        self.assertIn("selected 1,200 rows in all; none of them are on screen", off_screen)
+        self.assertNotIn("selected: none", off_screen)
+
     def test_an_unknown_field_is_ignored_rather_than_rejected(self):
         # PROTOCOL.md promises a field may be added without a version bump, so a
         # strict parser here would turn an additive relay change into an outage.

@@ -20,8 +20,17 @@ Run this from the repository root after any edit to the root skill, and before t
 rm -rf plugin/skills/driverkit
 mkdir -p plugin/skills/driverkit
 cp skills/driverkit/SKILL.md plugin/skills/driverkit/
+cp INTEGRATING.md plugin/skills/driverkit/
 [ -d skills/driverkit/references ] && cp -R skills/driverkit/references plugin/skills/driverkit/
 ```
+
+`INTEGRATING.md` is in that list because `references/authoring-verbs.md` defers to it instead of keeping a second
+copy of the adoption procedure. A vendored skill without it loses the procedure. It is authored at the repo root
+and only ever copied.
+
+The commands are a separate matter and stay standalone: `commands/draft-verbs.md` restates the rules it needs
+rather than reading a file, because a slash command runs in the **app's** repository, where neither the plugin's
+skill directory nor `INTEGRATING.md` is on the path it would read. It links to `INTEGRATING.md` by URL instead.
 
 ## Why a copy and not a symlink
 

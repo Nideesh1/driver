@@ -23,10 +23,11 @@ import type {
   Result,
   Scalar,
   Snapshot,
+  TabFocus,
   WireResult,
 } from "../core/index.ts";
 
-export type { Manifest, RelayRefusal, Result, Scalar, Snapshot, WireResult };
+export type { Manifest, RelayRefusal, Result, Scalar, Snapshot, TabFocus, WireResult };
 
 /** Tab → relay, once, immediately on connecting. */
 export interface HelloFrame {
@@ -38,6 +39,10 @@ export interface HelloFrame {
   /** Only so a human can tell two tabs apart when asked "which one?". */
   title?: string;
   url?: string;
+  /** Where this tab stands in the person's attention; see `TabFocus`. In
+   *  `hello` as well as in `snapshot` because `hello` is the only frame a tab
+   *  that is opened and left alone ever sends. */
+  focus?: TabFocus;
 }
 
 /** Tab → relay, the answer to exactly one `call`. */
@@ -56,6 +61,19 @@ export interface SnapshotFrame {
   t: "snapshot";
   snapshot: Snapshot;
   tab?: string;
+  /**
+   * The tab's url as it is NOW.
+   *
+   * Here as well as in `hello` because `hello` is sent once per stream and a
+   * single-page app navigates without reconnecting -- so `TabInfo.url`, which
+   * came from `hello` alone, was stale from the first client-side route change
+   * and had no way back. A push is already going out whenever the page moves.
+   */
+  url?: string;
+  /** The tab's focus as it is NOW. A change of focus is pushed on this frame
+   *  rather than on a frame of its own: the protocol gains a field, and a relay
+   *  written before it goes on reading the frame it always read. */
+  focus?: TabFocus;
 }
 
 /** Relay → tab, run a verb. */
@@ -103,6 +121,10 @@ export interface TabSummary {
   manifestVersion?: string;
   /** The `rev` of the last snapshot the relay was told about. */
   rev?: number;
+  /** Where the person's attention is, as the tab last reported it. Carried
+   *  through untouched: the relay cannot see `document.hasFocus()` and has no
+   *  opinion about the answer, exactly as with `rev`. */
+  focus?: TabFocus;
   /** ISO 8601, not epoch millis. This is a value a human reads in a "which
    *  tab?" prompt, and it crosses into clients whose JSON numbers are floats. */
   since: string;

@@ -1,0 +1,13 @@
+{
+  "id": "count-the-pieces",
+  "ask": "how many depth pieces mention telemetry?",
+  "why": "A how-many question, which in this app is the one `describe` verb's reason to exist: `select-pieces` resolves the predicate across the whole library — not the ten rows on screen — and reports the count. Counting by hand off `read-pieces` is a defensible second route and is in `anyOf` rather than forbidden, because the library is small and the cheaper call is not the wrong answer.\n\nNO COUNT IS ASSERTED, and that is a gap in this case rather than a choice. The contacts suite can assert 238 because its data is seeded; this suite was drafted from FACTORY's source with the owner's live graph unreachable, so the number is not knowable from here. THE OWNER SHOULD FILL IT IN: run `select-pieces` once by hand, put the number in `count`, and this case starts asserting the thing it is actually about.",
+  "expect": {
+    "anyOf": [
+      { "calls": ["select-pieces"], "args": { "kind": "depth" } },
+      { "calls": ["read-pieces"], "args": { "kind": "depth" } }
+    ],
+    "commits": "none",
+    "steps": "<=4"
+  }
+}

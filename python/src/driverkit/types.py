@@ -65,7 +65,7 @@ VERB_KINDS = ("read", "describe", "commit")
 #: rephrase and retry, from "your call never landed", which means reconnect or
 #: pick another tab. These three are reserved, along with the core's own
 #: ``stale``, ``wrong-screen``, ``stale-plan``, ``unknown-verb``,
-#: ``bad-argument``, ``unmounted`` and ``threw``:
+#: ``bad-argument``, ``unmounted``, ``threw`` and ``budget-spent``:
 #: an app that names one of its verb refusals the same thing takes that
 #: distinction away, and if ``timeout`` can mean either then it means neither.
 #: See ``RelayRefusal`` and PROTOCOL.md, "When a call never reaches a tab".
@@ -350,20 +350,41 @@ class FlowStep:
     verb: str
     hint: str = ""
     section: str | None = None
+    #: ``skipWhen`` on the wire: when this step may be skipped, in one line.
+    #: Present means the step is not load-bearing; None means take it.
+    #:
+    #: A SENTENCE AND NOT AN EXPRESSION, which is the design and not a
+    #: shortcut. Nothing in this library executes a flow — the model reads it
+    #: and follows it — so the only evaluator a predicate could have is the
+    #: reader it is written for, and a predicate read by a model is a sentence
+    #: with brackets round it: all of the precision in the notation and none of
+    #: it in the enforcement, which is worse than prose because it gets trusted
+    #: like a check. The conditions that must be ENFORCED have an enforced home
+    #: already: a count threshold before data moves is an approval hook, and
+    #: "do not commit a count you have not read" is ``consumes: "plan"``, both
+    #: held by the core rather than interpreted by the reader. See
+    #: ``FlowStep.skipWhen`` in the TS types for the whole argument.
+    skip_when: str | None = None
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "FlowStep":
         section = d.get("section")
+        skip_when = d.get("skipWhen")
         return cls(
             verb=str(d.get("verb", "")),
             hint=str(d.get("hint", "")),
             section=str(section) if isinstance(section, str) and section else None,
+            skip_when=str(skip_when) if isinstance(skip_when, str) and skip_when else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"verb": self.verb, "hint": self.hint}
         if self.section is not None:
             out["section"] = self.section
+        if self.skip_when is not None:
+            # Spelled `skipWhen` going out, because the wire name is the
+            # contract and `skip_when` is only how Python spells it.
+            out["skipWhen"] = self.skip_when
         return out
 
 
@@ -803,6 +824,18 @@ class Tab:
     #: The tab's current ``rev``, so a client can see the screen moved without
     #: reading the snapshot.
     rev: int | None = None
+    #: Where this tab stands in the person's attention, as the page itself last
+    #: reported it: ``"focused"`` (the active tab of the frontmost window — the
+    #: person is looking at this), ``"visible"`` (the active tab of its window,
+    #: but the person is in another application) or ``"hidden"`` (a background
+    #: tab).
+    #:
+    #: ``None`` IS UNKNOWN AND NOT HIDDEN. A tab driven by a hand-written loop,
+    #: or a page that opted out, says nothing — and a client that read silence
+    #: as "not the one" would quietly stop being able to drive it. See
+    #: :func:`driverkit.mcp_core.pick_tab`, which is the one place that rule is
+    #: applied.
+    focus: str | None = None
     #: When the tab connected, ISO-8601, as the relay reported it. Kept as a
     #: string rather than parsed: nothing here needs it as a datetime, and
     #: parsing would invent a failure mode for a field only ever shown to a
@@ -825,6 +858,7 @@ class Tab:
             url=str(d.get("url") or ""),
             manifest_version=str(version or ""),
             rev=int(rev) if isinstance(rev, (int, float)) and not isinstance(rev, bool) else None,
+            focus=d.get("focus") if isinstance(d.get("focus"), str) else None,
             since=d.get("since"),
             raw=dict(d),
         )
@@ -839,6 +873,8 @@ class Tab:
         }
         if self.rev is not None:
             out["rev"] = self.rev
+        if self.focus is not None:
+            out["focus"] = self.focus
         if self.since is not None:
             out["since"] = self.since
         return out

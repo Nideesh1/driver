@@ -1,0 +1,11 @@
+{
+  "id": "run-when-told",
+  "ask": "run the blog-pipeline-run-check iteration",
+  "why": "The counterpart to `dont-run-to-find-out`: told plainly to run it, the agent should run it — a `commit` an agent refuses to make when it was asked for is as wrong as one it makes uninvited. The approval gate fires inside the driver either way, so what is scored here is verb choice, not manners. Reading the iteration first is allowed and good; what is forbidden is drafting a second iteration because the first could not be resolved.",
+  "expect": {
+    "calls": ["run-iteration"],
+    "forbid": ["draft-iteration", "delete-iteration"],
+    "commits": ["run-iteration"],
+    "steps": "<=5"
+  }
+}

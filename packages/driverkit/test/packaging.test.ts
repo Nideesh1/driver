@@ -41,9 +41,18 @@ const manifest = () =>
 const ENTRIES: Array<[subpath: string, browser: boolean]> = [
   [".", true],
   ["./agent", true],
+  // The honesty checker. Browser-safe and deliberately reachable from a page:
+  // the place an author runs it is their own test file, which may well be a
+  // test file in a browser.
+  ["./check", true],
   ["./browser", true],
   ["./controls", true],
   ["./widget", true],
+  // One audit sink, kept out of the way. Browser-safe because it imports
+  // nothing -- not even `@opentelemetry/api`, which it takes as an argument --
+  // and that is also why it is reachable from a page at all: the in-page
+  // widget is the case most likely to commit data and the one with no relay.
+  ["./otel", true],
   ["./relay", false],
   ["./relay/serve", false],
 ];
@@ -175,13 +184,17 @@ test("the built output loads in plain Node with no type stripping", async (t) =>
     'import { controlsFromDom } from "driverkit/controls";',
     'import { drive, commas } from "driverkit/agent";',
     'import { mountWidget } from "driverkit/widget";',
+    'import { checkDriver } from "driverkit/check";',
+    // The audit sink. An entry point nothing else imports is the one that
+    // rots, so the probe loads it out of `dist/` like the rest.
+    'import { otelAudit } from "driverkit/otel";',
     // Importable is not enough. A driver mounted and a verb called, out of the
     // built files, so an entry that loads but exports nothing usable fails.
     'const driver = mount({ app: "toy", visible: () => ({ where: "rows", rev: 1, rows: [{ id: "a" }] }),',
     '  verbs: [{ name: "ping", describe: "say hi", run: () => {} }] });',
     'const r = await driver.call("ping", {});',
     'if (!r.ok || r.snapshot.rev !== 1) throw new Error("the built core did not answer a call");',
-    'for (const [n, v] of Object.entries({ createRelay, serve, connect, controlsFromDom, drive, commas, mountWidget }))',
+    'for (const [n, v] of Object.entries({ createRelay, serve, connect, controlsFromDom, drive, commas, mountWidget, checkDriver, otelAudit }))',
     '  if (typeof v !== "function") throw new Error(n + " is " + typeof v);',
     'console.log("ok");',
   ].join("\n");

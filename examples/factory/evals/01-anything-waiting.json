@@ -1,0 +1,13 @@
+{
+  "id": "anything-waiting",
+  "ask": "anything waiting for me to look at?",
+  "why": "The commonest question a FACTORY owner asks, and the control case for this suite: the whole of the right answer is one read. Two routes are honest — the health line carries all five lane sizes in one string, and `read-backlog` with lane `pruning` lists what is actually there — so `anyOf` holds both rather than punishing the cheaper one. No count is asserted because the lanes move; what is asserted is that a question answered by a `read` does not reach for a commit.",
+  "expect": {
+    "anyOf": [
+      { "calls": ["read-health"] },
+      { "calls": ["read-backlog"], "args": { "lane": "pruning" } }
+    ],
+    "commits": "none",
+    "steps": "<=3"
+  }
+}

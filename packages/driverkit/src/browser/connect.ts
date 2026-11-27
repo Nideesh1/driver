@@ -12,7 +12,7 @@
  * which is half of why the protocol is SSE in the first place.
  */
 
-import type { Driver, Result } from "./frames.ts";
+import type { Driver, Result, TabFocus } from "./frames.ts";
 import type { CallFrame, HelloFrame, ResultFrame, SnapshotFrame } from "./frames.ts";
 
 /**
@@ -58,6 +58,52 @@ export interface FetchLike {
 export interface StorageLike {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+}
+
+/**
+ * The part of `document` this file reads: the title, and where the attention is.
+ *
+ * Injectable for the reason `EventSourceLike` is injectable, and this one is
+ * the more important of the two: focus reporting is a thing that happens when
+ * a person alt-tabs, and "alt-tab and see whether the right frame went out" is
+ * not a test anybody runs twice. Every method is optional so that a partial
+ * stub -- `{ visibilityState: "visible" }` -- is a usable one, and so that a
+ * real `document` from an older engine with no `hasFocus` still satisfies it.
+ *
+ * Note that `titleFromPage` and `urlFromPage` used to read `globalThis`
+ * directly and were therefore the two things in here that could not be
+ * exercised in process. They take these now.
+ */
+export interface PageLike {
+  readonly title?: string;
+  readonly visibilityState?: string;
+  hasFocus?: () => boolean;
+  addEventListener?(type: string, listener: () => void): void;
+  removeEventListener?(type: string, listener: () => void): void;
+}
+
+/**
+ * Where `focus` and `blur` are listened for: the window, or anything shaped
+ * like it.
+ *
+ * SEPARATE FROM `PageLike` because the two events are not on the same object.
+ * `visibilitychange` fires on `document`; `focus` and `blur` do not bubble and
+ * are delivered to the window. Listening for all three on `document` is the
+ * mistake that makes a focus change in a visible tab -- the person clicking
+ * from another application into this window, which is the whole case this
+ * exists for -- go unnoticed.
+ */
+export interface FocusEventsLike {
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener?(type: string, listener: () => void): void;
+}
+
+/** The part of `location` the url is built from. `hash` is in here on purpose;
+ *  see `urlFromPage`. */
+export interface LocationLike {
+  readonly pathname?: string;
+  readonly search?: string;
+  readonly hash?: string;
 }
 
 /** `EventSource.CLOSED`. Spelled out because the fake need not define statics. */
@@ -222,6 +268,44 @@ export interface ConnectOptions {
   randomUUID?: () => string;
   /** A failed POST or a malformed frame lands here. Default: ignore it. */
   onError?: (err: unknown) => void;
+  /**
+   * Report where this tab stands in the person's attention. On by default.
+   *
+   * WHAT IT FIXES. `driverkit-mcp --tab <id>` works and "omit it when exactly
+   * one tab is connected" stops working at two, and nothing in the protocol
+   * expressed *"the one I am looking at"* -- which is what a person means when
+   * they are asked which tab. The only process that can answer is the
+   * document: `document.hasFocus()` is not visible to a relay, to a server or
+   * to another tab. So the page says, in `hello` and in every snapshot push,
+   * and `GET /dk/tabs` carries it. See `TabFocus` for the three states and
+   * PROTOCOL.md for what a client does when more than one tab qualifies.
+   *
+   * On by default and in the same category as `title` and `url`, which are
+   * read off the page without being asked for: an app that wrote no new code
+   * gets this, because a field only the careful adopters send is a field no
+   * client can rely on. It costs one short string per push and one listener
+   * each on `visibilitychange`, `focus` and `blur`.
+   *
+   * `false` opts out entirely -- no listeners, no field, and the frames are
+   * exactly the bytes they were. An environment with no `document` reports
+   * nothing either way, which is why the Node-side tests of this file see no
+   * change at all.
+   */
+  focus?: boolean;
+  /**
+   * The document, defaulting to the global. Where `title`, `visibilityState`,
+   * `hasFocus()` and `visibilitychange` come from.
+   */
+  document?: PageLike;
+  /**
+   * Where `focus` and `blur` are listened for, defaulting to `globalThis` --
+   * which in a browser IS the window. Separate from `document` because those
+   * two events are not delivered to the document; see `FocusEventsLike`.
+   */
+  window?: FocusEventsLike;
+  /** The location, defaulting to the global. See `urlFromPage` for what is
+   *  taken from it and why the hash is now part of it. */
+  location?: LocationLike;
 }
 
 export interface Connection {
@@ -245,6 +329,17 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
     options.storage === null
       ? null
       : (options.storage ?? (globalThis as { sessionStorage?: StorageLike }).sessionStorage ?? null);
+  const page = options.document ?? (globalThis as { document?: PageLike }).document;
+  const place = options.location ?? (globalThis as { location?: LocationLike }).location;
+  // `globalThis` IS the window in a page, and in Node it is a global with an
+  // `addEventListener` that exists and never fires either of these -- which is
+  // harmless and is why this needs no environment check.
+  const focusEvents: FocusEventsLike | undefined =
+    options.window ??
+    (typeof (globalThis as { addEventListener?: unknown }).addEventListener === "function"
+      ? (globalThis as unknown as FocusEventsLike)
+      : undefined);
+  const wantsFocus = options.focus !== false;
 
   if (!ES) throw new Error("driverkit: no EventSource. Pass options.EventSource.");
   if (!post) throw new Error("driverkit: no fetch. Pass options.fetch.");
@@ -292,6 +387,12 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
   let debounce: ReturnType<typeof setTimeout> | null = null;
   let reopen: ReturnType<typeof setTimeout> | null = null;
   let watch: ReturnType<typeof setInterval> | null = null;
+  /** The focus state the relay was last told, so an event that does not move
+   *  it costs nothing. `undefined` before the first push and in an environment
+   *  that reports no focus at all. */
+  let pushedFocus: TabFocus | undefined;
+  /** How to drop the three focus listeners, set only when they were added. */
+  let stopFocus: (() => void) | null = null;
 
   const url = (path: string) => `${relay}${path}?tab=${encodeURIComponent(tab)}`;
 
@@ -548,6 +649,22 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
     });
   }
 
+  /** The url as it is NOW, or an explicit one the app passed. Spelled once
+   *  because `hello` and every push must agree about it; two copies is how the
+   *  reconnect path comes to report something the push path does not. */
+  function whereNow(): { url?: string } {
+    return options.url === undefined ? urlFromPage(place) : { url: options.url };
+  }
+
+  /** The focus as it is NOW, or nothing at all when the app opted out or the
+   *  environment is not a page. An absent field means "did not say"; see
+   *  `TabFocus`. */
+  function focusNow(): { focus?: TabFocus } {
+    if (!wantsFocus) return {};
+    const focus = focusOf(page);
+    return focus === undefined ? {} : { focus };
+  }
+
   function hello(): void {
     const frame: HelloFrame = {
       t: "hello",
@@ -555,8 +672,13 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
       ...(options.app === undefined ? {} : { app: options.app }),
       manifest: driver.manifest(),
       snapshot: driver.snapshot(),
-      ...(options.title === undefined ? { ...titleFromPage() } : { title: options.title }),
-      ...(options.url === undefined ? { ...urlFromPage() } : { url: options.url }),
+      ...(options.title === undefined ? { ...titleFromPage(page) } : { title: options.title }),
+      ...whereNow(),
+      // In `hello` as well as in the pushes, because `hello` is the only frame
+      // a tab that never moves ever sends. A tab opened and left alone would
+      // otherwise have no focus at all in `/dk/tabs`, which is the listing a
+      // client reads before it has seen a single push.
+      ...focusNow(),
     };
     up(frame);
   }
@@ -688,9 +810,59 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
       if (!live) return;
       // Read at flush time, not at call time. Ten `changed()` calls in one
       // frame must produce one push of the FINAL state, not the first.
-      up({ t: "snapshot", snapshot: driver.snapshot(), tab });
+      //
+      // The url and the focus ride along, and that is the cheap half of two
+      // fixes. `TabInfo.url` came from `hello` ALONE, so it was stale the
+      // moment the tab navigated -- and a single-page app navigates without
+      // reconnecting, so `hello` may never come again. A push is already going
+      // out whenever the page moves; carrying the current url on it costs one
+      // short string and makes the listing true. `focus` is the same shape of
+      // saving: the frame it needs was already there.
+      pushedFocus = focusNow().focus;
+      up({ t: "snapshot", snapshot: driver.snapshot(), tab, ...whereNow(), ...focusNow() });
     }, debounceMs);
     (debounce as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * Watch the three events that move the focus state and push when it changes.
+   *
+   * ON A CHANGE AND NOT ON AN EVENT. `focus` fires on a window that was
+   * already focused, `visibilitychange` fires on its way to a state it was
+   * already in, and a person alt-tabbing between two applications would
+   * otherwise generate a push per keystroke -- each of which the relay
+   * force-forwards to every watcher, because a `snapshot` frame is the tab
+   * SAYING the page moved and the relay does not second-guess that. So the
+   * last pushed value is remembered and an event that does not move it is
+   * dropped here, before the debounce, where it costs nothing.
+   *
+   * It goes out through `changed()` rather than through its own frame, which is
+   * the decision worth naming: the protocol gains a field, not a frame. A tab
+   * that has focus news has a snapshot to send with it, the debounce
+   * coalesces the two, and a relay or a client written before this reads the
+   * same `snapshot` frame it always read and ignores one field.
+   */
+  // Gated on the page actually REPORTING a focus state, not merely on there
+  // being somewhere to listen. `globalThis` has an `addEventListener` in Node
+  // too, so without this every `connect()` in a test suite -- and in a server
+  // -- would register three listeners that can never fire.
+  if (wantsFocus && focusOf(page) !== undefined && (page?.addEventListener || focusEvents)) {
+    pushedFocus = focusOf(page);
+    const onFocusEvent = (): void => {
+      if (!live) return;
+      if (focusOf(page) === pushedFocus) return;
+      changed();
+    };
+    // `visibilitychange` is the document's; `focus` and `blur` are the
+    // window's and do not bubble to it. See `FocusEventsLike`.
+    page?.addEventListener?.("visibilitychange", onFocusEvent);
+    focusEvents?.addEventListener("focus", onFocusEvent);
+    focusEvents?.addEventListener("blur", onFocusEvent);
+    stopFocus = () => {
+      page?.removeEventListener?.("visibilitychange", onFocusEvent);
+      focusEvents?.removeEventListener?.("focus", onFocusEvent);
+      focusEvents?.removeEventListener?.("blur", onFocusEvent);
+    };
   }
 
   if (options.watchMs !== undefined) {
@@ -730,6 +902,17 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
       if (watch) clearInterval(watch);
       debounce = reopen = null;
       watch = null;
+      // Removed, not left. These are on `document` and on the window, both of
+      // which outlive this connection, so a page that connects and disconnects
+      // -- a client-side route change, a React effect re-running -- would
+      // otherwise accumulate one set per connection and push through a closure
+      // whose stream is gone.
+      try {
+        stopFocus?.();
+      } catch (err) {
+        onError(err);
+      }
+      stopFocus = null;
       try {
         source?.close();
       } catch (err) {
@@ -945,13 +1128,69 @@ function anonCredential(
   return credential;
 }
 
-function titleFromPage(): { title?: string } {
-  const title = (globalThis as { document?: { title?: string } }).document?.title;
+function titleFromPage(page: PageLike | undefined): { title?: string } {
+  const title = page?.title;
   return title ? { title } : {};
 }
 
-function urlFromPage(): { url?: string } {
-  const loc = (globalThis as { location?: { pathname?: string; search?: string } }).location;
-  if (!loc?.pathname) return {};
-  return { url: `${loc.pathname}${loc.search ?? ""}` };
+/**
+ * The url, path and query AND HASH.
+ *
+ * THE HASH USED TO BE DROPPED, and for a hash-routed app the hash is the
+ * entire route: every tab of such an app reported the same `/` in `/dk/tabs`,
+ * so the one field a person is shown to tell two tabs apart told them nothing.
+ * It was dropped to keep a fragment out of a listing, which is a real concern
+ * about the wrong field -- the token is the capability here, and it travels in
+ * a header or a query parameter, never in `location`.
+ *
+ * Still path-relative and never the origin, which is the part that was right:
+ * the relay knows the origin, and a full url in a listing is an inventory of
+ * where somebody has been.
+ */
+export function urlFromPage(place: LocationLike | undefined): { url?: string } {
+  if (!place?.pathname) return {};
+  return { url: `${place.pathname}${place.search ?? ""}${place.hash ?? ""}` };
+}
+
+/**
+ * The three focus states, from the two things a document can be asked.
+ *
+ * ```
+ * visibilityState   hasFocus()   answer
+ * "hidden"          anything     "hidden"      a background tab
+ * "visible"         true         "focused"     the person is looking at this
+ * "visible"         false        "visible"     active tab, window not frontmost
+ * "visible"         absent       "visible"     an engine with no hasFocus:
+ *                                              the strongest honest answer
+ * absent            absent       undefined     not a page; say nothing
+ * ```
+ *
+ * `undefined` rather than a guess in the last row, and `TabFocus` says why it
+ * must stay distinguishable from `"hidden"`: a client that read "I cannot
+ * tell" as "not that one" would quietly become unable to drive a tab whose
+ * page does not report.
+ *
+ * `hasFocus()` is called in a `try`, because this runs on a timer in a page
+ * that may be mid-teardown and a throwing getter must not take the push with
+ * it. A throw is read as "cannot tell", never as focused.
+ */
+export function focusOf(page: PageLike | undefined): TabFocus | undefined {
+  if (!page) return undefined;
+  const visibility = page.visibilityState;
+  const asks = typeof page.hasFocus === "function";
+  if (visibility === undefined && !asks) return undefined;
+  // Anything that is not the string `"visible"` is treated as hidden. The spec
+  // has two values and has had others ("prerender", "unloaded"); none of them
+  // is a tab a person is looking at, and a new one must not read as focused.
+  if (visibility !== undefined && visibility !== "visible") return "hidden";
+  if (!asks) return "visible";
+  let focused: boolean | undefined;
+  try {
+    focused = page.hasFocus!();
+  } catch {
+    focused = undefined;
+  }
+  if (focused === true) return "focused";
+  if (focused === false) return "visible";
+  return visibility === "visible" ? "visible" : undefined;
 }

@@ -81,17 +81,20 @@ def render_snapshot(snapshot: Snapshot) -> str:
     if screen:
         lines.insert(0, f"screen: {screen}")
 
-    selected = snapshot.selected or ()
-    if selected:
+    # ``is None`` and not ``or ()``: an absent ``selected`` and an empty one
+    # are different claims, and the branch below has to tell them apart.
+    selected = snapshot.selected if snapshot.selected is not None else None
+    on_screen = selected or ()
+    if on_screen:
         # Before the rows, because "this one" is usually the subject of the
         # next verb and the model should not have to scan the table to find it.
-        lines.append("selected: " + ", ".join(selected))
+        lines.append("selected: " + ", ".join(on_screen))
 
     # Read off the snapshot defensively because a relay may be newer or older
     # than this client: the field arrives from the wire, and an older
     # ``Snapshot`` dataclass without it must keep rendering rather than raise.
     selected_count = getattr(snapshot, "selected_count", None)
-    if selected_count is not None and selected_count != len(selected):
+    if selected_count is not None and selected_count != len(on_screen):
         # The ids and the size of a selection are different facts, and the size
         # is the one a commit decision turns on. ``selected`` carries only what
         # is on screen — ten thousand ids in the uncached half is the token
@@ -101,11 +104,47 @@ def render_snapshot(snapshot: Snapshot) -> str:
         lines.append(
             f"selected {selected_count:,} rows in all; "
             + (
-                f"the {len(selected)} ids above are only the ones on screen"
-                if selected
+                f"the {len(on_screen)} ids above are only the ones on screen"
+                if on_screen
                 else "none of them are on screen"
             )
         )
+    elif not on_screen:
+        # An absent value reads as a claim — the same defect already fixed on
+        # ``page`` and on ``rows``, in the one remaining place it was still
+        # live.
+        #
+        # This block used to be nothing at all: the selection was described
+        # only when it was non-empty, so a screen with nothing selected said
+        # NOTHING about selections, and silence cannot be told from "this
+        # screen does not report selections". The library's own rule is that a
+        # commit is never made on a count nobody read, so a model asked to
+        # accept the selection here obeyed the rule against a screen that told
+        # it nothing — and went navigating other screens hunting for the
+        # number. Observed in an eval run, not imagined.
+        #
+        #   selectedCount: 0            the app counts, and the answer is none
+        #   count absent, selected []   the app says which ids on screen are
+        #                               selected and none are, but does not
+        #                               count, so a row off screen may still
+        #                               be selected
+        #   both absent                 the app does not report selections at
+        #                               all
+        #
+        # Three sentences because they are three different facts, and the whole
+        # bug was one of them being rendered as another. The middle one is the
+        # weakest claim and the one nobody thinks about; conflating it with the
+        # first would say "nothing is selected" on the strength of a window.
+        # Verbatim from the TS half.
+        if selected_count == 0:
+            lines.append("selected: none (0 rows; this screen counts the selection)")
+        elif selected is None:
+            lines.append("(this screen reports no selection)")
+        else:
+            lines.append(
+                "selected: none on screen; this screen does not count the selection, so rows "
+                "off screen may be selected"
+            )
 
     if snapshot.note:
         lines.append(f"note: {snapshot.note}")

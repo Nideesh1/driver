@@ -330,3 +330,237 @@ describe("a verb end to end", () => {
     },
   );
 });
+
+/**
+ * TWO REAL TABS IN ONE BROWSER, which is the only honest test of either of the
+ * two multi-tab problems.
+ *
+ * Everything else about both of them is asserted in process against injected
+ * fakes — a fake `document` for focus, an in-memory channel for the cross-tab
+ * notice — and neither fake can tell you that `document.hasFocus()` answers
+ * what we think it answers, or that a real `BroadcastChannel` crosses between
+ * two real pages of the same origin. This does.
+ *
+ * The demo is the cross-tab hazard in its purest form and that is not
+ * contrived: every tab of this page builds its OWN 3,412 contacts, so two tabs
+ * are two stores over what a real app would call one backend. A commit in one
+ * changes nothing in the other's store and does not move the other's `rev`.
+ */
+describe("two real tabs in one browser", () => {
+  /** The second tab. `page` above is the first. */
+  let other;
+
+  const tabs = async () => (await (await fetch(`${demo.base}/dk/tabs`)).json()).tabs || [];
+
+  /** The id `connect()` minted, read out of that tab's own `sessionStorage`.
+   *  Per-tab storage is what makes two tabs two identities; see `connect()`. */
+  const idOf = (p) =>
+    p.evaluate(() => sessionStorage.getItem("driverkit:tab:Northwind CRM"));
+
+  /** Poll, because `hello` rides a separate POST after the stream opens and a
+   *  focus change rides a debounced push after that. Never a fixed sleep. */
+  async function until(check, what, ms = 15_000) {
+    const deadline = Date.now() + ms;
+    let last;
+    for (;;) {
+      last = await tabs();
+      if (check(last)) return last;
+      if (Date.now() > deadline) {
+        throw new Error(`${what}; /dk/tabs was ${JSON.stringify(last)}`);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  /**
+   * Stop Playwright pretending every page is focused.
+   *
+   * THIS LINE IS THE WHOLE REASON THIS TEST IS HONEST, and finding out it was
+   * needed cost a wrong green. Playwright turns on Chrome's focus emulation for
+   * every page it drives, so that clicking and typing work on a background tab
+   * -- which means `document.hasFocus()` answers `true` in both tabs at once,
+   * in headless AND in headed real Chrome. A test written without this asserts
+   * that two tabs are indistinguishable by focus and passes whatever the
+   * library does, including nothing.
+   *
+   * Turned off through CDP, the real behaviour appears: exactly one tab has
+   * focus, the `focus` and `blur` events fire for real, and the answer follows
+   * the person. Note that `visibilityState` stays `"visible"` in the background
+   * tab regardless -- Playwright also runs Chrome with occluded-window
+   * backgrounding disabled -- so the discrimination here comes entirely from
+   * `hasFocus()`, which is exactly what makes `"visible"` a load-bearing third
+   * state rather than a nicety.
+   */
+  async function realFocus(p) {
+    const cdp = await context.newCDPSession(p);
+    await cdp.send("Emulation.setFocusEmulationEnabled", { enabled: false });
+  }
+
+  before(async () => {
+    other = await context.newPage();
+    await other.goto(`${demo.base}${APP}#/settings`, { waitUntil: "domcontentloaded" });
+    await other.waitForSelector("#screen h1", { timeout: 15_000 });
+  });
+
+  after(async () => {
+    await other?.close();
+  });
+
+  test("the relay lists both tabs, and exactly one of them says `focused`", async (t) => {
+    await go("#/contacts");
+    // After the navigations, because a page load puts Playwright's focus
+    // emulation back.
+    await realFocus(page);
+    await realFocus(other);
+
+    // Playwright's own idea of which tab is in front, twice, and the first one
+    // is not redundant. Turning focus emulation off changes the answer without
+    // firing an event -- nothing in the page is told -- so the tabs are still
+    // reporting what they reported a moment ago. Activating the other tab and
+    // then this one produces the real `focus` and `blur` pair, which is what
+    // the page listens for.
+    await other.bringToFront();
+    await page.bringToFront();
+
+    const both = await until((rows) => rows.length === 2, "both tabs did not connect");
+    const mine = await idOf(page);
+    const theirs = await idOf(other);
+    assert.notEqual(mine, theirs, "two tabs took one identity");
+    // Both report, and what they report is one of the three strings. This much
+    // holds in any browser and is the half that proves the field flows at all:
+    // a real `document`, through a real `connect()`, over real SSE, into a real
+    // relay's listing.
+    for (const row of both) {
+      assert.ok(
+        ["focused", "visible", "hidden"].includes(row.focus),
+        `a tab reported ${JSON.stringify(row.focus)}`,
+      );
+    }
+
+    const listed = await until(
+      (rows) => rows.filter((r) => r.focus === "focused").length === 1,
+      "exactly one focused tab never appeared",
+      4_000,
+    ).catch(() => null);
+    if (!listed) {
+      // SKIPPED, NOT FAILED, and the reason is a property of the harness rather
+      // than of the library. Playwright's bundled headless chromium ignores
+      // `Emulation.setFocusEmulationEnabled: false`, so every page goes on
+      // answering `document.hasFocus() === true` and the two tabs are
+      // genuinely indistinguishable here. Which is, incidentally, exactly the
+      // ambiguous case a client must refuse to guess in -- see `pick_tab`'s
+      // fourth rule -- so the honest outcome is a question, and the honest
+      // outcome for this assertion is a skip. Run it with DK_CHANNEL=chrome,
+      // where it passes.
+      t.skip(
+        "this browser cannot be made to report real focus (both tabs say `focused`); " +
+          "run with DK_CHANNEL=chrome",
+      );
+      return;
+    }
+
+    const front = listed.find((r) => r.focus === "focused");
+    assert.equal(front.tab, mine, "the frontmost tab is not the one reporting focused");
+    const back = listed.find((r) => r.tab === theirs);
+    // `"visible"` and not `"hidden"`, and the difference is the third state
+    // earning its place. Chrome under Playwright keeps a background page's
+    // `visibilityState` at `"visible"` (occluded-window backgrounding is
+    // disabled), so the only thing that tells these two tabs apart is
+    // `hasFocus()` -- and a two-state field would have had to call this one
+    // either focused, and send an agent to a tab nobody is looking at, or
+    // hidden, which is false. NOT absent: this page reports, so silence would
+    // be a different claim; see `TabFocus`.
+    assert.equal(back.focus, "visible");
+
+    // And it moves. The whole point of pushing on `visibilitychange` is that
+    // the answer tracks the person rather than being whatever it was at
+    // connect.
+    await other.bringToFront();
+    const swapped = await until(
+      (rows) => rows.find((r) => r.tab === theirs)?.focus === "focused",
+      "bringing the second tab to the front did not move `focus`",
+    );
+    assert.equal(swapped.find((r) => r.tab === mine).focus, "visible");
+  });
+
+  test("a tab's url in the listing follows its navigation, hash and all", async () => {
+    // THE STALE URL. `TabInfo.url` came from `hello` alone and `hello` is sent
+    // once per stream, so a hash-routed app's listing showed the route each tab
+    // had at connect — forever. For this app the hash IS the route, so the one
+    // field a person is shown to tell two tabs apart told them nothing.
+    const mine = await idOf(page);
+    await go("#/companies/acme-industrial");
+    const listed = await until(
+      (rows) => rows.find((r) => r.tab === mine)?.url?.endsWith("#/companies/acme-industrial"),
+      "the listing never caught up with a client-side navigation",
+    );
+    assert.equal(
+      listed.find((r) => r.tab === mine).url,
+      `${APP}#/companies/acme-industrial`,
+    );
+    // Path-relative, never the origin: the relay knows that already, and a full
+    // url in a listing is an inventory of where somebody has been.
+    assert.equal(listed.find((r) => r.tab === mine).url.startsWith("http"), false);
+  });
+
+  test("a commit in one tab makes the other refuse a commit as `changed-elsewhere`", async () => {
+    // THE HOLE. Before this, the second tab's snapshot reported stale rows as
+    // current, a `stale` check against its unmoved `rev` passed, and a plan
+    // token minted in it still verified. Here both tabs are driven from
+    // OUTSIDE, through the relay, which is the path that had no gate at all.
+    //
+    // `set-setting` is the commit, because it is `reversible` and so is not
+    // gated by the panel's dialog — this test is about the core's cross-tab
+    // check and not about clicking Yes in two windows.
+    await go("#/settings");
+    await other.goto(`${demo.base}${APP}#/settings`, { waitUntil: "domcontentloaded" });
+    await other.waitForSelector("#screen h1", { timeout: 15_000 });
+
+    const mine = await idOf(page);
+    const theirs = await idOf(other);
+    await until((rows) => rows.length === 2, "both tabs did not stay connected");
+
+    const callOn = async (tab, body) => {
+      const res = await fetch(`${demo.base}/dk/tabs/${encodeURIComponent(tab)}/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return await res.json();
+    };
+
+    const landed = await callOn(mine, {
+      name: "set-setting",
+      args: { name: "rows-per-page", value: "50" },
+    });
+    assert.equal(landed.ok, true, `the first tab's commit did not land: ${JSON.stringify(landed)}`);
+
+    // Same verb, other tab. Its own `rev` has not moved — nothing happened in
+    // it — so every check built out of its own `visible()` would pass.
+    const refused = await callOn(theirs, {
+      name: "set-setting",
+      args: { name: "rows-per-page", value: "100" },
+    });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.refused, "changed-elsewhere");
+    assert.match(refused.hint, /another tab of this app committed `set-setting`/);
+    assert.match(refused.hint, /Reading this screen again will NOT fix that/);
+
+    // AND THE FAILURE IS VISIBLE AND NOT ONLY REFUSED. The snapshot the
+    // refusal carries says in words that this tab may be behind -- which is
+    // what a read gets too, since every snapshot the driver hands back goes
+    // through the same annotation.
+    assert.match(refused.snapshot.note, /another tab of this app committed `set-setting`/);
+
+    // Through the relay as well. `/snapshot` serves the last snapshot the tab
+    // volunteered, and the refusal above was one -- so an agent that only ever
+    // LOOKS at this tab is told too, without having to try a commit to find
+    // out.
+    const served = await (
+      await fetch(`${demo.base}/dk/tabs/${encodeURIComponent(theirs)}/snapshot`)
+    ).json();
+    assert.match(served.note, /another tab of this app committed/);
+
+    await shot("10-two-tabs");
+  });
+});

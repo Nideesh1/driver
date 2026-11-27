@@ -190,7 +190,12 @@ test("a window with a known total renders the total, and says more exists in wor
     rows: [{ id: "c-1" }],
     page: { index: 0, size: 1, total: 20 },
   });
-  assert.match(text, /^where: contacts \(rev 1\)\nrows 1-1 of 20\n/);
+  // The selection line sits between them: a snapshot that reports no selection
+  // says so, rather than leaving a model to read silence as "none".
+  assert.match(
+    text,
+    /^where: contacts \(rev 1\)\n\(this screen reports no selection\)\nrows 1-1 of 20\n/,
+  );
   assert.match(text, /more rows exist off screen/);
   assert.doesNotMatch(text, /unknown/);
 });
@@ -263,6 +268,83 @@ test("selectedCount carries the size of a selection that selected cannot", () =>
     renderSnapshot({ where: "contacts", rev: 9, selected: ["c-0"], selectedCount: 1 }),
     /rows in all/,
   );
+});
+
+test("an empty selection says the app counted and got none, not nothing at all", () => {
+  // The defect this pins: the selection line used to be printed only when the
+  // selection was non-empty, so a screen with nothing selected said NOTHING
+  // about selections. Silence cannot be told from "this screen does not report
+  // selections", and an absent value reads as a claim — the same class of bug
+  // already fixed on `page` and on `rows`.
+  //
+  // It cost real behaviour, in an eval run rather than in theory: asked to
+  // accept the selected contacts with nothing selected, the model said in
+  // prose that accepting needs a count it had read first and it would not
+  // change data blind — obeying this library's own safety rule — and then
+  // spent two extra steps navigating to other screens hunting for a number the
+  // screen was perfectly able to tell it.
+  assert.match(
+    renderSnapshot({ where: "contacts", rev: 2, selectedCount: 0, rows: [{ id: "c-1" }] }),
+    /^where: contacts \(rev 2\)\nselected: none \(0 rows; this screen counts the selection\)\n/,
+  );
+  // `0` is a real answer whether or not the app also sends the (empty) list of
+  // on-screen ids, so both spellings of "the app counts and the answer is
+  // none" render the same sentence.
+  assert.match(
+    renderSnapshot({ where: "contacts", rev: 2, selectedCount: 0, selected: [], rows: [] }),
+    /selected: none \(0 rows; this screen counts the selection\)/,
+  );
+});
+
+test("a screen that reports no selection at all says so, and is not read as none", () => {
+  // A DIFFERENT sentence from `selectedCount: 0`, and keeping them apart is
+  // the whole point. `0` is an app that counts; both fields absent is an app
+  // that does not report selections, and a model that treats the second as the
+  // first will commit on a count nobody ever took.
+  assert.match(
+    renderSnapshot({ where: "settings", rev: 3, rows: [{ id: "s-1" }] }),
+    /\(this screen reports no selection\)/,
+  );
+  // Deliberately NOT the 0 sentence.
+  assert.doesNotMatch(
+    renderSnapshot({ where: "settings", rev: 3, rows: [{ id: "s-1" }] }),
+    /0 rows/,
+  );
+});
+
+test("ids on screen with no count is the weakest claim and says only that", () => {
+  // The third state, and the one nobody thinks about: the app says which of
+  // the ids in front of the model are selected and none of them are, but it
+  // does not count, so a row off screen may still be selected. Folding this
+  // into "nothing is selected" would be asserting an empty selection on the
+  // strength of one window — the `page`-absent mistake, in the selection.
+  const text = renderSnapshot({ where: "contacts", rev: 4, selected: [], rows: [{ id: "c-1" }] });
+  assert.match(text, /selected: none on screen; this screen does not count the selection, so rows off screen may be selected/);
+  assert.doesNotMatch(text, /0 rows/);
+  assert.doesNotMatch(text, /reports no selection/);
+});
+
+test("the three-state selection line never displaces a non-empty selection's wording", () => {
+  // The large-selection split is the wording a bulk commit turns on, and the
+  // new branch must be unreachable whenever there is anything to say the old
+  // way. Pinned here as well as in the `selectedCount` test above because the
+  // two now share a branch and a regression in one would look local.
+  const big = renderSnapshot({
+    where: "contacts",
+    rev: 5,
+    selected: ["c-0", "c-1", "c-2"],
+    selectedCount: 10000,
+    rows: [{ id: "c-0" }],
+  });
+  assert.match(big, /selected: c-0, c-1, c-2\n/);
+  assert.match(big, /selected 10,000 rows in all; the 3 ids above are only the ones on screen/);
+  assert.doesNotMatch(big, /none/);
+
+  // A selection entirely off screen keeps its own sentence rather than falling
+  // into "none": this is the case where saying "none" would be flatly false.
+  const offScreen = renderSnapshot({ where: "contacts", rev: 5, selectedCount: 1200, rows: [] });
+  assert.match(offScreen, /selected 1,200 rows in all; none of them are on screen/);
+  assert.doesNotMatch(offScreen, /selected: none/);
 });
 
 // ---- screens, the app's own briefing, and a commit that can be undone ----
@@ -709,4 +791,84 @@ test("the plan token is rendered under the count, or a model never sees it", () 
   // And a result with no plan reads exactly as it did before the field existed.
   const before = renderResult({ ok: true, count: 1, snapshot: { where: "rows", rev: 7 } });
   assert.ok(!before.includes("plan:"));
+});
+
+/** A recipe with an optional step and a real plan handoff: the shape a flat
+ *  list of `{verb, hint}` could not express. The two verbs are the pairing the
+ *  library enforces — a `describe` that counts and a `commit` that will only
+ *  run with that count's token. */
+const conditional = () =>
+  mount({
+    app: "Northwind",
+    visible: () => ({ where: "companies", screen: "companies", rev: 3 }),
+    flows: [
+      {
+        id: "accept-pending",
+        describe: "accept the contacts a company has waiting",
+        steps: [
+          {
+            verb: "goto",
+            skipWhen: "the person already named the company",
+            hint: "go to the companies list to find which one it is",
+          },
+          { verb: "select-pending", hint: "selects them and reports the count. READ IT." },
+          { verb: "accept-selected", hint: "acts on the selection, so that count is what moves" },
+        ],
+      },
+    ],
+    screens: [{ id: "companies", describe: "the companies list", url: "#/companies" }],
+    navigate: () => {},
+    verbs: [
+      { name: "select-pending", kind: "describe", describe: "select the pending ones", run: () => ({ count: 2 }) },
+      {
+        name: "accept-selected",
+        kind: "commit",
+        consumes: "plan",
+        describe: "accept the selection",
+        run: () => {},
+      },
+    ],
+  });
+
+test("an optional step is marked OPTIONAL beside its verb, with the condition the author wrote", () => {
+  // The gap this closes: a flat list read as five required steps, so the one
+  // step that is only there for the case where you do not already know the
+  // answer had nowhere to say so and the condition went into the middle of the
+  // hint. Which steps carry the job is structural, and a model skimming five
+  // numbered lines should be able to see it without reading every sentence.
+  const text = systemPrompt(conditional().manifest());
+  assert.match(
+    text,
+    /\n {2}1\. `goto` \(OPTIONAL — skip it when the person already named the company\) — go to the companies list/,
+  );
+  // And the note says what kind of thing that condition is. It is a sentence a
+  // model judges, not a rule anything evaluates — nothing in this library
+  // executes a flow — so the default when it is unclear has to be stated, and
+  // the safe default is to take the step.
+  assert.match(text, /A step marked OPTIONAL may be skipped when the condition beside it holds/);
+  assert.match(text, /not a rule something checks: when it is not clearly true, take the step/);
+});
+
+test("the step that consumes a plan names the numbered step that minted it", () => {
+  // The one value that crosses two steps in this library, made visible where
+  // the recipe is read. DERIVED from `kind` and `consumes`, which the manifest
+  // already carries: there is no second declaration for an author to keep in
+  // step, and nothing is claimed here that `mount()` has not already refused to
+  // let through.
+  const text = systemPrompt(conditional().manifest());
+  assert.match(text, /\n {2}2\. `select-pending` — selects them and reports the count/);
+  assert.match(
+    text,
+    /\n {2}3\. `accept-selected` \(takes the `plan` token step 2 returned\) — acts on the selection/,
+  );
+});
+
+test("a flow that marks nothing optional gets the note it got before `skipWhen` existed", () => {
+  // The additive claim about the CACHED PREFIX rather than about the manifest.
+  // Everything in this note is paid for once per session of every user, which
+  // is precisely the cost that is easy to stop weighing, so a paragraph about a
+  // construct the app does not use is not rendered at all.
+  const text = systemPrompt(mapped().manifest());
+  assert.ok(!text.includes("OPTIONAL"), "the optional paragraph was rendered for an app without one");
+  assert.match(text, /it did not expect — then say so\.\n\n`accept-pending`/);
 });

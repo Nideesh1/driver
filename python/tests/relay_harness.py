@@ -196,8 +196,11 @@ class Tab:
     def answer(self, call_id: str, result: dict[str, Any]) -> tuple[int, Any]:
         return self._post({"t": "result", "id": call_id, "result": result})
 
-    def push(self, snapshot: dict[str, Any]) -> tuple[int, Any]:
-        return self._post({"t": "snapshot", "tab": self.id, "snapshot": snapshot})
+    def push(self, snapshot: dict[str, Any], **extra: Any) -> tuple[int, Any]:
+        # ``extra`` so a test can send the fields a push may now carry — the
+        # tab's current ``url`` and ``focus`` — without a second helper that
+        # would drift from this one.
+        return self._post({"t": "snapshot", "tab": self.id, "snapshot": snapshot, **extra})
 
     def close(self) -> None:
         self.es.close()

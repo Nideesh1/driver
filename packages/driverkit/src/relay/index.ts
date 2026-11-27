@@ -1,8 +1,8 @@
 export { createRelay } from "./relay.ts";
-export type { Relay, RelayOptions } from "./relay.ts";
+export type { Relay, RelayOptions, RelayAuditEvent } from "./relay.ts";
 export type {
   CallFrame, DownFrame, HelloFrame, RelayRefusal, ResultFrame,
-  SnapshotFrame, TabSummary, UpFrame, WatchFrame, WireResult,
+  SnapshotFrame, TabFocus, TabSummary, UpFrame, WatchFrame, WireResult,
 } from "./frames.ts";
 export {
   TabAuth,

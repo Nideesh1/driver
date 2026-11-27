@@ -234,8 +234,10 @@ flows: [
     id: "accept-a-companys-pending-contacts",
     describe: "accept the contacts a company has waiting",     // one line, ≤1024 chars
     steps: [
-      { section: "find the company", verb: "goto",           hint: "goto(screen: \"companies\")" },
-      { section: "find the company", verb: "sort-companies", hint: "sort by pending so the work is at the top" },
+      { section: "find the company", verb: "goto",           hint: "goto(screen: \"companies\")",
+        skipWhen: "the person already named the company" },          // optional, one line, a SENTENCE
+      { section: "find the company", verb: "sort-companies", hint: "sort by pending so the work is at the top",
+        skipWhen: "you already know which company you want" },
       { verb: "open-company",        hint: "open it by name; its list opens on the pending tab" },
       { verb: "select-pending-here", hint: "reports the `count`. READ IT: it is what the next step changes." },
       { verb: "accept-selected",     hint: "takes no filter and acts on the selection. If the count was not what "
@@ -259,14 +261,64 @@ those sentences and not the steps.
 
 Validated at `mount()`, like a duplicate verb name: a step naming a verb the app does not have **throws**. A recipe
 citing a verb nobody implemented is a dead end whose only symptom is an agent halfway through a job meeting
-`unknown-verb`, after the navigation and before the commit. It is in `fingerprint()` for the reason `kind` and
+`unknown-verb`, after the navigation and before the commit. A flow that reaches a step whose verb declares
+`consumes: "plan"` with **no earlier `describe` step** throws for the same reason: the token comes from one of
+those, so that recipe could only ever end in `stale-plan`, found at the same worst moment. Both are visible
+statically, from what the verbs already declare. It is in `fingerprint()` for the reason `kind` and
 `screen` are, with one extra edge: a flow names verbs, so renaming one leaves every cached copy holding a recipe
 that cites a verb which no longer exists.
+
+### `skipWhen`: a condition, in words
+
+A flat list of steps reads as all-required, so a step that is only there for the case where you do not already know
+the answer had nowhere to say so and its condition went into the middle of a `hint`. `skipWhen` is that condition,
+in its own field: present means the step may be skipped when it holds, absent means take it. The renderers print it
+as `1. \`goto\` (OPTIONAL — skip it when …) — …`, so a model skimming five numbered lines can see which steps carry
+the job without reading every sentence.
+
+**It is a sentence and not an expression, and that is the design.** The obvious thing to put here is a
+machine-readable predicate — Arazzo has `successCriteria`, VS Code has `when` clauses. It would be counterfeit
+precision, because **nothing in this library evaluates a flow**: a flow is read and followed by the model, so the
+only evaluator a predicate could ever have is the reader it is written for, and a predicate a model interprets is a
+sentence with brackets round it. All of the rigour is in the notation and none in the enforcement, which is worse
+than prose rather than better — a condition that *looks* checkable gets trusted like one.
+
+The conditions that have to be enforced already have an enforced home. "If the count is over 500, ask first" is not
+a flow step; it is three lines where the core and not the model holds the gate:
+
+```ts
+approve: (req) => ((req.snapshot.selectedCount ?? 0) > 500 ? askTheHuman(req) : true)
+```
+
+and "never commit a count you have not read" is `consumes: "plan"` on the verb. So: conditions that decide whether
+**data moves** go in `approve`; conditions that decide **which steps you take** go in `skipWhen`, in words. One
+line, ≤1024 characters, and it counts against the flow's 10,000-character body budget — moving a sentence out of a
+`hint` buys no room.
+
+### What a flow deliberately cannot say
+
+**No iteration.** "For every company, accept its pending contacts" is N commits, and the whole `describe` → read
+the `count` → `commit` apparatus, plus the plan token, exists to make ONE commit over many rows safe *instead of*
+many commits over few: one count a person can check, one approval naming a real number. A declared loop would be
+the manifest teaching an agent to do the thing the plan token was built to stop — N approvals that each look small,
+with nobody shown the total. It is also unnecessary in the case it is wanted for, because a verb that operates on
+many rows **takes a predicate and resolves it inside the app**: declare `select-where(status: "pending")` and get
+one count and one commit. If the job cannot be expressed as a predicate, the repetition is a judgement call about
+data the agent must look at between iterations, and it is N approvals because it is N commits.
+
+**No data flow between steps** — no `from: "step2.slug"`. It would need a named output to refer to (`Verb.returns`),
+and carrying a value between steps means the AGENT holds it, which is what `Verb` is written against: *the agent
+should never learn an id it did not need*. The steps above pass nothing — `open-company` moves the screen,
+`select-pending-here` means *this* company, `accept-selected` means *this* selection — because the app holds the
+state between steps. The one value that genuinely crosses two steps is the plan token, and it is already declared
+per verb and enforced by the core; the renderers print which step it came from, derived from `kind` and `consumes`,
+so there is no second declaration to keep in step.
 
 ### The size budgets, and why there are any
 
 `SIZE_LIMITS`, copied from Apple's app skills: **`describe` ≤ 1024 characters on one line** (`FlowSpec` and
-`ScreenSpec` both), **a flow's steps ≤ 10,000 characters** together, and **`instructions` ≤ 10,000**.
+`ScreenSpec` both, and `FlowStep.skipWhen`), **a flow's steps ≤ 10,000 characters** together — every `section`,
+`verb`, `hint` and `skipWhen` — and **`instructions` ≤ 10,000**.
 
 `instructions` had no documented bound, so the honest answer to "how much may I write?" was "nobody has said", and
 the field drifts toward being a README. Everything here is in the cached prefix of every session of every user,

@@ -8,9 +8,9 @@
  * possible would be second-class.
  */
 
-import type { Driver, Manifest, Result, Scalar, Snapshot } from "../core/index.ts";
+import type { Driver, Manifest, Result, Scalar, Snapshot, TabFocus } from "../core/index.ts";
 
-export type { Driver, Manifest, Result, Scalar, Snapshot };
+export type { Driver, Manifest, Result, Scalar, Snapshot, TabFocus };
 
 export interface HelloFrame {
   t: "hello";
@@ -20,6 +20,10 @@ export interface HelloFrame {
   snapshot?: Snapshot;
   title?: string;
   url?: string;
+  /** Where this tab stands in the person's attention; see `TabFocus`. In
+   *  `hello` as well as in `snapshot` because `hello` is the only frame a tab
+   *  that is opened and left alone ever sends. */
+  focus?: TabFocus;
 }
 
 export interface ResultFrame {
@@ -35,6 +39,19 @@ export interface SnapshotFrame {
   t: "snapshot";
   snapshot: Snapshot;
   tab?: string;
+  /**
+   * The tab's url as it is NOW.
+   *
+   * Here as well as in `hello` because `hello` is sent once per stream and a
+   * single-page app navigates without reconnecting -- so `TabInfo.url`, which
+   * came from `hello` alone, was stale from the first client-side route change
+   * and had no way back. A push is already going out whenever the page moves.
+   */
+  url?: string;
+  /** The tab's focus as it is NOW. A change of focus is pushed on this frame
+   *  rather than on a frame of its own: the protocol gains a field, and a relay
+   *  written before it goes on reading the frame it always read. */
+  focus?: TabFocus;
 }
 
 export interface CallFrame {

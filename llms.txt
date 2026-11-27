@@ -12,6 +12,28 @@
 > <https://github.com/Nideesh1/driver> — `npm install && npm run build` for the TypeScript package (a workspace
 > link is what makes a bare `driverkit` import resolve), `pip install ./python` (or `PYTHONPATH=python/src`) for the
 > Python half, which is stdlib-only. Treat every API as unstable until there is a tagged release.
+> **To adopt it, read [INTEGRATING.md](INTEGRATING.md) — the single authoritative procedure, written to be
+> followed cold.** Everything else here explains the design; that file is the sequence.
+
+## Adding it to an app — start here
+
+[INTEGRATING.md](INTEGRATING.md) is the one place the procedure is written down. It is the file to read if the job
+is "make this app drivable"; it is written for an agent with somebody else's repository open, and nothing else is
+required reading first.
+
+```
+1  npm i driverkit                              (pre-release: from a checkout, for now)
+2  draft the verb list     ->  src/driverkit.ts  most of the work, and all of the judgement
+3  prune it                <-  the human's job: a drafted list is a proposal, not a deliverable
+4  import it once              in the app's entry point
+5  write /api/chat             the in-page panel does not work without it
+6  write ~5 eval cases         and run them. Until this, nobody knows whether step 2 worked
+```
+
+It carries the rules that are load-bearing (`kind`, the `describe`/count/`commit` pairing, `consumes: "plan"`,
+what `visible()` may say), what the agent must read before writing a verb, and what it must ask the human rather
+than decide. The deep references it links to live under `skills/driverkit/references/`, which a Claude Code skill
+loads on demand and anything else can read directly as ordinary Markdown.
 
 ## The one file you add
 
@@ -54,6 +76,10 @@ verb takes no predicate and acts on the current selection, so a count is always 
 
 ## Reference
 
+- [INTEGRATING.md](INTEGRATING.md): **the procedure for adopting it** — the six steps, the `kind` rules, the
+  prune gate, `/api/chat`, and the eval suite that tells you the verb list works
+- [AGENTS.md](AGENTS.md): the cross-harness entry point for this repository — where the procedure is, and the
+  commands and invariants for changing the repo itself
 - [README](README.md): the pitch, why not a screenshot and not a selector, the two ways in, `kind`, the entry points
 - [PROTOCOL.md](PROTOCOL.md): **source of truth** for the wire contract: frames, the `/dk/*` HTTP surface, every
   status code, `/watch` semantics, reserved refusals, body limits, who is allowed to do this

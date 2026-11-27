@@ -37,6 +37,23 @@ const driver = mount({
 
 That is the whole integration. One new file in your app, one import.
 
+## Adding it to your app
+
+The procedure is **[`INTEGRATING.md`](INTEGRATING.md)** — one file, written to be followed cold, by an agent or by
+you, with the app open:
+
+```
+1  npm i driverkit                              (pre-release: from a checkout, for now)
+2  draft the verb list     →  src/driverkit.ts  most of the work, and all of the judgement
+3  prune it                ←  a drafted list is a proposal. Which actions to expose is a product decision
+4  import it once             in the app's entry point
+5  write /api/chat            the in-page panel does not work without it
+6  write ~5 eval cases        and run them. Until this, nobody knows whether step 2 worked
+```
+
+The rest of this README is the argument for the design — why verbs and not pixels, what makes bulk work safe,
+what the agent actually sees. Read it to decide whether you want this; read `INTEGRATING.md` to do it.
+
 ## Why not a screenshot, and why not a selector
 
 Driving a web app from the outside usually means one of two things. Reading

@@ -163,15 +163,28 @@ const FLOWS = [
       "accept the contacts a company has waiting: find the company, look at what is pending " +
       "there, check how many, and accept them",
     steps: [
+      // The two steps of this phase are the ones that are NOT always needed,
+      // and `skipWhen` is where that now gets said. It used to be a clause in
+      // the middle of step one's hint — "If the person named the company, you
+      // can skip straight to `open-company`" — which is prose about the SHAPE
+      // of the recipe hidden inside prose about what `goto` is for, so a reader
+      // could not tell from the structure which of these five steps carry the
+      // job. The condition is a sentence because nothing evaluates it: whether
+      // the person named the company is a judgement about what was ASKED, and
+      // no predicate over this app's state could answer it. That is the honest
+      // half of conditions, and the enforced half is elsewhere — the count this
+      // flow turns on is gated by `consumes: "plan"` and by the approval hook,
+      // where the core holds it instead of the reader.
       {
         section: "find the company",
         verb: "goto",
-        hint: "`goto(screen: \"companies\")`. If the person named the company, you can skip "
-          + "straight to `open-company` instead — this step is for finding which one it is.",
+        skipWhen: "the person already named the company, in which case go straight to `open-company`",
+        hint: "`goto(screen: \"companies\")`. This step is for finding which company it is.",
       },
       {
         section: "find the company",
         verb: "sort-companies",
+        skipWhen: "you already know which company you want",
         hint: "sort by `pending` so the companies with work waiting are at the top. The rows "
           + "carry the count per company, so this is also how you answer \"who has the most?\".",
       },
@@ -205,7 +218,8 @@ const FLOWS = [
  * @param {() => void} [onChange] called after every mutation, once `rev` has
  *   moved. The page redraws, syncs the address bar and pushes a snapshot to
  *   the relay from here.
- * @param {{ approve?: import("driverkit").ApprovalPolicy, approvalTimeout?: number }} [options] who
+ * @param {{ approve?: import("driverkit").ApprovalPolicy, approvalTimeout?: number,
+ *           elsewhere?: import("driverkit").ElsewhereChannel }} [options] who
  *   approves a commit, passed straight through to `mount()`.
  *
  *   It is an argument rather than a constant in here because the answer is not
@@ -503,11 +517,18 @@ export function createApp(onChange = () => {}, options = {}) {
         note:
           "this screen is a dashboard, not a table: each row above is one metric tile and " +
           "`id` names the tile, not a record." +
+          // Only the half no field holds: that the selection was made on
+          // ANOTHER screen and still reaches a commit verb from here. The
+          // empty case used to be spelled out beside it — "nothing is selected
+          // anywhere, so a commit verb that acts on the selection has nothing
+          // to act on" — and that was this app patching a library defect at
+          // the wrong layer, as the person who wrote it said at the time. `renderSnapshot` now prints "selected: none (0 rows; this
+          // screen counts the selection)" off `selectedCount` itself, for
+          // every app that mounts driverkit rather than for this one.
           (store.selected.size
             ? ` ${store.selected.size} contacts are still selected from another screen and a ` +
               "commit verb would act on them from here."
-            : " nothing is selected anywhere, so a commit verb that acts on the selection " +
-              "has nothing to act on."),
+            : ""),
       };
     },
 
@@ -726,6 +747,17 @@ export function createApp(onChange = () => {}, options = {}) {
     ...(options.approvalTimeout === undefined
       ? {}
       : { approvalTimeout: options.approvalTimeout }),
+    // The cross-tab commit channel, when the embedding passed one. Absent
+    // otherwise, for the reason above: this file still produces the driver it
+    // produced before the channel existed when nobody says otherwise, and
+    // `check.mjs` mounts without one.
+    //
+    // This demo is the hazard in its purest form, which is why the browser
+    // test wires it: every tab builds its OWN 3,412 contacts, so a commit in
+    // one tab changes nothing in the other's store and the other's `rev` does
+    // not move. Without a channel the second tab reports accepted rows as
+    // `new`, at a `rev` that passes every staleness check there is.
+    ...(options.elsewhere === undefined ? {} : { elsewhere: options.elsewhere }),
     // Said once, in the cached half, and read by both ways in. See
     // `INSTRUCTIONS` for why it is no longer pasted into every snapshot.
     instructions: INSTRUCTIONS,

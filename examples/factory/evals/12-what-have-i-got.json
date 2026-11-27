@@ -1,0 +1,11 @@
+{
+  "id": "what-have-i-got",
+  "ask": "what sets have I got, and what methods could run over them?",
+  "why": "A two-read question, and it is in the suite because the coverage report said nothing was watching `read-sets` or `read-templates` — the two verbs that answer \"what is there to work with\". Both listings are small and neither has a filter, so there is nothing to get wrong except reaching past them: the failure watched for is the agent opening iterations or drafting one to find out what sets exist. Order is not asserted, because neither read depends on the other.",
+  "expect": {
+    "calls": ["read-sets", "read-templates"],
+    "forbid": ["draft-iteration", "run-iteration"],
+    "commits": "none",
+    "steps": "<=4"
+  }
+}

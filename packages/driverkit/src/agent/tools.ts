@@ -368,15 +368,46 @@ export function screensNote(screens: NonNullable<Manifest["screens"]>): string {
  * every step, so a flow with phases reads as phases and a flow without one
  * costs nothing.
  *
+ * TWO MARKS GO IN PARENTHESES AFTER THE VERB, and both are there so that a
+ * model skimming five numbered lines can see the shape of the recipe without
+ * reading every hint:
+ *
+ *   OPTIONAL — a step with a `skipWhen`. Which steps carry the job and which
+ *   are there for the case where you do not already know the answer is
+ *   structural, and before the field it was a clause buried mid-hint.
+ *
+ *   the plan handoff — a step whose verb consumes a plan, pointing at the
+ *   numbered step whose `describe` mints it. DERIVED, not declared: it is read
+ *   off `Verb.kind` and `Verb.consumes`, which the manifest already carries, so
+ *   there is nothing for an author to keep in step and nothing claimed here
+ *   that `mount()` has not already refused to let through. It is the one value
+ *   that crosses two steps in this library — see `FlowStep` for why there is no
+ *   general way to say "pass step 2's output into step 3".
+ *
  * Verbatim from the Python half.
  */
-function renderFlow(flow: NonNullable<Manifest["flows"]>[number]): string {
+function renderFlow(
+  flow: NonNullable<Manifest["flows"]>[number],
+  verbs: Manifest["verbs"],
+): string {
   const lines = [`\`${flow.id}\` — ${flow.describe}`];
   let section: string | undefined;
+  // The numbered step whose `describe` verb last minted a plan token, so the
+  // mark can name it. Updated AFTER the current step is rendered: a describe
+  // does not consume its own plan.
+  let minted: number | undefined;
   flow.steps.forEach((step, i) => {
     if (step.section && step.section !== section) lines.push(`  (${step.section})`);
     section = step.section;
-    lines.push(`  ${i + 1}. \`${step.verb}\` — ${step.hint}`);
+    const verb = verbs.find((v) => v.name === step.verb);
+    const marks: string[] = [];
+    if (step.skipWhen) marks.push(`OPTIONAL — skip it when ${step.skipWhen}`);
+    if (verb?.consumes === "plan" && minted !== undefined) {
+      marks.push(`takes the \`plan\` token step ${minted} returned`);
+    }
+    const mark = marks.length ? ` (${marks.join("; ")})` : "";
+    lines.push(`  ${i + 1}. \`${step.verb}\`${mark} — ${step.hint}`);
+    if (verb?.kind === "describe") minted = i + 1;
   });
   return lines.join("\n");
 }
@@ -397,7 +428,10 @@ function renderFlow(flow: NonNullable<Manifest["flows"]>[number]): string {
  * Static, so it rides in the prefix that was already being cached and costs
  * nothing per turn. Verbatim from the Python half.
  */
-export function flowsNote(flows: NonNullable<Manifest["flows"]>): string {
+export function flowsNote(
+  flows: NonNullable<Manifest["flows"]>,
+  verbs: Manifest["verbs"] = [],
+): string {
   return (
     "THE JOBS THIS APP SAYS ITS VERBS ARE USUALLY COMBINED INTO. Each one is a recipe for " +
     "YOU to carry out with the verbs you already have. **There is no tool that runs a " +
@@ -405,8 +439,19 @@ export function flowsNote(flows: NonNullable<Manifest["flows"]>): string {
     "one actually returned and can change course, which something running them for you " +
     "could not. Take the steps in order, read what each verb reports before the next, and " +
     "depart from the recipe when the screen says something it did not expect — then say so." +
+    // The sentence about OPTIONAL steps is added only when some step actually
+    // is one. Everything in here rides in the cached prefix of every session of
+    // every user, and a paragraph about a construct the app does not use is the
+    // kind of cost that is real, paid once, and invisible -- which is the exact
+    // cost `SIZE_LIMITS` exists to make somebody weigh. An app whose flows mark
+    // nothing optional gets the note it got before the field existed.
+    (flows.some((f) => f.steps.some((s) => s.skipWhen))
+      ? " A step marked OPTIONAL may be skipped when the condition beside it holds, and " +
+        "that condition is a sentence for you to judge, not a rule something checks: when " +
+        "it is not clearly true, take the step."
+      : "") +
     "\n\n" +
-    flows.map(renderFlow).join("\n\n")
+    flows.map((f) => renderFlow(f, verbs)).join("\n\n")
   );
 }
 
@@ -484,7 +529,9 @@ export function systemPrompt(manifest: Manifest, instructions?: string): string 
   // last is the one a model follows when two of them disagree and the app's
   // own voice should outrank a list the core rendered.
   if (manifest.screens && manifest.screens.length) parts.push(screensNote(manifest.screens));
-  if (manifest.flows && manifest.flows.length) parts.push(flowsNote(manifest.flows));
+  if (manifest.flows && manifest.flows.length) {
+    parts.push(flowsNote(manifest.flows, manifest.verbs));
+  }
 
   // The app's own briefing, then the host's. Both last, not first: an
   // app-specific note is an addition to these rules and not a replacement for

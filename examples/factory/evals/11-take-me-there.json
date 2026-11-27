@@ -1,0 +1,10 @@
+{
+  "id": "take-me-there",
+  "ask": "show me what the blog-pipeline-run-check iteration found",
+  "why": "The cheapest ask in the suite, as a control, and it is about a screen rather than an answer: \"show me\" is a request to move the person's screen, which is what `goto` is for and why a navigation is a `read`. The screen wanted is `iteration-findings`, which groups findings by the descent that produced them and carries the verdict panel; `iteration` (the detail screen) is a near miss and is not forbidden, because an agent that lands there and then navigates on has not done anything wrong. What is asserted is that nothing was committed to show somebody something.",
+  "expect": {
+    "calls": ["goto"],
+    "commits": "none",
+    "steps": "<=4"
+  }
+}

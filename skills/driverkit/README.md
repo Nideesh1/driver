@@ -7,22 +7,29 @@ and MCP, set up tab-token auth for a multi-user deployment, reach a button nobod
 `driverkit/controls`, and troubleshoot. `SKILL.md` holds the decision tree, the rules and the common recipes;
 [references/](references) holds the details, loaded only when needed.
 
-Install it (SKILL.md + references) into your user skills, from a checkout:
+Install it (SKILL.md + references + **`INTEGRATING.md`**) into your user skills, from a checkout:
 
 ```bash
-d=~/.claude/skills/driverkit; src=/path/to/driverkit/skills/driverkit
-mkdir -p "$d" && cp "$src/SKILL.md" "$d/" && cp -R "$src/references" "$d/"
+d=~/.claude/skills/driverkit; repo=/path/to/driverkit
+mkdir -p "$d" && cp "$repo/INTEGRATING.md" "$repo/skills/driverkit/SKILL.md" "$d/" \
+  && cp -R "$repo/skills/driverkit/references" "$d/"
 ```
 
 Or from the repository, once it is public:
 
 ```bash
-d=~/.claude/skills/driverkit; base=https://raw.githubusercontent.com/driverkit/driverkit/main/skills/driverkit
-mkdir -p "$d/references" && curl -fsSL "$base/SKILL.md" -o "$d/SKILL.md"
-for f in authoring-verbs worked-example snapshot widget relay-mcp auth controls protocol packaging troubleshooting; do
-  curl -fsSL "$base/references/$f.md" -o "$d/references/$f.md"
+d=~/.claude/skills/driverkit; root=https://raw.githubusercontent.com/Nideesh1/driver/main
+mkdir -p "$d/references"
+curl -fsSL "$root/INTEGRATING.md" -o "$d/INTEGRATING.md"
+curl -fsSL "$root/skills/driverkit/SKILL.md" -o "$d/SKILL.md"
+for f in authoring-verbs worked-example snapshot screens widget relay-mcp auth controls eval protocol packaging troubleshooting; do
+  curl -fsSL "$root/skills/driverkit/references/$f.md" -o "$d/references/$f.md"
 done
 ```
+
+**`INTEGRATING.md` is not optional here.** It is the repository's single authoritative adoption procedure, and
+`references/authoring-verbs.md` defers to it rather than keeping a second copy — so a skill installed without it
+loses the procedure. It is authored at the repo root and copied, never edited in the skill directory.
 
 Then ask Claude "what verbs should this app expose to driverkit?", "add a driverkit panel to this page", "drive
 this tab from an MCP client" or "why does every call come back stale?" (or type `/driverkit`). Unlike some skills
@@ -37,5 +44,5 @@ reader acts on.
 
 Editing: `SKILL.md` carries only what is needed to choose a path and to not get the dangerous things wrong
 (`kind`, keys, reserved slugs, `rev`); anything a reader needs *while writing code* belongs in a reference. The
-heart of the skill is [references/authoring-verbs.md](references/authoring-verbs.md) and its worked example — if
-only one file is kept accurate, keep those two.
+procedure itself is edited at the repo root, in [`INTEGRATING.md`](../../INTEGRATING.md) — if only one file is kept
+accurate, keep that one, and after it [references/worked-example.md](references/worked-example.md).

@@ -91,6 +91,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator, Mapping, Sequence
@@ -290,6 +291,14 @@ class _Pending:
 
     event: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
+    #: Who asked, which tab and verb they asked for, and when the relay took
+    #: the call -- everything ``on_audit`` needs, carried on the record because
+    #: two of the five places a call can be settled are nowhere near the
+    #: dispatch: a stream closing, and the relay shutting down.
+    principal: str = ""
+    tab: str = ""
+    verb: str = ""
+    started: float = 0.0
 
 
 @dataclass
@@ -311,6 +320,11 @@ class _Tab:
     app: str | None = None
     title: str | None = None
     url: str | None = None
+    #: Where the tab said its person's attention is: ``focused``, ``visible``
+    #: or ``hidden``. Stored as the tab sent it and never computed — the relay
+    #: cannot see ``document.hasFocus()``, which is the whole reason the page
+    #: reports it.
+    focus: str | None = None
     manifest: dict[str, Any] | None = None
     snapshot: dict[str, Any] | None = None
 
@@ -354,6 +368,34 @@ class Relay:
     in the same call, or the relay refuses to exist.
 
     ``on_error`` is called with anything raised while writing to a stream.
+
+    ``on_audit`` is where this relay's own audit records go: one mapping per
+    ``/call`` it handled, with the keys ``at``, ``ms``, ``principal``, ``tab``,
+    ``verb`` and ``outcome``, identical in name and meaning to the
+    ``RelayAuditEvent`` the TypeScript relay emits.
+
+    It exists for the one fact an in-page audit hook cannot know and this relay
+    cannot help knowing: WHICH PRINCIPAL asked. A driver sees a call and has no
+    idea whether it came from the panel in front of a person, a cron job, or
+    somebody else's agent holding a token; the relay resolved the credential, so
+    it is the only place in the library where "who" is a fact rather than a
+    guess.
+
+    And it says no more than that. It does not report what the verb DID: the
+    driver decided that, in another process, and a copy of somebody else's
+    decision is a second source of truth that can disagree with the first — a
+    relay logging ``ok`` for a call whose tab died mid-commit would be asserting
+    an outcome nobody observed. So ``outcome`` is the RELAY's verdict and is one
+    of ``delivered`` (the tab answered; what it answered is in the driver's own
+    record), ``no-such-tab``, ``tab-went-away`` or ``timeout``. The last three
+    are the calls no other log will ever mention, because they never reached, or
+    never returned from, a driver. **Count commits from the drivers' records**
+    and read this one for who asked; that is the line that keeps the two from
+    being two countings of one call.
+
+    It is called and not awaited, and a throw goes to ``on_error``: a 500
+    because the logging backend is down would turn an audit trail into an
+    outage.
     """
 
     def __init__(
@@ -365,6 +407,7 @@ class Relay:
         *,
         auth: TabAuth | None = None,
         resolve_principal: Callable[[Mapping[str, str]], str | None] | None = None,
+        on_audit: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         if allow_remote and auth is None and resolve_principal is None:
             # Raised in the constructor, before a socket exists, for the same
@@ -384,6 +427,7 @@ class Relay:
         self._auth = auth
         self._resolve = resolve_principal
         self._on_error = on_error or (lambda _err: None)
+        self._on_audit = on_audit
 
         # One re-entrant lock over the whole registry. A lock per tab would be
         # the obvious refinement and would buy nothing: every critical section
@@ -455,7 +499,9 @@ class Relay:
             for tab in tabs:
                 for pending in tab.pending.values():
                     self._settle(
-                        pending, self._refusal("tab-went-away", "the relay is shutting down")
+                        pending,
+                        self._refusal("tab-went-away", "the relay is shutting down"),
+                        "tab-went-away",
                     )
                 tab.pending.clear()
         for stream in [*(t.stream for t in tabs), *watchers]:
@@ -694,6 +740,7 @@ class Relay:
                     self._settle(
                         pending,
                         self._refusal("tab-went-away", f"tab `{tab_id}` closed its stream"),
+                        "tab-went-away",
                     )
                 tab.pending.clear()
 
@@ -753,7 +800,7 @@ class Relay:
                 # reconnect, and the app may have navigated in between, so the
                 # later one wins on every field it carries and leaves the rest
                 # alone.
-                for name in ("app", "title", "url", "manifest"):
+                for name in ("app", "title", "url", "focus", "manifest"):
                     if name in frame and frame[name] is not None:
                         setattr(tab, name, frame[name])
                 snapshot = frame.get("snapshot")
@@ -772,6 +819,17 @@ class Relay:
                         400, "a `snapshot` frame needs a `snapshot` object", "bad-frame"
                     )
                 tab.snapshot = dict(snapshot)
+                # The same upsert rule `hello` uses, on the two fields a push
+                # may now carry. `url` is here because it had no other way of
+                # ever being right: it came from `hello` alone, and a
+                # single-page app navigates without reconnecting, so a tab's
+                # url in `/dk/tabs` was whatever it had been at page load.
+                # Absent leaves the stored value alone, which is what keeps a
+                # tab connected by a hand-written loop — or by a driverkit
+                # older than this field — reading exactly as it did.
+                for name in ("url", "focus"):
+                    if frame.get(name) is not None:
+                        setattr(tab, name, frame[name])
                 # Always forwarded, even at an unchanged rev. This frame is the
                 # tab SAYING the page moved, and second-guessing it here would
                 # make the relay the thing that decides what counts as a change
@@ -817,7 +875,10 @@ class Relay:
                 # rest, which is the cost the endpoint was added to remove.
                 # Deduped on `rev`, so a refusal that moved nothing stays quiet.
                 self._push(tab)
-            self._settle(pending, dict(result))
+            # `delivered`, and nothing more. The tab answered; what it
+            # answered is the driver's own record to make, in the process where
+            # it was decided.
+            self._settle(pending, dict(result), "delivered")
             return _accepted()
 
     # ---- the agent's end ---------------------------------------------------
@@ -834,6 +895,10 @@ class Relay:
             return bad_request(400, "a call needs a `name`")
         assert isinstance(parsed, Mapping)
 
+        # Before the lookup, so `ms` is the time the agent actually waited and
+        # not the time minus whatever the registry cost.
+        started = time.time()
+
         with self._lock:
             tab = self._owned(who, tab_id)
             if tab is None:
@@ -846,13 +911,20 @@ class Relay:
                 # in status, slug and hint to one for an id that was never
                 # minted. A 403 here would turn `/call` into a membership test
                 # for other people's tab ids.
+                # Recorded, and this is the half of the trail the driver cannot
+                # have: nothing reached a tab, so no `on_audit` anywhere else in
+                # the library will ever hear about this call. An agent working
+                # through tab ids it does not own leaves its marks only here.
+                self._audit(who.id, tab_id, name, started, "no-such-tab")
                 return _json(
                     200,
                     self._refusal("no-such-tab", NO_SUCH_TAB_HINT + "; GET /dk/tabs to list them"),
                 )
             call_id = f"c-{self._next_call}"
             self._next_call += 1
-            pending = _Pending()
+            pending = _Pending(
+                principal=who.id, tab=tab_id, verb=name, started=started
+            )
             tab.pending[call_id] = pending
             frame: dict[str, Any] = {"t": "call", "id": call_id, "name": name}
             args = parsed.get("args")
@@ -890,6 +962,7 @@ class Relay:
             sent = tab.stream.write(_sse(frame))
             if not sent:
                 tab.pending.pop(call_id, None)
+                self._audit(who.id, tab_id, name, started, "tab-went-away")
                 return _json(200, self._refusal("tab-went-away", f"writing to tab `{tab_id}` failed"))
 
         # NO LOCK HELD. This is the blocking half of the relay, and holding
@@ -913,6 +986,7 @@ class Relay:
                             "timeout",
                             f"tab `{tab_id}` did not answer `{name}` within {self.timeout_s}s",
                         ),
+                        "timeout",
                     )
         assert pending.result is not None
         # 200 even for a refusal. The HTTP layer succeeded: the question was
@@ -1057,12 +1131,53 @@ class Relay:
             except Exception as err:  # pragma: no cover - write() does not raise
                 self._on_error(err)
 
-    def _settle(self, pending: _Pending, result: dict[str, Any]) -> None:
-        """Answer a waiting call once. Called with the lock."""
+    def _settle(self, pending: _Pending, result: dict[str, Any], outcome: str) -> None:
+        """Answer a waiting call once, saying what the RELAY decided.
+
+        ``outcome`` is required rather than derived from ``result``, for the
+        reason the TypeScript relay's is: a relay refusal is recognisable from a
+        ``WireResult`` only by its missing ``snapshot``, and an audit record
+        must not rest on an invariant the wire can violate. Required also means
+        a sixth place to settle a call cannot be added without saying what it
+        is.
+
+        One record per call, from the one place a call can be answered: the
+        ``pending.result is not None`` guard above is what makes it one, because
+        the deadline and a late ``result`` frame race and the loser must not log
+        a second outcome for a call already answered.
+        """
         if pending.result is not None:
             return
         pending.result = result
         pending.event.set()
+        self._audit(pending.principal, pending.tab, pending.verb, pending.started, outcome)
+
+    def _audit(self, principal: str, tab: str, verb: str, started: float, outcome: str) -> None:
+        """Hand one record to the host, and survive the host.
+
+        Byte for byte the same event the TypeScript relay emits -- same five
+        field names, same four outcomes, ``at`` and ``ms`` in milliseconds since
+        the epoch because that is what ``Date.now()`` is and an operator reading
+        both logs must not have to convert one. A throw goes to ``on_error``,
+        where everything else this relay cannot help goes: a 500 because the
+        logging backend is down would turn an audit trail into an outage.
+        """
+        if self._on_audit is None:
+            return
+        at = time.time()
+        try:
+            self._on_audit(
+                {
+                    "at": int(at * 1000),
+                    "ms": int((at - started) * 1000),
+                    "principal": principal,
+                    "tab": tab,
+                    "verb": verb,
+                    "outcome": outcome,
+                }
+            )
+        except Exception as err:
+            self._on_error(err)
 
     def _refusal(self, refused: str, hint: str) -> dict[str, Any]:
         """A refusal the relay originated: one of a closed set, and with NO
@@ -1099,6 +1214,12 @@ class Relay:
             out["title"] = tab.title
         if tab.url is not None:
             out["url"] = tab.url
+        # Forwarded exactly as the tab said it, including not at all. Absence
+        # is "the tab did not say", which a client must not read as "not the
+        # one". The relay has no opinion here and originates no value, for the
+        # same reason it does not interpret ``rev``.
+        if tab.focus is not None:
+            out["focus"] = tab.focus
         if isinstance(tab.manifest, Mapping):
             # The version, not the manifest. Listing tabs is the cheap call an
             # agent makes often; inlining every manifest would make it the

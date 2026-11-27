@@ -1,7 +1,8 @@
 # A worked example: a messy app, end to end
 
 The app: **Dispatch**, an internal React tool for a courier company. Three years old, no design system, written by
-four people. This is the procedure in [authoring-verbs.md](authoring-verbs.md) run over it.
+four people. This is the procedure in [`INTEGRATING.md`](../../../INTEGRATING.md) — step 2, "draft the verb
+list" — run over it.
 
 ## What is in the repo
 
