@@ -12,3 +12,7 @@ export type {
   BroadcastChannelCtor, BroadcastChannelLike, BroadcastElsewhereOptions,
 } from "./elsewhere.ts";
 export type { CallFrame, HelloFrame, ResultFrame, SnapshotFrame } from "./frames.ts";
+// Keeping a spend ceiling across a page load. See `budget.ts`: without it an
+// agent that can navigate can refresh its way past `MountOptions.budget`.
+export { budgetKey, localBudgetStore } from "./budget.ts";
+export type { LocalBudgetStore, LocalBudgetStoreOptions } from "./budget.ts";

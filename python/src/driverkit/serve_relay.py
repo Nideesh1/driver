@@ -474,7 +474,7 @@ def serve(
     port: int = 7777,
     host: str = "127.0.0.1",
     *,
-    timeout_s: float = 15.0,
+    timeout_s: float = 60.0,
     ping_s: float = 20.0,
     allow_remote: bool = False,
     auth: TabAuth | None = None,
@@ -558,8 +558,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=_env_float("DK_TIMEOUT_S", 15.0),
-        help="seconds a call waits for the tab's result (env DK_TIMEOUT_S, default 15)",
+        default=_env_float("DK_TIMEOUT_S", 60.0),
+        help="seconds a call waits for the tab's result (env DK_TIMEOUT_S, default 60)",
     )
     parser.add_argument(
         "--ping",

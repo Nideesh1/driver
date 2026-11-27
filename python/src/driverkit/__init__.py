@@ -33,7 +33,7 @@ root. It, and not this code, is the thing to read first.
 from .auth import AuthError, Principal, TabAuth, mint_anon_credential
 from .client import Driverkit, DriverkitError, ProtocolError, TransportError
 from .relay import Relay, Response, Stream
-from .render import render_result, render_snapshot
+from .render import SLOW_MS, render_duration, render_result, render_snapshot
 from .types import (
     APPROVAL_REFUSALS,
     RELAY_REFUSALS,
@@ -85,6 +85,8 @@ __all__ = [
     "TransportError",
     "VerbKind",
     "VerbSpec",
+    "SLOW_MS",
+    "render_duration",
     "render_result",
     "render_snapshot",
     "__version__",

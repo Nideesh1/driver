@@ -79,6 +79,13 @@ handler, read the handler. Four to six files is normal; it is the hour this step
 If you are in Claude Code, `/driverkit:draft-verbs` prints a name-based survey of the repo first. That survey is
 evidence about where to look and nothing more — it does not replace reading the files.
 
+**Read its `unknown` lines first.** The survey guesses a `kind` by matching the function's name against three
+word lists, and every name it cannot place is printed as `unknown` rather than left out. That is not tidiness:
+a name it dropped used to be indistinguishable from a function that was not there, and the loss ran one way —
+an app whose writes are spelled `writeSet`, `castVerdict`, `abandonDescent` read as an app with no writes at
+all. So `0 commit` in the survey means *no name looked like a write*, and it means *this app has no writes*
+only when the `unknown` count is `0` too.
+
 ### Sort what you find into piles
 
 Do not start from the UI. Start from what already exists as a callable function: those verbs are cheap, precise,
@@ -104,9 +111,10 @@ grep -rln "useMutation\|fetch(\|axios\." src
 
 ### Then write the file
 
-One `mount()`, nothing else in it. **Six to twelve verbs** — the things a person would ask for out loud. A verb
-per exported function is a manifest nobody can read and a prompt nobody can afford; it also teaches the model your
-chrome instead of your domain.
+One `mount()`, nothing else in it. **Six to twelve verbs per screen, and under about twenty-five for the whole
+app** — the things a person would ask for out loud. (The demo app in `examples/contacts/` has eighteen across six
+screens; a one-screen integration that reaches twelve is already long.) A verb per exported function is a manifest
+nobody can read and a prompt nobody can afford; it also teaches the model your chrome instead of your domain.
 
 ```ts
 import { mount } from "driverkit";
@@ -217,10 +225,11 @@ nothing the manifest could have said.
   avoid a call instead of discovering the answer by making it. Declaring it also opts the verb into a dev-time
   check.
 - **Never use a reserved slug** as a verb name or a refusal — `mount()` throws. The list (`RESERVED_REFUSALS`,
-  exported by `driverkit`, is the authority): `stale`, `stale-plan`, `wrong-screen`, `unknown-verb`,
-  `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`, `declined-by-user`,
-  `approval-pending`, `approval-timeout`. `wrong-screen` is the one an app has most likely already invented for
-  itself.
+  exported by `driverkit`, is the authority) is all fifteen of: `stale`, `stale-plan`, `wrong-screen`,
+  `unknown-verb`, `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`,
+  `declined-by-user`, `approval-pending`, `approval-timeout`, `budget-spent`, `changed-elsewhere`.
+  `wrong-screen` is the one an app has most likely already invented for itself, and `stale-plan` is the one an
+  author drafting a `consumes: "plan"` pair reaches for before reading this line.
 - Return `ctx.refuse("slug", "hint")` for an expected no, `{ count }` from a `describe`, and nothing otherwise.
   **Throwing is a bug, not a no.**
 

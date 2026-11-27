@@ -65,6 +65,18 @@ import type {
   StorageLike,
   WindowLike,
 } from "./dom.ts";
+import {
+  closeDangling,
+  defaultSession,
+  forgetChat,
+  loadChat,
+  replayLines,
+  restoredLines,
+  saveChat,
+  scrubTurns,
+  trimTurns,
+} from "./chat.ts";
+import type { ChatInFlight } from "./chat.ts";
 import { spotlight } from "./highlight.ts";
 import { defaultStorage, positioner } from "./position.ts";
 import type { Fraction, Position } from "./position.ts";
@@ -161,12 +173,17 @@ export interface WidgetOptions
    *
    * This gates THE IN-PAGE RUN ONLY, which is the thing to know about it: it is
    * `drive`'s option, so a commit arriving over the relay or MCP never reaches
-   * it. The gate that covers every path is `MountOptions.approve`, and
-   * `Widget.approve` is this panel's dialog in that shape. When the driver was
-   * mounted with an `approve` hook, the panel installs no gate of its own —
-   * but passing this one puts it back, and then a commit from the in-page run
-   * is asked about twice: once by you here and once by the core's hook. That
-   * is a combination to pick deliberately or not at all.
+   * it, and its answer is not in the audit record — the core was never asked,
+   * so `onAudit` reports `approval: "not-asked"`. The gate that covers every
+   * path, and the one that lands in the record, is `MountOptions.approve`, and
+   * `Widget.approve` is this panel's dialog in that shape.
+   *
+   * Passing this also stops the panel installing its own dialog as the core's
+   * approver, which it otherwise does: you have said how you want to ask, and
+   * two gates for one commit is two dialogs. One exception, and it is yours to
+   * pick deliberately or not at all — when the APP declared `approve` as well,
+   * that hook is asked inside `call()` whatever this option says, so an
+   * in-page commit is asked about twice: once by you here and once by it.
    */
   onBeforeCommit?: DriveOptions["onBeforeCommit"];
   /** Shown in the header and on the launcher. Defaults to `PANEL_TITLE` in the
@@ -191,6 +208,49 @@ export interface WidgetOptions
   /** Where a remembered position and the settings are kept. Default
    *  `localStorage`, if reaching for it does not throw. */
   storage?: StorageLike;
+  /**
+   * Where a remembered CONVERSATION is kept. Default `sessionStorage`.
+   *
+   * A second storage and not `storage`, because the two want different
+   * lifetimes and the difference is the design rather than an accident. A pace
+   * and a pane position are per viewer and belong in `localStorage`, where they
+   * outlive the tab. A transcript is per TAB — two tabs of one app are two
+   * conversations and must not stomp each other — and holds the person's
+   * instructions and the model's prose about their records, which is a
+   * different privacy class on a machine that may be shared. `sessionStorage`
+   * survives a reload and dies with the tab, which is exactly the lifetime a
+   * conversation should have. See `chat.ts`.
+   */
+  session?: StorageLike;
+  /**
+   * Bring the conversation back after a page reload. **Default off.**
+   *
+   * Off by default on purpose: a library must not start writing its users'
+   * business prose to disk because somebody upgraded. Once an app has opted in,
+   * the VIEWER's switch in the settings view defaults on, and turning it off
+   * forgets what is already stored. This option is the harder of the two — an
+   * app handling records that must not be written down sets `false` and no
+   * viewer can undo it.
+   *
+   * What comes back is the conversation, not the run: see `chat.ts` on "restore
+   * everything, resume nothing". A reload mid-commit comes back with the panel
+   * saying which verb was in flight and that it cannot tell whether it landed.
+   */
+  rememberChat?: boolean;
+  /**
+   * Whether a call's elapsed time reaches the model. See `DriveOptions.timing`.
+   *
+   * **Defaults to `"slow"` here, where `drive` defaults to `"off"`**, and the
+   * split is the same judgement `onBeforeCommit` gets one level up: `drive` is
+   * a primitive whose existing callers must get byte-identical transcripts, and
+   * this is a panel somebody is watching work on a live app, where "that verb
+   * took twenty seconds" is a fact about the app worth a line. Nothing is
+   * rendered below a second, so a snappy app pays nothing for it.
+   *
+   * Pass `"always"` for the run that was asked to compare two fast verbs, and
+   * `"off"` to go back to a transcript with no durations in it at all.
+   */
+  timing?: DriveOptions["timing"];
   AbortController?: AbortControllerCtor;
   /**
    * Where the panel starts: one of the four corners, or `{ x, y }` pixels from
@@ -342,9 +402,16 @@ export interface Widget {
    * The panel's confirmation dialog, as a `MountOptions.approve` hook.
    *
    * This is how the one working confirmation UI in the repository comes to
-   * cover the relay path as well as the in-page one. Wire it up with a
-   * forward reference, because `mount()` has to happen before the panel that
-   * will answer for it exists:
+   * cover the relay path as well as the in-page one.
+   *
+   * YOU DO NOT HAVE TO WIRE THIS UP for the record to be true: a panel on a
+   * driver that declared no `approve` installs this function as the core's
+   * approver itself (`DriverApproval.adopt`), so a commit on any path renders
+   * this dialog and `onAudit` says what the person clicked. Wire it up when the
+   * app ALSO publishes the driver to a relay — `connect()` requires a
+   * declaration in the app's own source, and a panel's gate is not one, because
+   * it is gone when the panel is. Use a forward reference, because `mount()`
+   * has to happen before the panel that will answer for it exists:
    *
    * ```ts
    * let panel: Widget;
@@ -359,12 +426,12 @@ export interface Widget {
    * duration, so the agent that is being asked cannot call anything else —
    * including `press` on an approve button — while the question is open.
    *
-   * The one difference from the in-page path, and it is unavoidable: the count
-   * comes from the screen (`Snapshot.selectedCount`, then the visible
-   * `selected`) because there is no run whose last `describe` could have
-   * reported one. An app whose selection size is only knowable from a verb's
-   * `Report.count` will show "No count was reported" here, which is the honest
-   * answer and is itself a reason to say no.
+   * The count comes from the run's last `describe` when there is a run in
+   * flight, and from the screen otherwise (`Snapshot.selectedCount`, then the
+   * visible `selected`). An app whose selection size is only knowable from a
+   * verb's `Report.count`, asked about a commit that arrived between runs, will
+   * show "No count was reported" here — which is the honest answer and is
+   * itself a reason to say no.
    */
   approve: (req: ApprovalRequest) => Promise<Approval>;
   /** Move the panel, as `WidgetOptions.position`. Persisted like a drag. */
@@ -727,6 +794,31 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     settingsView.appendChild(commitRow);
   }
 
+  // Hidden unless the APP opted in, because a switch for a thing that cannot
+  // happen is a switch that teaches somebody the wrong thing about where their
+  // conversation goes. The app's `false` is the harder of the two keys; see
+  // `WidgetOptions.rememberChat`.
+  if (options.rememberChat === true) {
+    const rememberRow = setRow(
+      "Remember this conversation",
+      "Bring the conversation back if this page reloads. It is kept in this tab only, and it goes when you close the tab. Turning this off forgets what is already stored. Nothing is resumed either way — a run does not restart by itself.",
+    );
+    rememberRow.appendChild(
+      toggle("dk-t-remember", "Remember this conversation", () => settings.rememberChat, (on) => {
+        settings.rememberChat = on;
+        // Acted on at once, in both directions. Switching it off is a request
+        // about what is on the disk right now and not only about what happens
+        // next: somebody turning this off on a shared machine means "and get
+        // rid of it", and a panel that waited until the next write to honour
+        // that would have kept the transcript through the one moment they
+        // asked for it to be gone. `rememberNow` does the forgetting itself
+        // when the switch is off, which keeps the two directions in one place.
+        rememberNow();
+      }),
+    );
+    settingsView.appendChild(rememberRow);
+  }
+
   /**
    * Clear the conversation: the destructive option, in the one place a person
    * goes looking for one.
@@ -876,6 +968,35 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
    *  panel that tracked its own presses would be wrong in exactly those
    *  cases. */
   let runState: RunState = "running";
+  /**
+   * The last count a `describe` reported in the run in flight, or undefined.
+   *
+   * Lifted out of `ask()` when the dialog became the core's approver, and the
+   * lift is the point rather than a tidy-up: the question used to be asked
+   * from inside the run, where this was in scope, and is now asked from inside
+   * `driver.call()`, where nothing of the run is. Without it every in-page
+   * commit would have gone back to asking "accept the current selection?"
+   * instead of "accept 1,000 contacts?" -- which is the number the whole
+   * dialog exists to put in front of somebody.
+   *
+   * Cleared when a run starts and when one ends, so a count from a finished
+   * run can never be read as the size of a commit that arrived afterwards over
+   * the relay. Cleared when a question is ASKED, because at that moment the
+   * number has been put in front of somebody and is spoken for.
+   */
+  let lastCount: number | undefined;
+  /**
+   * Every question on screen with no answer yet, as the function that answers
+   * it.
+   *
+   * Only ever non-empty while somebody is being asked something. It exists for
+   * `unmount`: a question asked through the core's gate has no run behind it
+   * when it came over the relay, so there is no abort signal to answer it, and
+   * a panel that is torn down with one open would leave `driver.call()` waiting
+   * on a promise nobody can resolve -- forever, since `approvalTimeout` is
+   * absent by default. That is a dead app, caused by closing a chat panel.
+   */
+  const openQuestions = new Set<() => void>();
   // The wrapper's classes, as flags. Written in one place and in one order,
   // because three separate string edits to `className` is three chances for
   // one of them to drop another's class.
@@ -898,6 +1019,62 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
    * the second clear has to invalidate the run too.
    */
   let era = 0;
+  /**
+   * Where a remembered conversation goes, or undefined when none is kept.
+   *
+   * Resolved once, at mount, and `undefined` whenever the app did not opt in —
+   * so an app that passed no `rememberChat` never reaches storage at all, not
+   * even to read it. The viewer's switch is checked at each write rather than
+   * here, because they can turn it off halfway through a conversation and the
+   * point of the switch is that doing so forgets what is already stored.
+   */
+  const session = options.rememberChat === true ? (options.session ?? defaultSession()) : undefined;
+  /**
+   * What the panel believes is happening to the app right now, for the record.
+   *
+   * The whole of "a reload mid-commit comes back saying so". Set when a call is
+   * announced and when a question goes on screen, cleared when either settles,
+   * and written into storage as it stands — so a page that dies between the
+   * two is a page whose stored record says which verb was open and in what
+   * state. See `ChatInFlight` for why `asked` and `sent` are different facts.
+   */
+  let inFlight: ChatInFlight | undefined;
+  /**
+   * The conversation as the run in flight is building it, or null between runs.
+   *
+   * **Why this exists at all, when `drive` hands back `messages` already.** It
+   * hands them back when the run ENDS, and the whole case this feature is
+   * shaped by is a page that dies five steps in. Without this, a reload
+   * mid-commit came back with the notice about the in-flight verb and an empty
+   * conversation — it had the alarming half and not the useful half, and the
+   * person's own question, the one they would have to retype, was the first
+   * thing lost.
+   *
+   * So the three per-call events are used to rebuild exactly what the loop is
+   * pushing: `onSay` is an assistant turn, `onBeforeCall` adds that turn's
+   * calls, and `onResult` carries the rendered tool turn verbatim as `text`. It
+   * is a mirror and never a second source of truth — `out.messages` replaces it
+   * outright when the run ends, and that is the pruned, authoritative version.
+   * Nothing reads this but `rememberNow`. Named for the turns and not `live`,
+   * which is already this file's "is the panel mounted" flag.
+   */
+  let liveTurns: Turn[] | null = null;
+  /**
+   * Milliseconds this panel has spent waiting on a PERSON, cumulative.
+   *
+   * Handed to `drive` as `waited` so the duration a MODEL is shown is the
+   * app's own work and not somebody reading a dialog. Cumulative and
+   * monotonic rather than per call, because the loop diffs it either side of
+   * `driver.call()` and a counter cannot be got wrong by a dialog that opens
+   * twice. See `DriveOptions.waited`.
+   *
+   * It has to be counted here, and this is the reason: the panel's dialog is
+   * installed as the CORE's approver — see `adoptDialog` — so the wait happens
+   * inside `driver.call()`, where the loop can see only that the call took a
+   * long time. Every path to a question goes through `askPerson`, which is the
+   * one place this is incremented.
+   */
+  let waitedMs = 0;
 
   // ---- wiring ------------------------------------------------------------
 
@@ -1022,7 +1199,75 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
 
   paintSpeeds();
   show("running");
+  // Before `options.open`, so a panel told to start open starts open with its
+  // conversation already in it rather than appearing empty and then filling.
+  // A no-op unless the app opted in; see `restoreConversation`.
+  restoreConversation();
   if (options.open) setOpen(true);
+
+  /**
+   * Hand this panel's dialog to the core, and hold the release.
+   *
+   * WHY THIS IS HERE AND NOT IN THE RUN. Until this, the panel gated OUTSIDE
+   * `driver.call()`: hold the core's lock, ask the person, then let the loop
+   * make the call. The core therefore never saw the question, and an app that
+   * mounted this panel and wired `onAudit` recorded
+   * `approval: "not-asked", policy: "none"` for a commit somebody had just
+   * clicked Approve on. The record read as complete and said the opposite of
+   * what happened. Correlating the two afterwards was the alternative and it
+   * cannot be made sound: between the dialog's answer and the call that
+   * follows, another agent on the relay can call the same verb, and an audit
+   * trail that is usually right is not an audit trail. So the dialog becomes
+   * the approver, and the answer is written down by the thing that asked.
+   *
+   * `null` back means somebody else is the gate: the app's own `approve`, or
+   * a panel that mounted first. Then this panel keeps its in-page gate or
+   * drops it according to `coreAsks`, and nothing about the arrangement is
+   * silent — the core warns about a second panel, and the `unattended` case is
+   * warned about below.
+   */
+  const release = adoptDialog();
+
+  function adoptDialog(): (() => void) | null {
+    // A host that supplied its own confirmation has said HOW it wants to ask,
+    // and `onBeforeCommit` is documented as replacing this panel's dialog
+    // rather than stacking with it. Adopting anyway would stack them: the
+    // host's dialog out here and this panel's inside `driver.call()`, two
+    // questions about one commit, which is the thing that teaches people to
+    // click Yes without reading.
+    //
+    // The cost is that such a gate is still outside the core, so its answer is
+    // not in the audit record -- `onBeforeCommit`'s own documentation already
+    // says it gates the in-page run only and that the gate covering every path
+    // is `MountOptions.approve`. Unchanged by this, deliberately: a host that
+    // wants its dialog in the record passes it as `approve`.
+    if (options.onBeforeCommit) return null;
+    const adopt = driver.approval?.adopt;
+    // A driver from before adoption existed — hand-written, or an older
+    // build. Nothing to install and nothing to say: the panel's in-page gate
+    // is what it has always been, and it still works.
+    if (!adopt) return null;
+    const won = adopt(approveRequest);
+    if (won) return won;
+    // Refused because the app declared `unattended`, which `adopt` will not
+    // overrule. The panel goes on asking in-page, which is right — somebody
+    // is plainly sitting there — but the core is not asked, so those
+    // confirmations do not appear in `onAudit` and the records say
+    // `not-asked, unattended` for commits a person clicked Approve on. That is
+    // the bug this change fixes, in the one configuration where it cannot be
+    // fixed without overruling the app, so it is said out loud instead.
+    if (driver.approval?.declared === "unattended") {
+      warn(
+        `\`${app}\` was mounted with \`approve: "unattended"\` and also mounts this panel, ` +
+          `which asks before a commit. The panel's question is NOT in the audit record: ` +
+          `\`onAudit\` will report \`approval: "not-asked", policy: "unattended"\` for commits ` +
+          `somebody confirmed here, because the core was never asked. Wire the panel up as the ` +
+          `gate — \`approve: (req) => panel.approve(req)\` — if those confirmations should be ` +
+          `in the record, or drop this panel if the run really is unattended.`,
+      );
+    }
+    return null;
+  }
 
   // ---- the run -----------------------------------------------------------
 
@@ -1030,6 +1275,12 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     if (!live || running) return;
     say("dk-you", text);
     conversed = true;
+    // The person's words go into the mirror before anything can go wrong, so a
+    // page that dies on the very first call still comes back with the question
+    // they asked. `drive` appends the screen to its own copy of this turn; the
+    // mirror carries the words alone, which is what a restored transcript and a
+    // resumed conversation both want.
+    liveTurns = [...messages, { role: "user", text }];
     // Which conversation this run belongs to. Clearing bumps it, and
     // everything below that would write into the transcript checks it first.
     const mine = era;
@@ -1052,13 +1303,10 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     // calls does not cross its wires.
     const steps = new Map<string, Step>();
 
-    // The last count a `describe` verb reported in this run, and the reason the
-    // confirmation row is worth building at all: "accept the current
-    // selection?" is a question nobody can answer, and "accept 1,000
-    // contacts?" is one anybody can. Only from a `describe` — a count from a
-    // `read` verb is about something else — and cleared once a commit has been
-    // asked about, because that selection has now been spoken for.
-    let lastCount: number | undefined;
+    // Nothing of the last run's selection survives into this one. The field
+    // itself is at the top of the panel, because the dialog that reads it is
+    // now called from inside `driver.call()` rather than from inside the loop.
+    lastCount = undefined;
 
     // Always installed when the host has not replaced it AND the core is not
     // already gating, and the SETTING is read inside — so turning
@@ -1066,15 +1314,19 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     // the next commit rather than the next run. That is what somebody who has
     // just watched a commit go past expects of the switch they reached for.
     //
-    // Nothing is installed when the driver was mounted with an `approve` hook.
-    // That hook is called inside `driver.call()` for every path, this one
-    // included, so installing the panel's gate as well would be two questions
-    // about one commit — which is the thing this panel's own documentation
-    // says teaches people to click Yes without reading. An app that wants the
-    // panel to be that hook wires `approve: (req) => panel.approve(req)`; see
-    // `Widget.approve`.
-    const gate =
-      options.onBeforeCommit ?? (driver.approval?.policy === "hook" ? undefined : confirmCommit);
+    // Nothing is installed when the core already has an approver — the app's
+    // own `approve` hook, or this panel's dialog, which `mountWidget` adopted
+    // at the bottom of this file. That approver is called inside
+    // `driver.call()` for every path, this one included, so installing the
+    // panel's gate as well would be two questions about one commit — which is
+    // the thing this panel's own documentation says teaches people to click Yes
+    // without reading.
+    //
+    // Read per run, not once at mount, because the answer moves: a second
+    // panel on the same driver does not get the gate, and a panel whose
+    // adoption was refused because the app declared `approve: "unattended"`
+    // keeps its own in-page gate and always did. See `coreAsks`.
+    const gate = options.onBeforeCommit ?? (coreAsks() ? undefined : confirmCommit);
 
     /** The built-in gate, per run: find the count, then ask. */
     function confirmCommit(req: CommitRequest): Promise<CommitDecision> {
@@ -1088,7 +1340,11 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       // without asking has not used it up, and the next commit — which may
       // well be the irreversible one — still needs it to be answerable.
       lastCount = undefined;
-      return withLock(req.name, () => askPerson(req, count, controller?.signal));
+      return withLock(
+        req.name,
+        async () =>
+          (await askPerson(req, count, controller?.signal, CLOSED_VETO)) as CommitDecision,
+      );
     }
 
     const paced: DriveOptions = {
@@ -1127,10 +1383,42 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
         if (era !== mine) return;
         mark(step(steps, e), "running");
         aim(e);
+        // `onCall` and not `onBeforeCall`, and the distinction is the whole
+        // honesty of the restored notice. `onBeforeCall` fires before the pace
+        // wait and before any hold, so a page dying there is a page that died
+        // while a call was QUEUED -- nothing was sent, nothing can have
+        // landed. `onCall` is the moment the app is actually touched. Recording
+        // `sent` from the earlier event would have the panel come back telling
+        // somebody to go and check a verb that was never called.
+        inFlight = { verb: e.call.name, phase: "sent" };
+        // The assistant turn the loop pushed, rebuilt. `index === 0` starts it,
+        // and a fan-out's later calls join the same turn rather than making one
+        // each -- which matters because a `tool_use` must be answered within
+        // the turn that made it.
+        if (liveTurns) {
+          const last = liveTurns[liveTurns.length - 1];
+          if (e.index === 0 && last?.role === "assistant" && last.calls === undefined) {
+            liveTurns[liveTurns.length - 1] = { ...last, calls: [e.call] };
+          } else if (e.index > 0 && last?.role === "assistant" && last.calls) {
+            last.calls.push(e.call);
+          } else {
+            liveTurns.push({ role: "assistant", calls: [e.call] });
+          }
+        }
+        rememberNow(mine);
       },
       onControl: ({ state }) => show(state),
-      onResult: ({ call, kind, result }) => {
+      onResult: ({ call, kind, result, text: answered }) => {
         if (era !== mine) return;
+        // Settled, so nothing is in flight any more. Before the early returns
+        // below -- a call whose step row has gone missing has still finished,
+        // and leaving the flag set would have the panel come back after a
+        // reload claiming a verb was interrupted when it had answered.
+        if (inFlight?.verb === call.name && inFlight.phase === "sent") inFlight = undefined;
+        // The tool turn, verbatim as the loop renders it, screen and all. Taken
+        // from the event rather than rebuilt here, so the stored conversation
+        // and the one the model is reading cannot come to differ by a word.
+        liveTurns?.push({ role: "tool", callId: call.id, name: call.name, text: answered });
         if (kind === "describe" && result?.ok) lastCount = result.count;
         // The step stops being highlighted the moment it is over, whatever
         // the outcome. An outline left behind is an outline about nothing.
@@ -1158,11 +1446,22 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
           // a working app as a broken one.
           outcome(entry, ` · refused: ${result.refused}`, "refused");
         }
+        rememberNow(mine);
       },
       onSay: ({ text: prose }) => {
         if (era !== mine) return;
         say("dk-me", prose);
+        liveTurns?.push({ role: "assistant", text: prose });
+        // The model's own words are the half of a transcript a person would
+        // most miss, and a run can be many steps away from its next write.
+        rememberNow(mine);
       },
+      // The duration a MODEL is shown, and the human wait kept out of it. See
+      // `waitedMs`: the panel's dialog is the core's approver, so the wait
+      // happens inside `driver.call()` and the loop can only subtract what it
+      // is told.
+      timing: options.timing ?? "slow",
+      waited: () => waitedMs,
     };
 
     try {
@@ -1175,8 +1474,17 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       // looking at a fresh panel.
       if (era !== mine) return;
       messages = out.messages;
+      // The mirror is discarded the moment the real thing arrives.
+      // `out.messages` is pruned -- one screen, not one per step -- so it is
+      // both the authoritative version and the smaller one.
+      liveTurns = null;
       const note = STOP_NOTE[out.stop];
       if (note) say("dk-note", note);
+      // The authoritative write of the run. `out.messages` is the pruned
+      // conversation `drive` hands back -- one screen, not one per step -- so
+      // this is both the most complete and the smallest version of it, and it
+      // is what a reload should come back to.
+      rememberNow(mine);
     } catch (err) {
       // A `think` that throws — a 500 from the app's own backend, usually. Said
       // in the transcript as well as handed to `onError`, because the person is
@@ -1192,6 +1500,16 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     } finally {
       running = null;
       active = null;
+      // Also here, for the paths that never reach the assignment above: a
+      // `think` that threw, and a run whose conversation was cleared while it
+      // was in flight. A mirror left behind would be persisted on the next
+      // write as though a run were still going.
+      liveTurns = null;
+      // The run's last count dies with the run. A commit arriving afterwards
+      // from somewhere else is about the selection on screen now, and labelling
+      // its question with a number this run happened to report would be the
+      // dialog making up the one fact it exists to show.
+      lastCount = undefined;
       show("running");
       spot.hide();
       // Pending rows for calls that never ran. A stop during a pace wait or a
@@ -1214,6 +1532,29 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   }
 
   // ---- the gate ----------------------------------------------------------
+  //
+  // Two answers for one event, and the difference between them is the whole
+  // argument of this file's half of the audit trail. The panel is unmounted
+  // with a question on screen:
+  //
+  //   from the in-page run, the run is being torn down with it, so the commit
+  //   is vetoed and the model is told why. `unmount` aborts the run first, so
+  //   in practice the abort usually answers before this does; this is the
+  //   backstop for a gate reached without one.
+  //
+  //   from the core's approver, somebody is waiting on an approval that will
+  //   now never be answered. That is `{ timedOut: true }` and not a denial:
+  //   `timed-out` says the verb did not run and nobody decided, `declined`
+  //   says a person refused, and a record that cannot tell those apart is the
+  //   record this change exists to stop writing.
+  const CLOSED_VETO = "the panel was closed before this was approved";
+  const CLOSED_LAPSE: Approval = {
+    timedOut: true,
+    hint:
+      "the approval panel was closed while this was waiting to be approved, so nobody " +
+      "answered. **The verb did not run and nothing changed.** Ask the person to reopen the " +
+      "assistant, then call it again.",
+  };
   //
   // Lifted out of `ask()` so that the panel's dialog is an IMPLEMENTATION of
   // `MountOptions.approve` rather than the only gate in the system. The same
@@ -1279,6 +1620,68 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   }
 
   /**
+   * Whether `driver.call()` already asks about commits, so this panel must not.
+   *
+   * `hook` is the app's own `approve`. `adopted` is a dialog installed through
+   * `DriverApproval.adopt` — this panel's, in the ordinary case, or the first
+   * panel's when a page mounted two. Either way the question is asked inside
+   * the call, on every path, and a second gate out here would be a second
+   * dialog about one commit.
+   *
+   * `none` and `unattended` both mean the core asks nothing, and the panel's
+   * own in-page gate stands exactly as it did: `none` is a driver this
+   * mechanism could not reach — hand-written, or an adoption somebody else
+   * won and then released — and `unattended` is an app that said commits here
+   * run with nobody in front of them, which `adopt` refuses to overrule.
+   */
+  function coreAsks(): boolean {
+    const policy = driver.approval?.policy;
+    return policy === "hook" || policy === "adopted";
+  }
+
+  /**
+   * This panel's dialog, in the shape of `MountOptions.approve`.
+   *
+   * One function behind two callers: `Widget.approve`, for an app that wires it
+   * up itself, and the hook this panel adopts at mount. Both are the same
+   * question with the same rules, which is the whole reason the gate moved into
+   * the core.
+   */
+  async function approveRequest(req: ApprovalRequest): Promise<Approval> {
+    // `lastCount` only while a run is in flight, and then first, because it is
+    // the number the model just put on the screen. A commit that arrived from
+    // somewhere else between runs has no run to have counted anything, and
+    // `countFor` reads the selection the commit is about to act on.
+    const count = (running ? lastCount : undefined) ?? countFor(req.snapshot);
+    // Not `true`. A gate that let this through without asking must not be
+    // recorded as a person saying yes — see `Approval`'s `{ asked: false }`,
+    // which is in the core's vocabulary for exactly this answer.
+    if (!shouldAsk(req, count)) return { asked: false };
+    // Spoken for, as in the in-page path: the number is now in front of
+    // somebody, so the next commit cannot borrow it.
+    lastCount = undefined;
+    // The run, when there is one, says "waiting for you" rather than
+    // "running". `drive` marks that state itself when the gate is its own
+    // `onBeforeCommit`; asked from inside `driver.call()` the loop has no idea
+    // a question is open, so the panel says so. Restored to whatever the run
+    // was doing before — which may be `paused` — rather than to `running`.
+    const was = runState;
+    if (active) show("awaiting-approval");
+    try {
+      // No `withLock`: the core takes its lock before it calls an approver,
+      // and a second take would assert a thing that is already true.
+      //
+      // The run's signal when there is one, so stopping a run also answers a
+      // question asked during it. A commit that arrived over the relay has no
+      // run and no signal: that question stays open until somebody answers it,
+      // `MountOptions.approvalTimeout` lapses, or this panel is unmounted.
+      return await askPerson(req, count, running?.signal, CLOSED_LAPSE);
+    } finally {
+      if (active) show(was);
+    }
+  }
+
+  /**
    * Render the question in the transcript and wait for an answer.
    *
    * `signal` is the run's abort, when there is a run. Without it a stop or an
@@ -1286,18 +1689,42 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
    * and the panel stuck busy forever — so the abort answers the question, and
    * the only safe answer is no. A call that arrived over the relay has no run
    * and therefore no signal: that question stays open until somebody answers
-   * it or `MountOptions.approvalTimeout` lapses, which is the core's business
-   * and not the panel's.
+   * it, `MountOptions.approvalTimeout` lapses, or this panel is unmounted.
+   *
+   * `teardown` is that last one: the answer to give if the panel is unmounted
+   * with the question still on screen. It is a parameter rather than a
+   * constant because the two callers are owed different answers. The in-page
+   * run is being stopped, so a veto is the truth and the model is told. A
+   * question asked from inside `driver.call()` has somebody waiting on an
+   * approval, and "the panel went away" is nobody answering rather than
+   * somebody refusing — `{ timedOut: true }`, which the record keeps apart
+   * from `declined`. Confusing those two is the thing this whole mechanism
+   * exists to stop doing.
    */
   function askPerson(
     req: ApprovalRequest,
     count: number | undefined,
-    signal?: { addEventListener?: (type: string, fn: () => void) => void },
-  ): Promise<CommitDecision> {
+    signal: { addEventListener?: (type: string, fn: () => void) => void } | undefined,
+    teardown: Approval,
+  ): Promise<Approval> {
     // A question nobody can see is not a question. The person may have hit
     // Escape while the model was thinking, or be reading the settings view.
     setOpen(true);
     setSettingsOpen(false);
+
+    // From here until somebody answers, the stored record says a question was
+    // open on this verb. `asked` and not `sent`: the core asks BEFORE it runs,
+    // so if the page dies now the verb provably did not run, and the restored
+    // panel can say that flatly instead of hedging. Written down at once rather
+    // than at the next transcript change, because the event this is for is a
+    // page that goes away without warning.
+    inFlight = { verb: req.verb.name, phase: "asked" };
+    rememberNow();
+
+    // The clock on the human wait starts here and stops in the `finally`
+    // below, whichever way the question is answered -- yes, no, a timeout, the
+    // panel being torn down. See `waitedMs`.
+    const askedAt = Date.now();
 
     const reversible = req.verb.reversible === true;
     const large = count !== undefined && count > askAbove;
@@ -1345,11 +1772,24 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     // accept a thousand rows; reaching "Yes" takes one deliberate key.
     no.focus?.();
 
-    return new Promise<CommitDecision>((resolve) => {
+    return new Promise<Approval>((resolve) => {
       let answered = false;
-      const answer = (decision: CommitDecision, said: string): void => {
+      const answer = (decision: Approval, said: string): void => {
         if (answered) return;
         answered = true;
+        // The human wait is over, however it ended. Counted on EVERY exit --
+        // yes, no, a stopped run, the panel being torn down -- because a model
+        // told a declined commit "took 40 seconds" has learnt the same false
+        // thing about the app's speed as one told it about an approved commit.
+        waitedMs += Math.max(0, Date.now() - askedAt);
+        // The question is no longer open. Whether the verb then RUNS is the
+        // core's business and the call path's; `onCall` sets `sent` a moment
+        // later for an approved commit, and for a declined one nothing runs and
+        // the record correctly says nothing was in flight.
+        if (inFlight?.phase === "asked" && inFlight.verb === req.verb.name) {
+          inFlight = undefined;
+        }
+        openQuestions.delete(onTeardown);
         // The buttons go and the answer stays. Scrolling back through a
         // transcript and finding a live "Yes, do it" button beside something
         // that already happened is worse than no record at all.
@@ -1367,6 +1807,13 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       signal?.addEventListener?.("abort", () =>
         answer("the run was stopped before this ran", "Stopped before this ran."),
       );
+      // Registered last, so the set only ever holds questions that are
+      // genuinely open — a signal that had already fired answered above and
+      // deleted this before it was ever added.
+      openQuestions.add(onTeardown);
+      function onTeardown(): void {
+        answer(teardown, "The panel was closed before this was answered.");
+      }
     });
   }
 
@@ -1397,6 +1844,111 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   }
 
   /**
+   * Write the conversation down as it stands.
+   *
+   * Called after every event that changes what a restored panel would show: a
+   * question going up or coming down, a call being announced or settling, the
+   * model saying something, a run ending. Not debounced and not deferred to
+   * `beforeunload`. The event this whole feature exists for is a page that goes
+   * away WITHOUT warning — a crash, a navigation the agent itself caused — so a
+   * scheme that batches is a scheme that loses exactly the moment it was built
+   * to remember. Each write is a `JSON.stringify` of an already-pruned
+   * conversation and one `setItem`, which is cheaper than the model round trip
+   * on either side of it.
+   *
+   * `at` is the caller's `era`, where the caller is inside a run. A write from a
+   * run the person has cleared must not land, for the reason `era` exists at
+   * all: an abort resolves at the loop's next await, so a run can still be
+   * speaking after its conversation has been thrown away — and here that write
+   * would go to DISK, where a reload brings it back. The clear itself forgets
+   * the key, so the only way a cleared conversation could return is a stray
+   * write afterwards, and this is what stops it.
+   *
+   * Three things make this a no-op, in order of how often they happen: the app
+   * did not opt in, the viewer switched it off, or there is nothing to store. On
+   * the viewer's switch it also FORGETS — turning the setting off is a request
+   * about what is on the disk, not just about what happens next.
+   */
+  function rememberNow(at?: number): void {
+    if (session === undefined) return;
+    if (at !== undefined && at !== era) return;
+    if (!settings.rememberChat) {
+      forgetChat(session, app);
+      return;
+    }
+    // The run in flight, when there is one, because a conversation stored
+    // halfway through a run is the entire point. See `live`.
+    const conversation = liveTurns ?? messages;
+    if (conversation.length === 0 && inFlight === undefined) {
+      // Nothing worth coming back to. Written as a forget rather than as an
+      // empty record so that a fresh panel in a reloaded tab is a fresh panel,
+      // not one announcing that it restored nothing.
+      forgetChat(session, app);
+      return;
+    }
+
+    // Scrub, then trim, in that order and not the other way round. Scrubbing
+    // replaces a value with a shorter marker, so doing it first can only make
+    // the record smaller -- and trimming first would decide what to keep on the
+    // strength of bytes that are about to be thrown away anyway. Both at this
+    // one boundary: see `scrubTurns` on why the redaction is here and not at
+    // the call sites that build turns.
+    const scrubbed = scrubTurns(conversation, driver.manifest());
+    const { messages: kept, trimmed } = trimTurns(scrubbed);
+    saveChat(session, app, {
+      at: Date.now(),
+      messages: kept,
+      conversed,
+      ...(inFlight === undefined ? {} : { inFlight }),
+      ...(trimmed ? { trimmed } : {}),
+    });
+  }
+
+  /**
+   * Bring back whatever the last page load left, and resume nothing.
+   *
+   * Run once, at mount, after the greeting. What comes back is the
+   * conversation: the model turns go into `messages`, so the person's next
+   * message carries on from where they were, and a readable line per turn goes
+   * into the transcript so the panel does not look empty while secretly
+   * remembering everything.
+   *
+   * **What is deliberately NOT restored, and why none of it is an oversight.**
+   * No run is restarted and no verb is called — see `chat.ts` on "restore
+   * everything, resume nothing". The step list's live states are not redrawn,
+   * because a marker that says "running" about a run which ended at a reload is
+   * a panel lying about the present. The screen blocks in the stored turns are
+   * not displayed, though the newest is still handed to the model, because a
+   * wall of table is not what somebody wants to see first.
+   *
+   * The notice goes LAST, under the restored history, because that is where the
+   * panel scrolls to and where the eye lands — and the first of its lines is
+   * the one about what may have happened to the data.
+   */
+  function restoreConversation(): void {
+    if (session === undefined || !settings.rememberChat) return;
+    const found = loadChat(session, app);
+    if (!found) return;
+
+    // Every dangling `tool_use` gets an answer before this history can ever
+    // reach a provider. Not optional and not cosmetic: a `tool_use` with no
+    // result is a 400 on the person's next message and on every message after
+    // it, with a transcript on screen that looks fine. See `closeDangling`.
+    messages = closeDangling(found.messages, found.inFlight);
+    conversed = found.conversed;
+
+    for (const line of replayLines(found)) say(line.className, line.text);
+    for (const line of restoredLines(found)) say("dk-note", line);
+
+    // Rewritten at once, with the dangling calls now answered and `inFlight`
+    // cleared. Otherwise a second reload would re-announce a call that is two
+    // reloads old as though it had just been interrupted, and the person would
+    // be sent to check the same verb again.
+    inFlight = undefined;
+    rememberNow();
+  }
+
+  /**
    * Drop the transcript, the step list and the history, and stop whatever is
    * running. See the settings row for why this is where it lives and why it
    * asks nothing first.
@@ -1409,6 +1961,15 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     era++;
     running?.abort();
     messages = [];
+    // Before anything else that could write, and unconditional. `era` already
+    // stops a dying run's words landing in the fresh transcript, and a stored
+    // record is the same hazard with a longer fuse: clear the panel, reload,
+    // and a cleared conversation comes back off disk. The destructive option
+    // has to be destructive all the way down -- and `rememberNow` below is
+    // era-guarded, so the aborted run cannot write the old transcript back
+    // after this.
+    inFlight = undefined;
+    forgetChat(session, app);
     for (const line of lines) line.remove();
     lines.length = 0;
     conversed = false;
@@ -1632,19 +2193,10 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     open: () => setOpen(true),
     close: () => setOpen(false),
     ask,
-    // No `withLock` here: the core took its lock before it called this, and a
-    // second take would be the panel asserting a thing that is already true.
-    // No count from `lastCount` either — see `Widget.approve`.
-    approve: async (req: ApprovalRequest): Promise<Approval> => {
-      const count = countFor(req.snapshot);
-      if (!shouldAsk(req, count)) return true;
-      // The run in flight's signal, when there is one, so that stopping a run
-      // also answers a question the relay asked during it. Usually there is
-      // no run at all, and then only an answer or the core's
-      // `approvalTimeout` ends the wait.
-      const decision = await askPerson(req, count, running?.signal);
-      return decision as Approval;
-    },
+    // The same function the panel adopts as the core's approver, so an app
+    // that wires this up by hand and an app that wires up nothing get the
+    // identical dialog, the identical rules and the identical record.
+    approve: approveRequest,
     moveTo: place.moveTo,
     position: place.chosen,
     unmount: () => {
@@ -1657,6 +2209,20 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
       live = false;
       running?.abort();
       running = null;
+      // The gate goes back to whatever the app declared, BEFORE the questions
+      // are drained: a commit arriving in between must not be sent to a dialog
+      // that is already being torn down. After this the core's policy is
+      // `declared` again — `none` for a widget-only app — so a later commit is
+      // ungated and records `not-asked, none`, which is then the truth.
+      release?.();
+      // Nobody is going to answer these. An unmount with a question open is
+      // ordinary — the person closes the app's tab, the host swaps a route —
+      // and `driver.call()` is sitting on a promise that only this panel can
+      // resolve, with no `approvalTimeout` by default. Left alone that is a
+      // driver that refuses every later call `approval-pending` until the page
+      // is reloaded: a dead app, caused by closing a chat panel.
+      for (const answer of [...openQuestions]) answer();
+      openQuestions.clear();
       // Before the element goes, because the resize listener is on the window
       // and would otherwise outlive the panel it was clamping.
       place.dispose();
@@ -1695,4 +2261,22 @@ function argSummary(args: Record<string, unknown>): string {
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Said once, for an arrangement the author has to fix in their own source.
+ *
+ * The core's shape, deliberately copied rather than imported: `registry.ts`
+ * keeps its `warn` private, and a panel that printed the same sentence on every
+ * commit would be a panel people learn to mute. Deduped per message, so a run
+ * that confirms forty commits says this once.
+ */
+const warned = new Set<string>();
+
+function warn(text: string): void {
+  if (warned.has(text)) return;
+  warned.add(text);
+  if (typeof console !== "undefined" && typeof console.warn === "function") {
+    console.warn(`driverkit: ${text}`);
+  }
 }

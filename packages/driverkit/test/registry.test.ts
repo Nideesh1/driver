@@ -1408,6 +1408,149 @@ test("the gate's own lock is offered to an approval UI that is not the hook", as
   assert.equal((await app.driver.call("look")).ok, true);
 });
 
+// -------------------------------------------------------------------------
+// Adoption: a dialog in the page becomes the core's approver.
+//
+// The defect these pin: the widget's confirmation gated OUTSIDE `call()`, so
+// an app that mounted the panel and wired `onAudit` recorded
+// `approval: "not-asked", policy: "none"` for a commit a person had just
+// approved. The dialog is now installed AS the hook, and the three rules below
+// are what makes that safe rather than merely truthful.
+// -------------------------------------------------------------------------
+
+test("an adopted dialog is the gate, and a commit cannot get past it", async () => {
+  // The whole mechanism in one test: nothing declared at mount, a hook
+  // installed afterwards, and from then on the core asks it — so a `no` is the
+  // same `declined-by-user` the declared path produces, on every call path
+  // rather than only on the one the dialog was wired into.
+  const app = gated();
+  assert.equal(app.driver.approval?.policy, "none");
+  let asked = 0;
+  const release = app.driver.approval!.adopt!((req) => {
+    asked++;
+    assert.equal(req.name, "accept");
+    // The manifest entry, like any approver: a gate that could reach `run` is
+    // a gate with a way round itself.
+    assert.equal(req.verb.kind, "commit");
+    return false;
+  });
+  assert.ok(release, "an app that declared nothing hands the gate over");
+  const out = await app.driver.call("accept");
+  assert.equal(asked, 1);
+  assert.equal(out.ok === false && out.refused, "declined-by-user");
+  assert.equal(app.accepted(), 0);
+});
+
+test("an adopted gate is `adopted` and never `hook`, because it is not what the app declared", async () => {
+  // The two are different claims and a record has to keep them apart. `hook`
+  // is a line in the app's source: there before the first call, there for
+  // every path, and `connect()` accepts it as the declaration it demands.
+  // `adopted` is a gate that lasts as long as the panel that installed it. One
+  // word for both would make the field unfalsifiable — an auditor could not
+  // tell the app's own gate from one that happened to be on the page.
+  const app = gated();
+  const release = app.driver.approval!.adopt!(() => true);
+  assert.equal(app.driver.approval?.policy, "adopted");
+  // What the APP said never moves, which is what `connect()` reads.
+  assert.equal(app.driver.approval?.declared, "none");
+  release!();
+  assert.equal(app.driver.approval?.policy, "none");
+});
+
+test("an app that declared its own approve keeps it: adoption installs nothing", async () => {
+  // Silently replacing an app's approver would be worse than the bug this
+  // mechanism fixes — one dialog would stop running and the app's author would
+  // have no way to see that. So the app wins, `adopt` says so by returning
+  // null, and the caller is expected to leave the core alone.
+  let appAsked = 0;
+  const app = gated({
+    approve: () => {
+      appAsked++;
+      return true;
+    },
+  });
+  let dialogAsked = 0;
+  assert.equal(
+    app.driver.approval!.adopt!(() => {
+      dialogAsked++;
+      return false;
+    }),
+    null,
+  );
+  assert.equal(app.driver.approval?.policy, "hook");
+  assert.equal((await app.driver.call("accept")).ok, true);
+  assert.equal(appAsked, 1, "the app's own hook is the one that was asked");
+  assert.equal(dialogAsked, 0, "and the dialog that tried to adopt was not");
+});
+
+test("`unattended` cannot be adopted over, so a headless run does not become interactive", async () => {
+  // `unattended` is the app saying out loud that commits here run with nobody
+  // in front of them — a cron job, a test harness, a backend that already did
+  // its own authorisation. A dialog installed over the top would make that
+  // configuration interactive, which is the thing somebody deliberately chose
+  // against, and it would hang the run on a question nobody is there to answer.
+  const app = gated({ approve: "unattended" });
+  assert.equal(app.driver.approval!.adopt!(() => false), null);
+  assert.equal(app.driver.approval?.policy, "unattended");
+  assert.equal((await app.driver.call("accept")).ok, true);
+  assert.equal(app.accepted(), 1000);
+});
+
+test("the first adopter keeps the gate, and the second is told out loud", async () => {
+  // Two gates for one commit is two dialogs, which is how people learn to
+  // click Yes without reading. First wins — and the second caller is warned,
+  // because the symptom otherwise is a question appearing in the other panel
+  // with nothing anywhere saying why.
+  const app = gated({ app: "two-panels" });
+  const first = app.driver.approval!.adopt!(() => false);
+  const said = warnings(() => {
+    assert.equal(app.driver.approval!.adopt!(() => true), null);
+  });
+  await said.done;
+  assert.ok(first);
+  assert.match(said.lines.join("\n"), /second approval dialog tried to adopt `two-panels`/);
+  // The first one is still the gate, which is the half that matters.
+  assert.equal(app.driver.approval?.policy, "adopted");
+  assert.equal((await app.driver.call("accept")).ok, false);
+});
+
+test("a released gate can be adopted again, and a stale disposer cannot unhook the new one", async () => {
+  // The shape every "unsubscribe twice" bug has, and here it would silently
+  // bypass a live panel's dialog: the gate would read `none` while a dialog was
+  // on screen waiting to be asked. A disposer only ever releases its own hook.
+  const app = gated();
+  const first = app.driver.approval!.adopt!(() => false);
+  first!();
+  const second = app.driver.approval!.adopt!(() => true);
+  assert.ok(second, "released, so the next one wins");
+  first!();
+  assert.equal(app.driver.approval?.policy, "adopted", "the stale disposer did nothing");
+  assert.equal((await app.driver.call("accept")).ok, true);
+});
+
+test("adoption is read per call, so a commit after the panel mounts goes through it", async () => {
+  // A panel can be mounted long after `mount()` — a host app that lazy-loads
+  // its assistant, or a route that mounts one on arrival. A gate captured when
+  // the driver was built would have left every such app ungated, which is the
+  // configuration this is all about.
+  const app = gated();
+  assert.equal((await app.driver.call("accept")).ok, true, "before: ungated, as it always was");
+  app.driver.approval!.adopt!(() => false);
+  assert.equal((await app.driver.call("accept")).ok, false, "after: asked");
+});
+
+test("`{ asked: false }` lets the commit run and does not claim anybody said yes", async () => {
+  // A real gate does not ask about every commit: the panel's dialog lets a
+  // small reversible one through. Answering `true` there was right about the
+  // call and a lie in the record, because `true` means "asked, and the answer
+  // was yes". The record half is pinned in `audit.test.ts`; this is the call
+  // half — it runs, exactly as a `true` would.
+  const app = gated();
+  app.driver.approval!.adopt!(() => ({ asked: false }));
+  assert.equal((await app.driver.call("accept")).ok, true);
+  assert.equal(app.accepted(), 1000);
+});
+
 test("the approval slugs are reserved, so an app cannot say them itself", async () => {
   // Same argument as `timeout`: an agent has to be able to tell "the app said
   // no, phrase it differently" from "a person said no, stop and ask them".

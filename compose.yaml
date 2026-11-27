@@ -1,6 +1,11 @@
 # The demo and a relay, in one command.
 #
-#   docker compose -f e2e/docker-compose.yml up --build
+# This file is at the repository root, and that is the whole point: it is the
+# first thing somebody evaluating driverkit should run, so it must not be
+# filed under a directory named after our tests. The Dockerfile stays in
+# `e2e/` because it is build machinery, not a front door.
+#
+#   docker compose up --build
 #   open http://127.0.0.1:8770/examples/contacts/app/
 #
 # No API key is needed to serve the page. Every screen, the router and the
@@ -8,7 +13,7 @@
 # its own transcript rather than going quiet. To get the widget talking to a
 # model, put the key in the environment of the shell that runs compose:
 #
-#   ANTHROPIC_API_KEY=... docker compose -f e2e/docker-compose.yml up --build
+#   ANTHROPIC_API_KEY=... docker compose up --build
 #
 # It is never written to a file here and never reaches the browser: the page
 # talks only to `/api/chat`, which is the whole reason `driverkit/agent` has no
@@ -27,7 +32,7 @@ services:
   # for. This is the one to drive, and the one the browser smoke test drives.
   demo:
     build:
-      context: ..
+      context: .
       dockerfile: e2e/Dockerfile
     ports:
       - "127.0.0.1:${DK_PORT:-8770}:8770"
@@ -56,11 +61,11 @@ services:
   # it is the target for driving a page that is not this demo.
   #
   # Off by default so `up` is one service and one port. Start it with:
-  #   docker compose -f e2e/docker-compose.yml --profile relay up --build
+  #   docker compose --profile relay up --build
   relay:
     profiles: ["relay"]
     build:
-      context: ..
+      context: .
       dockerfile: e2e/Dockerfile
     ports:
       - "127.0.0.1:${DK_RELAY_PORT:-7777}:7777"

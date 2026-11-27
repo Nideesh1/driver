@@ -93,8 +93,9 @@ the connection closes**, because there is no position at which to start reading 
 
 ## Reserved refusals, and the three that mean "unknown"
 
-Reserved: `stale`, `wrong-screen`, `unknown-verb`, `bad-argument`, `unmounted`, `threw` (the core),
-`no-such-tab`, `tab-went-away`, `timeout` (the relay), `declined-by-user` (a confirmation gate). `wrong-screen` is
+Reserved, all fifteen: `stale`, `stale-plan`, `wrong-screen`, `unknown-verb`, `bad-argument`, `unmounted`,
+`threw`, `budget-spent`, `changed-elsewhere` (the core), `no-such-tab`, `tab-went-away`, `timeout` (the relay),
+`declined-by-user`, `approval-pending`, `approval-timeout` (the core's approval gate). `wrong-screen` is
 the core's answer to a call aimed at a screen the app is not on — either the verb declared a `screen` of its own,
 or the call carried a `screen` that no longer matches — and it was an app's own invention before it was the
 core's, which is exactly why it is reserved: the next app would have spelled it differently

@@ -186,6 +186,14 @@ markNav();
 
 panel = mountWidget(driver, {
   think: backendThink("/api/chat"),
+  // Bring the conversation back if this page reloads, which is opt-in because
+  // a library must not start writing its users' prose to disk on upgrade. The
+  // demo opts in because a reload is the commonest thing anybody does to a
+  // page, and because the behaviour is worth seeing: the transcript comes back
+  // and the run does not restart. It is kept in `sessionStorage`, so it is per
+  // tab and goes when the tab does -- the settings view has the viewer's own
+  // switch beside it, which also forgets what is stored.
+  rememberChat: true,
   greeting:
     "Ask me to do things in Northwind. Try: “open Grayson Robotics, how many of its " +
     "contacts are pending, then accept them”.",

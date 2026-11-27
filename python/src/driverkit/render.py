@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from .types import Result, Snapshot
 
-__all__ = ["render_snapshot", "render_result"]
+__all__ = ["render_snapshot", "render_result", "render_duration", "SLOW_MS"]
 
 #: What an unanswered call means, per PROTOCOL.md: the call was accepted and no
 #: answer came back, so the tab may well have run the verb. Only
@@ -47,6 +47,144 @@ _NEVER_LANDED = (
     "The call was never forwarded, because there was nowhere to forward it: nothing ran "
     "and nothing changed."
 )
+
+
+#: The shortest honest wait worth a line in a prompt.
+#:
+#: One second, and the number is the whole token argument. A duration on every
+#: call is a line in every turn forever, for a capability most runs never use,
+#: and the TS half's ``pruneScreens`` cut a ten-step run from 5,775 to 1,397
+#: characters by refusing to pay exactly that kind of per-step rent. So the
+#: default is that a call which took no time says nothing: a snappy app renders
+#: not one byte more than it did before this existed, and the bytes get spent
+#: only on the calls where elapsed time is a fact about the app rather than
+#: noise.
+#:
+#: A second is also roughly where a wait stops being invisible to the person
+#: watching. Below it, the model learning the number changes no decision it
+#: could make; above it, "this verb is slow" is a real property of the app that
+#: explains why the next step should not be another one of these.
+SLOW_MS = 1000
+
+
+def render_duration(ms: float, floor_ms: float = SLOW_MS) -> str:
+    """How long a call took, as one line for the outcome half of a tool turn.
+
+    ::
+
+        ok — 3,412 contacts accepted
+        took: ~2s
+
+        On screen now:
+        screen: contacts
+
+    **Why this is a function and not a field on ``Result``.** A ``Result`` is
+    what the APP returned; a duration is a fact about the call that wrapped it,
+    which the app never measured and cannot be asked to. Putting it on the wire
+    would invite an app to fill it in, and then the number a model reads would
+    be an app's claim about its own speed rather than an observation. The
+    caller measures, the caller renders, and this is the one place either half
+    of the library says it in words.
+
+    **Why it is bucketed rather than exact.** Every other byte of a rendered
+    turn is a function of app state, so two identical runs produce identical
+    transcripts — which is what eval caching, snapshot tests and anything that
+    diffs transcripts are built on. A wall-clock millisecond count breaks that
+    for every reader at once. Rounding to a coarse bucket gives it back for the
+    ordinary case: a verb that takes 2.1s one run and 2.3s the next renders
+    ``~2s`` both times, so the transcript is stable wherever the app's own
+    behaviour is. It does not make the output a pure function of state — a
+    bucket boundary is still a boundary, and a call that straddles one renders
+    two ways — and that is why the TS half's ``DriveOptions.clock`` is
+    injectable: a suite or an eval that needs a byte-exact transcript pins the
+    clock and gets one. Buckets are for production, the injected clock is for
+    determinism, and neither is asked to do the other's job.
+
+    ``~`` is on the number on purpose. A model shown ``took: 2.13s`` will
+    compare two of them to three figures and report a difference that is
+    scheduler noise; ``~2s`` cannot be over-read, and reads naturally in an
+    answer a person gets back.
+
+    **What this must never include.** The time a person spent deciding. ``ms``
+    in an audit record is approval-inclusive by design — a reader of the record
+    wants that gap back — but telling a MODEL that a call "took 40 seconds"
+    when 38 of them were somebody reading a confirmation dialog is a false
+    claim about the app's speed, and a model that believes it will go looking
+    for a faster route around a verb that is not slow. Over the relay there is
+    a second thing to keep out: this is the time the CALL took, and a deadline
+    that fired is not a duration — a ``timeout`` means the outcome is unknown,
+    so the only honest figure for it is none at all.
+
+    **NOT YET CALLED BY THIS HALF'S MCP SERVER, AND THAT IS DELIBERATE RATHER
+    THAN UNFINISHED.** The function is here because the two renderers are kept
+    string-for-string and ``test/cross-impl.test.ts`` crosses them — a half that
+    did not have it would drift the moment anybody touched the other. What it is
+    not yet wired to is ``mcp_core``, because the only duration the MCP path can
+    measure today is the whole relay round trip: the network hop out, the tab's
+    own work, any approval the page asked a person for, and the hop back. Three
+    of those four are not the app's speed, and there is no ``waited`` channel
+    over the wire to subtract the human one with — so wiring it would render
+    exactly the lie the TS half's ``DriveOptions.waited`` exists to prevent. The
+    honest fix is for the relay to carry the tab's own elapsed time in the
+    ``result`` frame, which is a PROTOCOL.md change and not a renderer change.
+
+    ``floor_ms`` is the "not interesting" threshold, and ``0`` renders every
+    call. Returns the EMPTY STRING rather than a sentinel when there is nothing
+    worth saying, so a caller appends it unconditionally and the fast path adds
+    no line at all.
+
+    Verbatim with ``render.ts``. Both halves say the same words about the same
+    number, which is the rule for everything in this file: a prompt that worked
+    through MCP and misbehaves in the widget is a bug with no stack trace.
+    """
+    # A negative or non-finite figure is a broken clock, not a fast call, and
+    # the honest rendering of a measurement that did not happen is silence. A
+    # monotonic clock cannot go backwards; an injected one can, and a test
+    # clock that does should not put `took: ~-1s` in a prompt.
+    if ms != ms or ms in (float("inf"), float("-inf")):
+        return ""
+    whole = int(ms // 1)
+    if whole < 0 or whole < floor_ms:
+        return ""
+    return f"took: {_bucket(whole)}"
+
+
+def _bucket(ms: int) -> str:
+    """Whole milliseconds as a coarse, stable label.
+
+    Integer arithmetic only, and no locale and no float formatting anywhere:
+    ``toFixed`` and ``%.1f`` are the two things most likely to disagree between
+    the two implementations, and this function's entire job is to agree. Each
+    band floors rather than rounds, so the label never claims more time than
+    elapsed.
+
+    ==============  ==============  =========================================
+    under 100ms     ``under 0.1s``  said in words, because ``~0.0s`` reads as
+                                    zero and ``~0.1s`` would overstate it
+    under 1s        ``~0.4s``       tenths: the resolution a ``floor_ms=0``
+                                    caller asked for, and the one at which two
+                                    fetches are actually worth comparing
+    under 10s       ``~2s``         whole seconds
+    under 1m        ``~15s``        five-second steps. Tens were the first try
+                                    and understated badly at the top of the
+                                    band — 19 seconds rendering ``~10s`` is a
+                                    47% lie, and "it took ten seconds" is the
+                                    sentence a model will repeat to somebody.
+                                    Five is still far coarser than any
+                                    scheduler noise, so the label is stable
+                                    where the app is
+    1m and over     ``~3m``         whole minutes
+    ==============  ==============  =========================================
+    """
+    if ms < 100:
+        return "under 0.1s"
+    if ms < 1000:
+        return f"~0.{ms // 100}s"
+    if ms < 10_000:
+        return f"~{ms // 1000}s"
+    if ms < 60_000:
+        return f"~{(ms // 5_000) * 5}s"
+    return f"~{ms // 60_000}m"
 
 
 def render_snapshot(snapshot: Snapshot) -> str:

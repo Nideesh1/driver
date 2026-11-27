@@ -549,8 +549,34 @@ export function mount(options: MountOptions): Driver {
   }
   const approveFn: ApprovalHook | undefined =
     typeof declared === "function" ? declared : undefined;
-  const policy: DriverApproval["policy"] =
+  /** What the app itself said, for all time. `connect()` reads this one. */
+  const declaredPolicy: NonNullable<DriverApproval["declared"]> =
     approveFn !== undefined ? "hook" : declared === "unattended" ? "unattended" : "none";
+
+  /**
+   * An approver installed after mount, by a dialog that lives in the page.
+   *
+   * `DriverApproval.adopt` carries the argument; this is the mechanism, and it
+   * is two variables because releasing has to be safe. The hook is what the
+   * gate calls; the token is who owns it, so a disposer handed out earlier
+   * cannot unhook whoever adopted after it — which is the shape every
+   * "unsubscribe twice" bug has.
+   *
+   * Only ever set when the app declared nothing. An app with its own `hook` is
+   * already asked on every path, and `unattended` is an app saying commits
+   * here run with nobody watching; installing a dialog over either of those
+   * would be the library overruling a sentence somebody wrote.
+   */
+  let adopted: ApprovalHook | undefined;
+  let adoptedBy: object | undefined;
+
+  /** Who is asked right now, which is what a record has to say. See
+   *  `DriverApproval.policy`: `adopted` is deliberately not `hook`. */
+  function policyNow(): DriverApproval["policy"] {
+    if (approveFn !== undefined) return "hook";
+    if (declared === "unattended") return "unattended";
+    return adopted !== undefined ? "adopted" : "none";
+  }
 
   /**
    * Where the records go, or nowhere.
@@ -610,6 +636,122 @@ export function mount(options: MountOptions): Driver {
   let callsUsed = 0;
   /** `commit` verbs that actually reached `run`. */
   let commitsUsed = 0;
+  /** When this allowance began, for `Budget.window`. `Date.now()` here means
+   *  "this mount started one", and a record read back below replaces it with
+   *  the moment the allowance it belongs to actually started. */
+  let budgetSince = budget?.store === undefined ? 0 : Date.now();
+  /**
+   * Why the ceiling can no longer be kept, or null while it can be.
+   *
+   * The fail-closed flag, and the asymmetry it encodes is deliberate: a
+   * transcript that cannot be stored costs a conversation, and a budget that
+   * cannot be stored costs whatever an agent in a loop spends between now and
+   * somebody noticing. So a store that cannot be read, or that throws on a
+   * write, stops the AGENT — every later call is refused `budget-spent` with
+   * this sentence in the hint — and does not stop the app, which the person at
+   * the keyboard goes on using exactly as before.
+   *
+   * A string rather than a boolean because the two causes need different
+   * sentences. "I could not read your allowance" is usually a private window
+   * and is nobody's bug; "I could not write it down" is usually a full quota
+   * and is the one where somebody has to act.
+   */
+  let budgetBroken: string | null = null;
+
+  /**
+   * Whether this driver is keeping its allowance in a store at all.
+   *
+   * A `store` with no ceiling declared enforces nothing: an app that passed one
+   * and set neither `calls` nor `commits` has asked for nothing to be enforced,
+   * and refusing its calls because its storage is blocked would be a ceiling
+   * invented out of a field that set none.
+   */
+  const budgetKept =
+    budget?.store !== undefined && (budget.calls !== undefined || budget.commits !== undefined);
+
+  /**
+   * Pull the stored allowance into the counters, taking the HIGHER figure.
+   *
+   * **Called at mount and again before every charge, and the re-read is what
+   * makes "one app, one ceiling" true rather than aspirational.** Two tabs open
+   * at once each hold their own copy of the counters, so a mount-time read
+   * alone gave each of them the whole allowance — two tabs, two ceilings, which
+   * is the reload bypass wearing a different hat. A tab that charges has to
+   * look at what the others have spent.
+   *
+   * **Higher wins, never lower.** `localStorage` has no compare-and-swap, so
+   * two tabs charging in the same millisecond can lose one increment — an
+   * off-by-one, bounded, and vastly better than an off-by-a-factor-of-tabs. But
+   * a read that answered with a SMALLER figure, from a tab that was behind or a
+   * record somebody edited, must never hand an allowance back; `Math.max` is
+   * the whole of that guarantee.
+   *
+   * `Number.isInteger` and `Math.max(0, ...)` because this came off a store the
+   * person sitting there can edit. Tampering is explicitly out of scope — see
+   * `Budget.store`, it is a cost control and not a security boundary — but a
+   * negative or fractional figure is the one input that would make the ceiling
+   * comparison never fire at all, and that is worth one guard.
+   */
+  function syncSpend(): void {
+    if (!budgetKept || budgetBroken !== null) return;
+    const read = budget!.store!.load();
+    if (!read.ok) {
+      budgetBroken =
+        "the stored record of this app's spend ceiling could not be read, so there is no way " +
+        "to tell how much of the allowance is already spent. Rather than assume none of it is, " +
+        "this driver refuses every call: an unreadable ceiling that let calls through would be " +
+        "no ceiling at all. The app itself still works normally for the person at the keyboard.";
+      return;
+    }
+    if (read.spent === null) return;
+    const record = read.spent;
+    // Two reasons to throw a record away, both host-held and neither reachable
+    // by the agent. See `Budget.epoch` and `Budget.window`.
+    if ((record.epoch ?? undefined) !== budget!.epoch) return;
+    if (budget!.window !== undefined && Date.now() - record.since >= budget!.window) return;
+    if (Number.isInteger(record.calls)) callsUsed = Math.max(callsUsed, record.calls);
+    if (Number.isInteger(record.commits)) commitsUsed = Math.max(commitsUsed, record.commits);
+    if (Number.isFinite(record.since)) budgetSince = record.since;
+  }
+
+  /**
+   * Write the counters down, and fail closed if that cannot be done.
+   *
+   * Called after each increment rather than on an interval or at unload. The
+   * event this exists for is a page that goes away without warning — a reload,
+   * a crash, a `goto` — so any scheme that batches is a scheme that loses
+   * exactly the calls it was built to remember.
+   *
+   * The throw is caught HERE and not left to the caller, because the call it is
+   * about has already happened: the verb ran, the data moved, and failing the
+   * `Result` now would tell an agent nothing happened when something did. What
+   * a failed write changes is the FUTURE — from here on nothing is allowed,
+   * because nothing more can be accounted for.
+   */
+  function rememberSpend(): void {
+    if (!budgetKept || budgetBroken !== null) return;
+    try {
+      budget!.store!.save({
+        calls: callsUsed,
+        commits: commitsUsed,
+        since: budgetSince,
+        ...(budget!.epoch === undefined ? {} : { epoch: budget!.epoch }),
+      });
+    } catch {
+      budgetBroken =
+        "this app's spend ceiling could not be written down — storage is full, or blocked — so " +
+        "from here on there is no way to carry the count across a page load. Rather than let " +
+        "an uncounted call through, this driver refuses every later one. The app itself still " +
+        "works normally for the person at the keyboard; somebody has to free up storage or " +
+        "lift the ceiling.";
+    }
+  }
+
+  // At mount, so `Driver.budget` reports the true figure to a panel before a
+  // single call is made -- a settings view that said "0 of 200" on a page whose
+  // allowance was half spent would be the panel lying about the one number it
+  // is there to show.
+  syncSpend();
 
   for (const verb of options.verbs as Verb<any>[]) {
     if (verbs.has(verb.name)) {
@@ -1556,6 +1698,7 @@ export function mount(options: MountOptions): Driver {
    * `onBeforeCommit` already had and the only safe way round it is a person.
    */
   async function askApproval(
+    ask: ApprovalHook,
     name: string,
     args: Record<string, Scalar>,
     before: Snapshot,
@@ -1564,15 +1707,26 @@ export function mount(options: MountOptions): Driver {
     const req: ApprovalRequest = { name, args, verb: entries.get(name)!, snapshot: before };
     const was = pending;
     pending = name;
+    // The one wait in this file that is a PERSON rather than the app, and
+    // therefore the one worth timing separately. Read only when a record is
+    // going to be built -- an app with no `onAudit` reads no clock here, the
+    // same promise `call` already makes.
+    const askedAt = onAudit === undefined ? 0 : Date.now();
     let decision: Approval;
     try {
-      decision = await deadline(approveFn!(req), options.approvalTimeout);
+      decision = await deadline(ask(req), options.approvalTimeout);
     } catch (err) {
       decision = `the approval could not be asked for (${
         err instanceof Error ? err.message : String(err)
       }), and a failed ask is a no, never a yes`;
     } finally {
       pending = was;
+      // In the `finally`, so EVERY exit is timed: a yes, a no, a deadline, and
+      // a hook that threw. A person who spent two minutes and then declined is
+      // exactly as interesting to an auditor as one who spent two minutes and
+      // approved, and a figure recorded only on the happy path is one that
+      // vanishes from the records somebody is most likely to be reading.
+      if (onAudit !== undefined) trail.waitedMs = Math.max(0, Date.now() - askedAt);
     }
 
     // The answer, written down as one of four words before it is turned into a
@@ -1585,16 +1739,36 @@ export function mount(options: MountOptions): Driver {
       trail.approval = "allowed";
       return null;
     }
-    trail.approval =
-      typeof decision === "object" && decision !== null && decision.timedOut === true
-        ? "timed-out"
-        : "declined";
+    // Read through one probe rather than narrowed member by member, because
+    // the two object answers have no field in common and the next one will not
+    // either: a gate answers in the shapes it needs, and the core's job is to
+    // recognise them without caring what else is on the object.
+    const shape =
+      typeof decision === "object" && decision !== null
+        ? (decision as { timedOut?: unknown; asked?: unknown; hint?: unknown })
+        : undefined;
+    // Allowed the call, and nobody was asked. The ONE answer that allows
+    // without claiming consent, and it is here so the panel's dialog can let a
+    // small reversible commit past -- or let everything past when the person
+    // has switched confirmations off -- without the record saying a person
+    // said yes. `trail.approval` stays `not-asked`, which it already is, and
+    // `policy` says there was a gate that chose not to ask. See `Approval`.
+    if (shape?.asked === false) {
+      // Nobody was asked, so there was no wait -- and `waitedMs` promises that
+      // its absence means no question was open. The gate returned in no time
+      // at all, which is indistinguishable from an instant answer by the
+      // clock; `asked: false` is the one thing that tells them apart, so it is
+      // what the field is cleared on.
+      delete trail.waitedMs;
+      return null;
+    }
+    trail.approval = shape?.timedOut === true ? "timed-out" : "declined";
     if (decision === false) return no(DECLINED, DECLINED_HINT, read());
     if (typeof decision === "string") return no(DECLINED, decision, read());
-    if (typeof decision === "object" && decision !== null && decision.timedOut === true) {
+    if (shape?.timedOut === true) {
       return no(
         APPROVAL_TIMEOUT,
-        decision.hint ??
+        (typeof shape.hint === "string" ? shape.hint : undefined) ??
           `\`${name}\` needed a person's approval and nobody answered. **The verb did not ` +
             `run and nothing changed** — this is not the relay's \`timeout\`, which means the ` +
             `outcome is unknown. Ask the person, then call it again.`,
@@ -1607,7 +1781,8 @@ export function mount(options: MountOptions): Driver {
     // refused commit.
     warn(
       `the \`approve\` hook answered with ${JSON.stringify(decision)}, which is not an ` +
-        `approval. Treated as a refusal. Return true, false, a reason, or { timedOut: true }.`,
+        `approval. Treated as a refusal. Return true, false, a reason, ` +
+        `{ timedOut: true }, or { asked: false }.`,
     );
     return no(
       DECLINED,
@@ -1636,6 +1811,10 @@ export function mount(options: MountOptions): Driver {
     approval: AuditEvent["approval"];
     plan?: string;
     minted?: string;
+    /** Milliseconds a question was open, when one was. Written by
+     *  `askApproval`, which is the one place in here that waits on a person, so
+     *  the record cannot disagree with it. See `AuditEvent.waitedMs`. */
+    waitedMs?: number;
   }
 
   /**
@@ -1681,6 +1860,11 @@ export function mount(options: MountOptions): Driver {
     const event: AuditEvent = {
       at,
       ms: at - started,
+      // Approval-inclusive `ms`, and the human share of it beside rather than
+      // taken out of it. See `AuditEvent.waitedMs`: "41 seconds, 38 of them
+      // waiting" answers both questions an auditor has and the sum alone
+      // answers neither.
+      ...(trail.waitedMs === undefined ? {} : { waitedMs: trail.waitedMs }),
       app: options.app,
       verb: name,
       args: shown,
@@ -1691,7 +1875,9 @@ export function mount(options: MountOptions): Driver {
       rev: trail.rev ?? result.snapshot.rev,
       ok: result.ok,
       approval: trail.approval,
-      policy,
+      // Read now, not captured at mount: a page that acquires a gate halfway
+      // through its life has records on both sides of that, and both are true.
+      policy: policyNow(),
     };
     const screen = trail.screen ?? result.snapshot.screen;
     if (screen !== undefined) event.screen = screen;
@@ -1801,6 +1987,19 @@ export function mount(options: MountOptions): Driver {
     // Charged for whatever happens next, refusals included. See `Budget`: an
     // agent looping on `bad-argument` is the runaway this field exists for, and
     // a counter that only counted successful calls would watch it spin.
+    // Before the counter comparison, because when the ceiling cannot be
+    // accounted for there is no counter worth comparing. Same slug as a spent
+    // ceiling on purpose: to the agent the two are the same fact — nothing more
+    // will run here and no repair exists at this end — and `drive` already
+    // treats `budget-spent` as an ending rather than as a mistake to retry.
+    // The hint is what differs, and it is the hint a human reads.
+    // What the other tabs have spent, before this tab decides it has room. See
+    // `syncSpend`: without this, two tabs open at once are two ceilings.
+    syncSpend();
+    if (budgetBroken !== null) {
+      return no(BUDGET_SPENT, budgetBroken, read());
+    }
+
     if (budget?.calls !== undefined && callsUsed >= budget.calls) {
       return no(
         BUDGET_SPENT,
@@ -1813,6 +2012,7 @@ export function mount(options: MountOptions): Driver {
       );
     }
     callsUsed++;
+    rememberSpend();
 
     const verb = verbs.get(name);
     if (!verb) {
@@ -2023,15 +2223,25 @@ export function mount(options: MountOptions): Driver {
       );
     }
 
-    if (verb.kind === "commit" && approveFn !== undefined) {
-      const refused = await askApproval(name, args, before, trail);
+    // The app's own hook if it declared one, otherwise whatever the page
+    // installed through `adopt`, otherwise nothing. Read HERE and not at
+    // mount, because a panel can be mounted after the driver is and the
+    // commits that arrive after it must go through it -- that is the whole of
+    // what adoption buys, and a captured `const` would have made the first
+    // page load the only one that counted.
+    const approver = approveFn ?? adopted;
+    if (verb.kind === "commit" && approver !== undefined) {
+      const refused = await askApproval(approver, name, args, before, trail);
       if (refused) return refused;
     }
 
     // Charged on ENTERING `run`, beside the plan token and for the same reason:
     // a commit that changes half a selection and then throws has moved data,
     // and a counter that only counted clean returns would not know it.
-    if (verb.kind === "commit") commitsUsed++;
+    if (verb.kind === "commit") {
+      commitsUsed++;
+      rememberSpend();
+    }
 
     // Burned HERE, between the last check and `run`, and the position is the
     // decision rather than an accident of where it fitted.
@@ -2222,7 +2432,57 @@ export function mount(options: MountOptions): Driver {
     snapshot: read,
     call,
     approval: {
-      policy,
+      // A getter, because this one moves: `none` before a panel mounts and
+      // `adopted` after. A snapshotted value would have made every record on
+      // the page agree with whichever answer was true when `mount()` returned.
+      get policy() {
+        return policyNow();
+      },
+      declared: declaredPolicy,
+      /**
+       * Hand the gate to a dialog in the page, if nobody else has it.
+       *
+       * `DriverApproval.adopt` carries the whole argument. What is here is the
+       * order of the two refusals, and it is the order on purpose: an app that
+       * declared anything wins silently, because `approve: (req) =>
+       * panel.approve(req)` is the documented wiring and warning about the
+       * recommended arrangement is how a library teaches people to ignore its
+       * console. A SECOND adopter is told out loud, because that one is
+       * somebody's mistake and the symptom -- a dialog appearing in the other
+       * panel -- is otherwise unreadable.
+       */
+      adopt: (hook: ApprovalHook): (() => void) | null => {
+        if (typeof hook !== "function") {
+          warn(
+            `\`approval.adopt\` was handed ${JSON.stringify(hook)}, which is not a function, ` +
+              `so nothing was installed and commits on this driver are gated by whatever ` +
+              `\`approve\` the app declared.`,
+          );
+          return null;
+        }
+        if (declared !== undefined) return null;
+        if (adopted !== undefined) {
+          warn(
+            `a second approval dialog tried to adopt \`${options.app}\` and was refused: the ` +
+              `first one keeps the gate, because two gates for one commit is two dialogs. ` +
+              `Commits will be confirmed in whichever panel adopted first — including commits ` +
+              `started from this one. Mount one panel per driver, or declare the gate yourself ` +
+              `with \`approve\` so that every panel asks through it.`,
+          );
+          return null;
+        }
+        const token = {};
+        adopted = hook;
+        adoptedBy = token;
+        return () => {
+          // Only its own. A disposer that fired late and unhooked whoever
+          // adopted after it would leave the live panel's dialog silently
+          // bypassed, which is this whole change running backwards.
+          if (adoptedBy !== token) return;
+          adopted = undefined;
+          adoptedBy = undefined;
+        };
+      },
       // Offered whatever the policy is, including `"none"`. The widget's
       // in-page dialog is an approval UI on a driver that may well have
       // declared nothing, and it needs the lock exactly as much as the core's

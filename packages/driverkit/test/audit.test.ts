@@ -246,6 +246,60 @@ test("a declined approval is distinguishable from one that was never asked", asy
   assert.equal(headless.last().policy, "unattended");
 });
 
+test("a gate installed in the page is recorded as `adopted`, and its yes as a yes", async () => {
+  // The defect, from the record's side. The widget's dialog used to gate
+  // outside `call()`, so this exact app -- a panel and an `onAudit`, nothing
+  // else -- recorded `not-asked, none` for a commit somebody clicked Approve
+  // on. An approver installed through `adopt` is asked inside the call, so the
+  // gate writes the answer down itself and there is nothing to correlate.
+  const a = audited();
+  a.driver.approval!.adopt!(() => true);
+  await a.driver.call("set-page-size", { size: 50 });
+  assert.equal(a.last().approval, "allowed");
+  // `adopted` and not `hook`: see `DriverApproval.policy`. A reader who cannot
+  // tell the app's own declaration from a dialog that was on the page that
+  // afternoon cannot check either claim.
+  assert.equal(a.last().policy, "adopted");
+});
+
+test("a gate that chose not to ask records `not-asked`, never `allowed`", async () => {
+  // The fabricated yes, which would have been a worse bug than the one being
+  // fixed. The panel's dialog lets a small reversible commit through without a
+  // question; answering `true` there made the record say a person approved it.
+  // `{ asked: false }` allows the call and records what happened — and `policy`
+  // is the difference between this and an app with no gate at all: there WAS a
+  // gate here and it decided this commit did not need a question.
+  const a = audited();
+  a.driver.approval!.adopt!(() => ({ asked: false }));
+  await a.driver.call("set-page-size", { size: 50 });
+  assert.equal(a.last().ok, true);
+  assert.equal(a.last().approval, "not-asked");
+  assert.equal(a.last().policy, "adopted");
+});
+
+test("the records either side of a panel mounting are both true", async () => {
+  // `policy` is read per call rather than captured at mount, because a page
+  // can acquire a gate halfway through its life — a host that lazy-loads its
+  // assistant — and lose it again when the panel unmounts. A field frozen at
+  // mount would have made every record on the page agree with whichever answer
+  // was true when `mount()` returned, which is one of them being a lie.
+  const a = audited();
+  await a.driver.call("set-page-size", { size: 50 });
+  assert.deepEqual([a.last().approval, a.last().policy], ["not-asked", "none"]);
+
+  const release = a.driver.approval!.adopt!(() => true);
+  await a.driver.call("set-page-size", { size: 50 });
+  assert.deepEqual([a.last().approval, a.last().policy], ["allowed", "adopted"]);
+
+  release!();
+  await a.driver.call("set-page-size", { size: 50 });
+  assert.deepEqual(
+    [a.last().approval, a.last().policy],
+    ["not-asked", "none"],
+    "the panel is gone, so there is no gate, and the record says so",
+  );
+});
+
 test("an approval nobody answered is recorded as timed out, never as declined", async () => {
   // The same distinction the `approval-timeout` slug exists for, carried into
   // the record. A person deciding no and a question nobody saw are different

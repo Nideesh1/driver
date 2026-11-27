@@ -10,8 +10,9 @@
  * where a person goes looking for it.
  *
  * They are per VIEWER, not per app. A pace is a statement about how fast this
- * particular person reads, which is why they are remembered the way the
- * panel's position is remembered — in `localStorage`, namespaced by app, with
+ * particular person reads, and `rememberChat` is a statement about what this
+ * person is willing to have written down on this machine, which is why they are
+ * remembered the way the panel's position is remembered — in `localStorage`, namespaced by app, with
  * every read and write wrapped. See `loadJson` in `position.ts`: that is
  * deliberately the only storage mechanism in this package, because two of them
  * would be two places to get the try/catch wrong. Storage throws in a private
@@ -39,6 +40,27 @@ export interface Settings {
   stepMode: boolean;
   /** Ask before every `commit` verb. Default on, matching `WidgetOptions`. */
   confirmCommits: boolean;
+  /**
+   * Bring the conversation back after a page reload.
+   *
+   * The VIEWER's half of a two-key switch, and the weaker half. `WidgetOptions
+   * .rememberChat` decides whether a conversation is ever written down at all;
+   * this decides whether this particular person wants theirs kept, and it is
+   * read only where the app already said yes. So an app that must not write
+   * transcripts cannot be overruled from here, and a person on a shared machine
+   * can still say no to an app that would.
+   *
+   * It belongs beside the other four because this is where somebody goes
+   * looking for it — the same argument `confirmCommits` is surfaced here for.
+   * It is per viewer, so like the rest it lives in `localStorage` even though
+   * the thing it governs lives in `sessionStorage`: the preference outlives the
+   * tab and the conversation does not.
+   *
+   * Default on. Within an app that opted in, a panel that forgets the
+   * conversation it was told to remember is the surprising behaviour; the
+   * cautious default is one level up, where the app decides.
+   */
+  rememberChat: boolean;
 }
 
 /**
@@ -79,7 +101,13 @@ const MAX_PACE = 3000;
 export const DEFAULT_PACE = WATCHABLE_PACE;
 
 export function defaults(confirmCommits: boolean): Settings {
-  return { pace: DEFAULT_PACE, highlight: true, stepMode: false, confirmCommits };
+  return {
+    pace: DEFAULT_PACE,
+    highlight: true,
+    stepMode: false,
+    confirmCommits,
+    rememberChat: true,
+  };
 }
 
 /** The speed whose `ms` is nearest, so a stored or host-supplied pace that is
@@ -119,6 +147,7 @@ export function load(
       ...(typeof s.highlight === "boolean" ? { highlight: s.highlight } : {}),
       ...(typeof s.stepMode === "boolean" ? { stepMode: s.stepMode } : {}),
       ...(typeof s.confirmCommits === "boolean" ? { confirmCommits: s.confirmCommits } : {}),
+      ...(typeof s.rememberChat === "boolean" ? { rememberChat: s.rememberChat } : {}),
     } satisfies Partial<Settings>;
   });
   return { ...base, ...(stored ?? {}) };

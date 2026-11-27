@@ -40,11 +40,17 @@ and one inferred from a function's name is a guess with a confirmation dialog at
 1. **Read before drafting.** Open the two or three highest-ranked files from the survey (the store, the API
    client, the server actions) and the component that renders the main screen. If the survey found no
    candidates, grep for the words on the app's own buttons instead — "accept", "assign", "archive".
+   **The survey's `unknown` lines are the ones to read first.** `kind` is guessed from the name against three
+   word lists and anything the lists do not carry is printed as `unknown`, not dropped — so `0 commit` means
+   *no name looked like a write*, which is the same output a read-only app gives and the same output an app
+   whose writes are spelled `writeSet` or `castVerdict` gives. Never draft a read-only verb list off a
+   `0 commit` line while the `unknown` count is above zero.
 2. **Draft one new file**, `src/driverkit.ts` (or beside the store, following this repo's layout; `.js` with
    JSDoc if the app is not TypeScript). One `mount({ app, verbs, visible })`, nothing else. A draft that also
    rewires the app is a draft nobody can review.
-3. **Aim for six to twelve verbs**, the ones a person would ask for out loud. A verb per exported function is a
-   manifest nobody can read and a prompt nobody can afford.
+3. **Aim for six to twelve verbs per screen, and under about twenty-five for the whole app** — the ones a
+   person would ask for out loud. (driverkit's own demo has eighteen across six screens.) A verb per exported
+   function is a manifest nobody can read and a prompt nobody can afford.
 4. **Show the human what to prune.** End with a table: verb, kind, the file and function its `run` body calls,
    and your confidence. Mark every guess inline with `// REVIEW:` — an unverified selector, an argument type you
    inferred, a refusal you think exists. Then say plainly which verbs you are least sure about.
@@ -84,10 +90,11 @@ and one inferred from a function's name is a guess with a confirmation dialog at
 - **Fill in `refuses`.** Short stable slugs from the app's own vocabulary (`nothing-selected`, `already-paid`).
   It is the field people skip and the one that lets an agent avoid a call instead of discovering the answer by
   making it. Declaring it also opts the verb into a dev-time check.
-- **Never use a reserved slug** as a verb name or a refusal: `stale`, `stale-plan`, `wrong-screen`,
+- **Never use a reserved slug** as a verb name or a refusal. All fifteen: `stale`, `stale-plan`, `wrong-screen`,
   `unknown-verb`, `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`,
-  `declined-by-user`, `approval-pending`, `approval-timeout`. `mount()` throws on it. `wrong-screen` is the one an
-  app is likeliest to have invented already — use `screen` instead.
+  `declined-by-user`, `approval-pending`, `approval-timeout`, `budget-spent`, `changed-elsewhere`. `mount()`
+  throws on it. `wrong-screen` is the one an app is likeliest to have invented already — use `screen` instead;
+  `stale-plan` is the one a `consumes: "plan"` pair invites you to invent — the core already writes it.
 - **Names** are kebab-case, stable, unique, and in the user's vocabulary (`park`, not `set-lane`). **`describe`**
   is one imperative line a stranger can read ("accept the selected contacts"), never "calls patchContacts". Each
   arg's `describe` is written for a reader who cannot see the app; use `oneOf` instead of prose when the set is

@@ -262,6 +262,122 @@ export function renderOutcome(result: Result): string {
 }
 
 /**
+ * The shortest honest wait worth a line in a prompt.
+ *
+ * One second, and the number is the whole token argument. A duration on every
+ * call is a line in every turn forever, for a capability most runs never use,
+ * and `pruneScreens` cut a ten-step run from 5,775 to 1,397 characters by
+ * refusing to pay exactly that kind of per-step rent. So the default is that a
+ * call which took no time says nothing: a snappy app renders not one byte more
+ * than it did before this existed, and the bytes get spent only on the calls
+ * where elapsed time is a fact about the app rather than noise.
+ *
+ * A second is also roughly where a wait stops being invisible to the person
+ * watching the panel. Below it, the model learning the number changes no
+ * decision it could make; above it, "this verb is slow" is a real property of
+ * the app that explains why the next step should not be another one of these.
+ */
+export const SLOW_MS = 1000;
+
+/**
+ * How long a call took, as one line for the outcome half of a tool turn.
+ *
+ * ```
+ * ok — 3,412 contacts accepted
+ * took: ~2s
+ *
+ * On screen now:
+ * screen: contacts
+ * ```
+ *
+ * **Why this is a function and not a field on `Result`.** A `Result` is what
+ * the APP returned; a duration is a fact about the call that wrapped it, which
+ * the app never measured and cannot be asked to. Putting it on the wire would
+ * invite an app to fill it in, and then the number a model reads would be an
+ * app's claim about its own speed rather than an observation. The caller
+ * measures, the caller renders, and this is the one place either half of the
+ * library says it in words.
+ *
+ * **Why it is bucketed rather than exact.** Every other byte of a rendered
+ * turn is a function of app state, so two identical runs produce identical
+ * transcripts — which is what eval caching, snapshot tests and anything that
+ * diffs transcripts are built on. A wall-clock millisecond count breaks that
+ * for every reader at once. Rounding to a coarse bucket gives it back for the
+ * ordinary case: a verb that takes 2.1s one run and 2.3s the next renders
+ * `~2s` both times, so the transcript is stable wherever the app's own
+ * behaviour is. It does not make the output a pure function of state — a
+ * bucket boundary is still a boundary, and a call that straddles one renders
+ * two ways — and that is why `Clock.now` is injectable through `DriveOptions
+ * .clock`: a suite or an eval that needs a byte-exact transcript pins the
+ * clock and gets one. Buckets are for production, the injected clock is for
+ * determinism, and neither is asked to do the other's job.
+ *
+ * `~` is on the number on purpose. A model shown `took: 2.13s` will compare
+ * two of them to three figures and report a difference that is scheduler
+ * noise; `~2s` cannot be over-read, and reads naturally in an answer a person
+ * gets back.
+ *
+ * **What this must never include.** The time a person spent deciding. `ms` in
+ * an `AuditEvent` is approval-inclusive by design — a reader of the record
+ * wants that gap back — but telling a MODEL that a call "took 40 seconds" when
+ * 38 of them were somebody reading a confirmation dialog is a false claim
+ * about the app's speed, and a model that believes it will go looking for a
+ * faster route around a verb that is not slow. The caller is responsible for
+ * handing in work time only; see `DriveOptions.waited`, which is how a host
+ * that gates commits INSIDE `driver.call()` subtracts its own dialog.
+ *
+ * `floorMs` below is the "not interesting" threshold, and `0` renders every
+ * call. Returns the EMPTY STRING rather than a sentinel when there is nothing
+ * worth saying, so a caller appends it unconditionally and the fast path adds
+ * no line at all.
+ *
+ * Verbatim with `render.py`. Both halves say the same words about the same
+ * number, which is the rule for everything in this file: a prompt that worked
+ * through MCP and misbehaves in the widget is a bug with no stack trace.
+ */
+export function renderDuration(ms: number, floorMs: number = SLOW_MS): string {
+  const whole = Math.floor(ms);
+  // A negative or non-finite figure is a broken clock, not a fast call, and
+  // the honest rendering of a measurement that did not happen is silence. A
+  // monotonic clock cannot go backwards; an injected one can, and a test
+  // clock that does should not put `took: ~-1s` in a prompt.
+  if (!Number.isFinite(whole) || whole < 0) return "";
+  if (whole < floorMs) return "";
+  return `took: ${bucket(whole)}`;
+}
+
+/**
+ * Whole milliseconds as a coarse, stable label.
+ *
+ * Integer arithmetic only, and no locale and no float formatting anywhere:
+ * `toFixed` and `%.1f` are the two things most likely to disagree between the
+ * two implementations, and this function's entire job is to agree. Each band
+ * floors rather than rounds, so the label never claims more time than elapsed.
+ *
+ *   under 100ms   `under 0.1s`   said in words, because `~0.0s` reads as zero
+ *                                and `~0.1s` would overstate it
+ *   under 1s      `~0.4s`        tenths: the resolution a `floorMs: 0` caller
+ *                                asked for, and the one at which two fetches
+ *                                are actually worth comparing
+ *   under 10s     `~2s`          whole seconds
+ *   under 1m      `~15s`         five-second steps. Tens were the first try and
+ *                                understated badly at the top of the band —
+ *                                19 seconds rendering `~10s` is a 47% lie, and
+ *                                "it took ten seconds" is the sentence a model
+ *                                will repeat to somebody. Five is still far
+ *                                coarser than any scheduler noise, so the
+ *                                label is stable where the app is
+ *   1m and over   `~3m`          whole minutes
+ */
+function bucket(ms: number): string {
+  if (ms < 100) return "under 0.1s";
+  if (ms < 1000) return `~0.${Math.floor(ms / 100)}s`;
+  if (ms < 10_000) return `~${Math.floor(ms / 1000)}s`;
+  if (ms < 60_000) return `~${Math.floor(ms / 5_000) * 5}s`;
+  return `~${Math.floor(ms / 60_000)}m`;
+}
+
+/**
  * Rows as a padded text table.
  *
  * Columns are `id` first, then every other key in the order it was first

@@ -53,6 +53,12 @@ const ENTRIES: Array<[subpath: string, browser: boolean]> = [
   // and that is also why it is reachable from a page at all: the in-page
   // widget is the case most likely to commit data and the one with no relay.
   ["./otel", true],
+  // The React panel. Browser-safe, and browser-safe for a reason worth knowing
+  // before reading the tests at the bottom of this file: it imports `react`
+  // nowhere, not even as a type. The React API is typed structurally and handed
+  // in, exactly as `./otel` takes a `Tracer`, so this entry is as loadable from
+  // a plain URL as the vanilla widget is.
+  ["./react", true],
   ["./relay", false],
   ["./relay/serve", false],
 ];
@@ -188,13 +194,17 @@ test("the built output loads in plain Node with no type stripping", async (t) =>
     // The audit sink. An entry point nothing else imports is the one that
     // rots, so the probe loads it out of `dist/` like the rest.
     'import { otelAudit } from "driverkit/otel";',
+    // The React panel, loaded out of `dist/` with no React anywhere on disk --
+    // which is the whole claim, run as a program rather than argued about. An
+    // entry point nothing else imports is the one that rots.
+    'import { createDriverPanel, createPanelStore, receiptLine } from "driverkit/react";',
     // Importable is not enough. A driver mounted and a verb called, out of the
     // built files, so an entry that loads but exports nothing usable fails.
     'const driver = mount({ app: "toy", visible: () => ({ where: "rows", rev: 1, rows: [{ id: "a" }] }),',
     '  verbs: [{ name: "ping", describe: "say hi", run: () => {} }] });',
     'const r = await driver.call("ping", {});',
     'if (!r.ok || r.snapshot.rev !== 1) throw new Error("the built core did not answer a call");',
-    'for (const [n, v] of Object.entries({ createRelay, serve, connect, controlsFromDom, drive, commas, mountWidget, checkDriver, otelAudit }))',
+    'for (const [n, v] of Object.entries({ createRelay, serve, connect, controlsFromDom, drive, commas, mountWidget, checkDriver, otelAudit, createDriverPanel, createPanelStore, receiptLine }))',
     '  if (typeof v !== "function") throw new Error(n + " is " + typeof v);',
     'console.log("ok");',
   ].join("\n");
@@ -273,4 +283,108 @@ test("the one dependency is the one the relay's own declarations need", () => {
   // page bundle by a types-only dependency, so the browser entries pay nothing
   // for it -- which is the only reason one package can carry both halves.
   assert.deepEqual(Object.keys(manifest().dependencies ?? {}), ["@types/node"]);
+});
+
+test("react is an optional peer and never a dependency", () => {
+  // The whole promise of `./react`, in the two fields that make it: somebody
+  // who installs driverkit and never imports that subpath must not find React
+  // in their lockfile. `optional: true` is what stops npm installing it AND
+  // what stops npm warning about a peer they correctly do not have -- without
+  // it, every consumer of a library with no React would see a peer warning for
+  // an entry point they are not using.
+  const pkg = manifest() as unknown as {
+    dependencies?: Record<string, string>;
+    peerDependencies?: Record<string, string>;
+    peerDependenciesMeta?: Record<string, { optional?: boolean }>;
+  };
+
+  assert.deepEqual(Object.keys(pkg.peerDependencies ?? {}), ["react"]);
+  assert.equal(pkg.peerDependenciesMeta?.["react"]?.optional, true, "the peer must be optional");
+  // `>=18` and not `*`: `useSyncExternalStore` is an 18 API and the area is
+  // built on it, so a 17 that satisfied `*` would resolve and then fail at
+  // render -- which is the failure a version range exists to turn into an
+  // install-time warning.
+  assert.match(String(pkg.peerDependencies?.["react"]), /18/);
+  assert.ok(
+    !Object.keys(pkg.dependencies ?? {}).includes("react"),
+    "react in `dependencies` would install it for everybody",
+  );
+});
+
+test("the package never imports react, so an unresolvable .d.ts is impossible", async (t) => {
+  if (!existsSync(`${PKG}dist/react/index.js`)) {
+    t.skip("no dist/: run `npm run build` first");
+    return;
+  }
+
+  // The half `peerDependenciesMeta` does NOT buy, and the reason this entry
+  // point is shaped the way it is. `optional: true` stops the install; it does
+  // nothing about `import type { ReactNode } from "react"` sitting in a
+  // published declaration file, which is a dangling module reference for every
+  // consumer who did not install React -- and `skipLibCheck` hides it from us
+  // and not from them. So nothing in the package names `react` at all: the API
+  // is typed structurally in src/react/runtime.ts and passed in. The same
+  // argument, and the same shape, as `./otel` taking a `Tracer`.
+  //
+  // Declarations AND emitted JavaScript, because the two fail differently: a
+  // `.d.ts` reference breaks a consumer's typecheck, and a `.js` one breaks
+  // their bundle -- or, in a page with no import map, their import.
+  const named: string[] = [];
+  for (const area of readdirSync(`${PKG}dist`)) {
+    for (const file of readdirSync(`${PKG}dist/${area}`)) {
+      if (!file.endsWith(".js") && !file.endsWith(".d.ts")) continue;
+      const text = readFileSync(`${PKG}dist/${area}/${file}`, "utf8");
+      // Only real module specifiers. The files discuss `react` at length in
+      // their comments -- saying why they do not import it -- and a test that
+      // could not tell prose from an import would forbid the explanation.
+      for (const m of text.matchAll(/^\s*(?:import|export)[^;]*?from\s+"([^"]+)"/gm)) {
+        if (m[1] === "react" || m[1]?.startsWith("react/")) named.push(`${area}/${file}`);
+      }
+    }
+  }
+  assert.deepEqual(named, [], "a `react` specifier would dangle for every consumer without it");
+});
+
+test("driverkit/react is absent from the module graph of someone importing only driverkit", async (t) => {
+  if (!existsSync(`${PKG}dist/core/index.js`)) {
+    t.skip("no dist/: run `npm run build` first");
+    return;
+  }
+
+  // The fourth condition, and the one a refactor would break by accident. The
+  // other three are about `react`; this is about `./react` -- an optional entry
+  // point that something in `core` or `widget` imported "just for a type" would
+  // be in everybody's graph, and then the structural typing above would be the
+  // only thing still holding the promise up.
+  //
+  // Walked rather than asserted as a list of allowed imports, because the thing
+  // to prove is transitive: `core -> widget -> react` is as bad as
+  // `core -> react` and a one-level check would miss it.
+  const reached = new Set<string>();
+  const queue = ["core/index.js"];
+  while (queue.length > 0) {
+    const at = queue.shift()!;
+    if (reached.has(at)) continue;
+    reached.add(at);
+    const text = readFileSync(`${PKG}dist/${at}`, "utf8");
+    const dir = at.slice(0, at.lastIndexOf("/"));
+    for (const m of text.matchAll(/^\s*(?:import|export)[^;]*?from\s+"(\.[^"]+)"/gm)) {
+      // `new URL` resolves `../agent/index.js` against the file's own directory
+      // the way a module resolver would, which hand-joining paths does not.
+      const to = new URL(m[1]!, `file:///${dir}/`).pathname.replace(/^\//, "");
+      if (existsSync(`${PKG}dist/${to}`)) queue.push(to);
+    }
+  }
+
+  assert.ok(reached.size > 1, "the walk must actually have walked something");
+  assert.deepEqual(
+    [...reached].filter((f) => f.startsWith("react/")),
+    [],
+    "nothing reachable from the core may pull the React entry point in",
+  );
+  // And the walk is sound only if it finds the area when the area IS imported.
+  // Without this, a typo in the regex would make the assertion above pass by
+  // reaching nothing at all.
+  const fromReact = readFileSync(`${PKG}dist/react/index.js`, "utf8");
+  assert.match(fromReact, /from "\.\.\/agent\/index\.js"/, "the react entry does import the agent");
 });

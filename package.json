@@ -34,7 +34,7 @@
       "it starts a server and a browser, and `npm test` must stay a pure function of",
       "the source."
     ],
-    "e2e": "node --test e2e/smoke.spec.mjs"
+    "e2e": "node --test e2e/*.spec.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.7",

@@ -852,6 +852,35 @@ test("an app with no ungated commits connects exactly as it did before", () => {
   fine.conn.disconnect();
 });
 
+test("a dialog adopted in the page does not satisfy this, so startup does not depend on mount order", () => {
+  // `mountWidget` installs its confirmation as the core's approver, which
+  // makes the driver's live `policy` read `adopted` — a real gate, asked on
+  // this stream's calls too. It still does not satisfy this check, for two
+  // reasons that are each enough on their own.
+  //
+  // It is not a declaration: it exists only while that panel is mounted, so a
+  // `connect()` that accepted it would publish commits that quietly become
+  // ungated when somebody closes the assistant.
+  //
+  // And it would be ORDER-DEPENDENT. The same app would start or throw
+  // according to whether `connect()` ran before or after `mountWidget`, which
+  // is the worst property a startup check can have — the bug reproduces on one
+  // developer's machine and not the next.
+  const driver = committing();
+  driver.approval!.adopt!(() => true);
+  assert.equal(driver.approval!.policy, "adopted", "there IS a gate");
+  assert.equal(driver.approval!.declared, "none", "and the app still never said so");
+  assert.throws(() => wire(driver), /refusing to connect/);
+
+  // And the app that did say so publishes, panel or no panel. This is the
+  // documented wiring — `approve: (req) => panel.approve(req)` — which is one
+  // line and makes the panel the declared gate.
+  const declared = committing({ approve: () => true });
+  assert.equal(declared.approval!.adopt!(() => true), null, "the app's hook is not replaced");
+  const ok = wire(declared);
+  ok.conn.disconnect();
+});
+
 test("a hand-written driver can declare the policy itself, because PROTOCOL.md says it may exist", () => {
   // `Driver.approval` is optional precisely so a thirty-line page loop still
   // satisfies the interface. An absent one reads as "nothing declared", and a

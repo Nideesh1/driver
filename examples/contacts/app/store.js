@@ -219,8 +219,10 @@ const FLOWS = [
  *   moved. The page redraws, syncs the address bar and pushes a snapshot to
  *   the relay from here.
  * @param {{ approve?: import("driverkit").ApprovalPolicy, approvalTimeout?: number,
- *           elsewhere?: import("driverkit").ElsewhereChannel }} [options] who
- *   approves a commit, passed straight through to `mount()`.
+ *           elsewhere?: import("driverkit").ElsewhereChannel,
+ *           onAudit?: import("driverkit").AuditHook }} [options] who
+ *   approves a commit and where the records go, passed straight through to
+ *   `mount()`.
  *
  *   It is an argument rather than a constant in here because the answer is not
  *   the app's to give: this module is the store and the verb table, and WHO IS
@@ -758,6 +760,15 @@ export function createApp(onChange = () => {}, options = {}) {
     // not move. Without a channel the second tab reports accepted rows as
     // `new`, at a `rev` that passes every staleness check there is.
     ...(options.elsewhere === undefined ? {} : { elsewhere: options.elsewhere }),
+    // Where this driver's audit records go, when the embedding wants them.
+    // Absent otherwise, for the reason the three above are: an app that passes
+    // no hook behaves byte-identically to one mounted before `onAudit` existed.
+    // The interesting case to wire it for is a page that mounts the panel and
+    // declares no `approve`: the panel installs its dialog as the core's
+    // approver, so the record says `approval: "allowed", policy: "adopted"`
+    // for a commit a person clicked Approve on — which it could not say when
+    // the dialog gated outside `call()`.
+    ...(options.onAudit === undefined ? {} : { onAudit: options.onAudit }),
     // Said once, in the cached half, and read by both ways in. See
     // `INSTRUCTIONS` for why it is no longer pasted into every snapshot.
     instructions: INSTRUCTIONS,

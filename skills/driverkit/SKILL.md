@@ -104,10 +104,11 @@ the rules are [`INTEGRATING.md`](../../INTEGRATING.md) §2–§3:
   iteration construct and no `from: "step2.output"`, both on purpose: see [screens.md](references/screens.md).
 - Keep the snapshot to a screenful. A snapshot near the relay's 1 MiB body limit is a bug in `visible()`.
 - Never fill `Snapshot.selected` with every selected id — on-screen ids only, with `selectedCount` for the size.
-- A verb may not be named — or refuse with — a reserved slug: `stale`, `stale-plan`, `wrong-screen`,
-  `unknown-verb`, `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`,
-  `declined-by-user`, `approval-pending`, `approval-timeout` (`RESERVED_REFUSALS`, exported by `driverkit`, is the
-  authority). `mount()` throws on a reserved verb name or a reserved declared refusal. `wrong-screen` is the one an app is most likely to
+- A verb may not be named — or refuse with — a reserved slug. All fifteen: `stale`, `stale-plan`,
+  `wrong-screen`, `unknown-verb`, `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`,
+  `timeout`, `declined-by-user`, `approval-pending`, `approval-timeout`, `budget-spent`, `changed-elsewhere`
+  (`RESERVED_REFUSALS`, exported by `driverkit`, is the authority). `mount()` throws on a reserved verb name or a
+  reserved declared refusal. `wrong-screen` is the one an app is most likely to
   have invented for itself; `Verb.screen` replaces that guard — [screens.md](references/screens.md).
 - A tab id is a capability. Do not log it, print it in the UI, or paste it into a chat.
 - `allow_remote` without `auth=` or `resolve_principal=` refuses to start. That is deliberate; do not work around it.

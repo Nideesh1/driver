@@ -43,7 +43,20 @@ from .types import Manifest, Result, Scalar, Snapshot, Tab
 
 __all__ = ["Driverkit", "DriverkitError", "TransportError", "ProtocolError"]
 
-DEFAULT_TIMEOUT = 15.0
+#: The socket deadline for one request, in seconds.
+#:
+#: **Deliberately above the relay's own 60s call deadline, and that ordering is
+#: the whole point of the number.** The relay answers a tab that went quiet
+#: with a structured ``timeout`` ``WireResult`` — a slug, a hint, and the
+#: PROTOCOL.md rule that the outcome is unknown rather than failed. If this
+#: client gives up first, the caller gets a ``TransportError`` instead: an
+#: unknown outcome with none of that shape, about a call that may well have
+#: committed. The two deadlines were both 15.0, so whichever fired first was a
+#: race, and the bad side of that race is the side with no slug on it.
+#:
+#: 75 is 60 plus fifteen seconds of slack for the relay to notice its own
+#: deadline, build the body and write it.
+DEFAULT_TIMEOUT = 75.0
 
 
 class DriverkitError(Exception):

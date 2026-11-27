@@ -755,8 +755,19 @@ That is what the deadline is for. A relay should also fail calls already in
 flight immediately when a stream closes, rather than letting each one sit out
 its own deadline.
 
-The deadline is the relay's, defaults to 15 seconds, and is a property of the
-relay rather than the protocol.
+The deadline is the relay's, **defaults to 60 seconds**, and is a property of
+the relay rather than the protocol. It was 15, which was tuned for a button
+click and is no margin at all for a report fetch or an export: a legitimate
+20-second verb came back `timeout`, and `timeout` means *outcome unknown*, not
+*slow*. The deadline was turning successes into the most expensive answer the
+protocol has. 60 rather than more because the deadline is the only thing that
+answers an agent when a tab is alive but wedged, and because proxies and load
+balancers cut an idle response at 30 to 60 seconds — a longer server-side
+deadline is answered by a socket error at the client, which is an unknown
+outcome with no slug on it. A relay's client should set its own socket deadline
+*above* this one, so the structured `timeout` wins the race against a bare
+transport error. A verb that genuinely needs longer wants a handle-and-poll
+pair, not a bigger number.
 
 **Only `no-such-tab` proves the call did not happen.** It was never forwarded,
 because there was nowhere to forward it. The other two are *unknown*:

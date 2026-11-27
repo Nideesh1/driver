@@ -57,6 +57,10 @@
       "types": "./dist/otel/index.d.ts",
       "default": "./dist/otel/index.js"
     },
+    "./react": {
+      "types": "./dist/react/index.d.ts",
+      "default": "./dist/react/index.js"
+    },
     "./relay": {
       "node": {
         "types": "./dist/relay/index.d.ts",
@@ -76,7 +80,8 @@
   "files": [
     "dist",
     "README.md",
-    "CONTROLS.md"
+    "CONTROLS.md",
+    "REACT.md"
   ],
   "scripts": {
     "build": "tsc -b tsconfig.json",
@@ -93,6 +98,40 @@
   ],
   "dependencies": {
     "@types/node": "^22.0.0"
+  },
+  "//peerDependencies": [
+    "`./react` is a second, optional panel for a host that already has React; the",
+    "vanilla `./widget` is hand-written DOM and still depends on nothing. Somebody who",
+    "installs driverkit and never imports `driverkit/react` must not get React in their",
+    "lockfile and must not get an unresolvable import in the .d.ts files this package",
+    "publishes, and FOUR things have to hold for that, of which this field is one:",
+    "",
+    "  1. `optional: true` below, so npm neither installs React nor warns about a peer",
+    "     somebody correctly does not have. `>=18` because `useSyncExternalStore` is an",
+    "     18 API and it is the one that makes that area small.",
+    "  2. React is in no `dependencies`. The one dependency is still `@types/node`.",
+    "  3. NO FILE IN THE PACKAGE IMPORTS `react`, in any form, `import type` included.",
+    "     This is the part peer-optional does not buy: `import type { ReactNode } from",
+    "     \"react\"` in a published .d.ts is a dangling module reference for every",
+    "     consumer who did not install React. There is nothing to dangle because the",
+    "     React API is typed STRUCTURALLY in src/react/runtime.ts and handed in --",
+    "     `createDriverPanel(React)` -- which is also how a host is kept from ever",
+    "     rendering our components against a second copy of React's hook dispatcher.",
+    "     Same reasoning, and the same shape, as `./otel` taking a `Tracer`.",
+    "  4. Nothing in core, agent, widget, controls, browser, check, otel or relay",
+    "     imports that area, so it is not in the module graph of somebody importing",
+    "     only `driverkit`.",
+    "",
+    "All four are asserted in test/packaging.test.ts, including that the emitted",
+    "JavaScript under dist/react names no bare specifier at all -- not even `react`."
+  ],
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
   },
   "keywords": [
     "agent",

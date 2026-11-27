@@ -338,8 +338,30 @@ class Relay:
     promise. Without it a tab whose JavaScript died — stream still open, event
     loop wedged — holds the agent's request forever, which is the one failure
     mode worse than a refusal, because an agent cannot retry what has not
-    returned. It is the relay's property, not the protocol's; 15s is the
-    default PROTOCOL.md names.
+    returned. It is the relay's property, not the protocol's, and **the default
+    is 60 seconds** — the same number the TypeScript relay uses, because
+    PROTOCOL.md's own rule is that two conforming relays disagreeing on a
+    default is worse than either choice.
+
+    **Why 60 and not the 15 this used to be.** 15s was tuned for a button
+    click, where it is a margin of three hundred times. It is no margin at all
+    for the verb an adopter reaches for this library to drive — a report fetch,
+    an export, a cross-system lookup — and a legitimate 20-second fetch came
+    back ``timeout``, which PROTOCOL.md defines as **outcome unknown**: a
+    commit that answers that way may already have run and the agent is told
+    not to retry it. The deadline was converting successes into the most
+    expensive answer in the system, and the two errors are not symmetric.
+    Firing late costs latency; firing early costs a task nobody can safely
+    resume.
+
+    **Why not much longer.** The deadline is the only thing that answers an
+    agent when a tab is alive but wedged — ``tab-went-away`` covers a tab that
+    died, and nothing else covers one that is merely stuck. Past about a minute
+    an intermediary gives up first: proxies and load balancers cut an idle
+    response at 30 to 60 seconds, so a longer server-side deadline is answered
+    by a socket error at the client, which is an unknown outcome with no slug
+    and no ``Result`` shape at all. A verb that genuinely needs longer wants a
+    handle-and-poll pair of verbs, not a bigger number here.
 
     ``allow_remote`` serves requests that did not come from loopback. Off by
     default, and that default is the security model rather than a convenience.
@@ -400,7 +422,7 @@ class Relay:
 
     def __init__(
         self,
-        timeout_s: float = 15.0,
+        timeout_s: float = 60.0,
         ping_s: float = 20.0,
         allow_remote: bool = False,
         on_error: Callable[[BaseException], None] | None = None,

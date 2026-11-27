@@ -69,6 +69,13 @@ a traceback when something is missing.
   their *name* suggests, and whether the screen looks like a table with paging and selection. It reads and
   prints; it writes nothing and runs nothing. Name-based evidence is weak evidence, which is why its output is
   labelled candidates and the command is told to read the files.
+  **A name it cannot place comes out as `unknown`, never omitted** — a fourth bucket beside `commit`,
+  `describe` and `read`. It exists because an omitted name and a name that is not there printed identically,
+  and that silence failed in one direction: on the first real app surveyed outside this repo, eight `write*`
+  functions plus `castVerdict` and `abandonDescent` were simply absent, so the survey read as an app with no
+  writes. `0 commit` therefore means *nothing looked like a write*, and it means *there are no writes* only
+  when the `unknown` count is `0` as well. The lists were widened too; that is the lesser half of the fix,
+  since the next app will spell its writes in words nobody listed either.
 - `scripts/relay-status.mjs` — `GET /dk/tabs`, `/manifest`, `/snapshot`. Tries `127.0.0.1:7777` then
   `127.0.0.1:8770` (the example's port) unless `--relay` or `DK_RELAY` says otherwise, explains a `401` (present
   a tab token) against a `403` (nothing you can present will help), flags verbs that declare no `kind`, and

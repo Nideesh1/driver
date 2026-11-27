@@ -33,7 +33,7 @@ import type { Readable } from "node:stream";
 
 import { HttpEventSource, getJson, postJson } from "./sse-client.ts";
 import { TabAuth, anonPrincipalId, mintAnonCredential } from "../src/relay/index.ts";
-import { renderResult, renderSnapshot } from "../src/agent/index.ts";
+import { SLOW_MS, renderDuration, renderResult, renderSnapshot } from "../src/agent/index.ts";
 import type { Result, Snapshot } from "../src/core/index.ts";
 
 const ROOT = new URL("../../../", import.meta.url).pathname;
@@ -358,6 +358,84 @@ test("both renderers say the same words about a plan token, byte for byte", asyn
     expected,
     "render.py and render.ts have drifted on the plan token: an agent is told different rules depending on how it connected",
   );
+});
+
+/**
+ * Every band boundary of the duration bucket, and both sides of each.
+ *
+ * Boundaries only, because the bands are the whole of what could drift: the
+ * arithmetic inside one is `ms // 1000` in both languages and cannot disagree,
+ * and the formatting is where it would — `toFixed` and `%.1f` are the two
+ * things most likely to differ between the implementations, which is why
+ * neither is used and why this crossing exists to prove it.
+ *
+ * Rendered at BOTH thresholds, because the threshold is a decision and not an
+ * implementation detail: `SLOW_MS` is what the panel renders at and `0` is what
+ * a run asked to compare two fast verbs renders at, and a half that got the
+ * floor comparison backwards would pass every single-language test it has.
+ */
+const DURATIONS: number[] = [
+  0, 1, 99, 100, 101, 450, 999,
+  1000, 1001, 1999, 2000, 9999,
+  10_000, 12_000, 14_999, 15_000, 59_999,
+  60_000, 60_001, 119_999, 120_000, 3_600_000,
+  // A broken clock. Both halves answer with silence rather than a negative
+  // duration, and a half that let one through would put `took: ~-1s` in a
+  // prompt.
+  -1,
+];
+
+test("both renderers say the same words about a duration, byte for byte", async (t) => {
+  // `render.ts` and `render.py` are kept string-for-string on purpose, and a
+  // duration is the newest thing in either of them. It is also the one piece of
+  // rendering that is NUMERIC rather than a sentence, which is a different way
+  // for two implementations to drift: not a word that somebody changed in one
+  // file, but a rounding mode, a band boundary, or a locale creeping in through
+  // a float format. An agent told `~2s` through the widget and `~2.1s` through
+  // MCP is being driven differently by the same prompt.
+  const expected = DURATIONS.flatMap((ms) => [
+    renderDuration(ms),
+    renderDuration(ms, 0),
+  ]).join("\n--\n");
+
+  const script =
+    "import json,sys\n" +
+    "sys.path.insert(0, sys.argv[1])\n" +
+    "from driverkit import render_duration, SLOW_MS\n" +
+    "cases=json.load(sys.stdin)\n" +
+    "out=[]\n" +
+    "for ms in cases:\n" +
+    "    out.append(render_duration(ms))\n" +
+    "    out.append(render_duration(ms, 0))\n" +
+    'sys.stdout.write("\\n--\\n".join(out))\n';
+
+  const rendered = await renderInPython(script, JSON.stringify(DURATIONS));
+  if (rendered === null) {
+    t.skip("no python3 with driverkit importable from python/src");
+    return;
+  }
+  assert.equal(
+    rendered,
+    expected,
+    "render.py and render.ts have drifted on durations: the same call reads as a different length of time depending on how the agent connected",
+  );
+});
+
+test("both halves agree on what counts as slow", async (t) => {
+  // One number in two files is how they drift, and this one decides whether a
+  // line is rendered at all -- so a half with a different `SLOW_MS` would not
+  // merely round differently, it would be silent where the other speaks.
+  const script =
+    "import sys\n" +
+    "sys.path.insert(0, sys.argv[1])\n" +
+    "from driverkit import SLOW_MS\n" +
+    "sys.stdout.write(str(SLOW_MS))\n";
+  const read = await renderInPython(script, "");
+  if (read === null) {
+    t.skip("no python3 with driverkit importable from python/src");
+    return;
+  }
+  assert.equal(read, String(SLOW_MS));
 });
 
 /** Run a one-off script against `python/src`, or null if there is no usable

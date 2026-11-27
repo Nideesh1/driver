@@ -472,7 +472,23 @@ export function flowsNote(
  * is the exact cost the static/dynamic split was designed to avoid. It goes in
  * the newest message instead — see `loop.ts`.
  */
-export function systemPrompt(manifest: Manifest, instructions?: string): string {
+export function systemPrompt(
+  manifest: Manifest,
+  instructions?: string,
+  /**
+   * `DriveOptions.timing`, so the note about what a `took:` line means is paid
+   * for ONCE, in the half a provider caches, instead of once per call.
+   *
+   * Absent and `"off"` are the same thing and add nothing: a caller from before
+   * timing existed gets the byte-identical prompt it got before, which is what
+   * keeps every existing eval's cached prefix valid on upgrade.
+   *
+   * Still a pure function of its arguments, which is the property that matters
+   * here more than any wording: `drive` computes this once, before the loop,
+   * and `test/tools.test.ts` asserts it is byte-identical across turns.
+   */
+  timing: "off" | "slow" | "always" = "off",
+): string {
   const app = manifest.app || "this app";
   const parts = [
     `You are driving a live ${app} session: the page the person is looking at as you ` +
@@ -523,6 +539,38 @@ export function systemPrompt(manifest: Manifest, instructions?: string): string 
       "verb call ends your turn. Keep it short: this is rendered in a small panel in " +
       "the corner of the person's screen.",
   ];
+
+  // How to read a `took:` line, said once in the cached half rather than
+  // beside every duration. Two wordings because the two modes mean different
+  // things BY SILENCE, and silence is the half a model gets wrong: under
+  // `"slow"` a call with no line was fast, and under `"always"` a call with no
+  // line is one where the clock said nothing. A model that read the first as
+  // the second would refuse to answer "which is faster" on a run where every
+  // call was quick, which is the commonest version of the question.
+  //
+  // Both say that the figure is approximate and that a person's deciding time
+  // is not in it, because those are the two ways a model misuses a duration:
+  // reporting scheduler noise as a difference, and concluding an app is slow
+  // when somebody was reading a dialog.
+  if (timing === "slow") {
+    parts.push(
+      "Some results carry a `took:` line, which is roughly how long that verb took in the " +
+        "app. It is rounded, so treat `~2s` and `~3s` as about the same and do not report " +
+        "differences smaller than the rounding. It counts only the app's own work: time " +
+        "somebody spent reading a confirmation is not in it. A result with NO `took:` line " +
+        "took under a second — that is the only reason the line is missing, so \"it was " +
+        "fast\" is a true answer about those calls. If you are asked which of two things is " +
+        "slower, you may answer from these lines; say they are approximate.",
+    );
+  } else if (timing === "always") {
+    parts.push(
+      "Every result carries a `took:` line: roughly how long that verb took in the app. It " +
+        "is rounded, so treat `~0.4s` and `~0.5s` as about the same and do not report " +
+        "differences smaller than the rounding. It counts only the app's own work: time " +
+        "somebody spent reading a confirmation is not in it. If you are asked which of two " +
+        "things is slower, answer from these lines and say they are approximate.",
+    );
+  }
 
   // The map and the recipes, between the library's rules and the app's own
   // words. Both are pure functions of the static manifest, so the prefix stays

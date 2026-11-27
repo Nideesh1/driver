@@ -96,6 +96,43 @@ A "no" reaches the model as the `declined-by-user` refusal — an ordinary answe
 the built-in dialog rather than stacking with it; it receives `{ name, args, verb, snapshot }` and returns
 `true` / `false` / a string (which becomes the hint the model is told).
 
+### The dialog is the core's approver, which is why the record is true
+
+`mountWidget` installs the dialog as the driver's approval hook (`DriverApproval.adopt`) when the app declared no
+`approve` of its own. Three things follow, and the third is the one worth knowing:
+
+- The question covers **every path**, not just the in-page run: a commit arriving over the relay or MCP renders the
+  same dialog, with the same count and the same rules.
+- `onAudit` records what the person actually clicked — `approval: "allowed"` or `"declined"`, with
+  `policy: "adopted"`. Before this it recorded `approval: "not-asked", policy: "none"` for a commit somebody had
+  just approved, because the dialog gated outside `call()` and the core never saw the question.
+- A commit the dialog lets through **without** asking — a small `reversible` one, or any commit with
+  `confirmCommits: false` — records `approval: "not-asked"` beside `policy: "adopted"`, never `"allowed"`.
+  `allowed` means a person said yes.
+
+`policy: "adopted"` is deliberately not `"hook"`: the panel's gate lasts only as long as the panel, so it does
+**not** satisfy `connect()`'s demand for a declared approver. An app that mounts the panel *and* connects to a
+relay declares the gate itself, which is one line and keeps the same dialog:
+
+```ts
+let panel: Widget;
+const driver = mount({ …, approve: (req) => panel.approve(req) });
+panel = mountWidget(driver, { think });
+```
+
+What the panel will **not** do: replace an `approve` the app declared (yours wins, and you get one dialog, not
+two), take the gate from a panel that mounted first (the first one keeps it and the second is warned), install a
+dialog over `approve: "unattended"` — that word says commits here run with nobody in front of them, and the panel
+warns instead that its own confirmations will not appear in the audit record — or adopt at all when you passed
+`onBeforeCommit`, since that option replaces the dialog rather than stacking with it. A gate you pass as
+`onBeforeCommit` is outside `call()`, so its answer is not in the record (`approval: "not-asked"`); pass it as
+`approve` instead if it should be.
+
+The gate goes back when the panel does: `panel.unmount()` releases it, `policy` reads `declared` again, and a
+question still on screen is answered `{ timedOut: true }` — nobody answered, which is not the same as somebody
+refusing. Without that, closing a chat panel with a question open would leave every later commit waiting forever
+on a dialog nobody can see.
+
 ## Options worth knowing
 
 | option | default | |

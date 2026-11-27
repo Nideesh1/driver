@@ -457,9 +457,69 @@ export interface DriveOptions extends DriveEvents {
    * forever on the first hold.
    */
   controls?: RunControls;
-  /** The timer `pace` uses. Defaults to `setTimeout`. Injectable so a suite can
-   *  assert the waits without sleeping through them. */
+  /** The timer `pace` uses, and the clock a duration is measured against.
+   *  Defaults to `setTimeout` and `Date.now`. Injectable so a suite can assert
+   *  the waits without sleeping through them — and, with `timing`, so a run can
+   *  produce a byte-exact transcript; see `renderDuration`. */
   clock?: Clock;
+  /**
+   * Whether a call's elapsed time reaches the model, and when.
+   *
+   * The problem this answers: asked "compare how long it takes to fetch X and
+   * Y", an agent driving this library had nothing to go on. `AuditEvent.ms` is
+   * recorded on every call and goes to the HOST's logger; no byte of a rendered
+   * turn ever carried a duration, so a model asked about speed was guessing.
+   *
+   *   `"off"`     — no duration ever. **The default here**, and the reason is
+   *                 the same one `onBeforeCommit` is off by default in `drive`
+   *                 and on by default in `mountWidget`: this is a library
+   *                 primitive driven by a widget, a backend job, a test and a
+   *                 CLI, and a caller that opted into nothing must get the
+   *                 transcript it got before this field existed, byte for byte.
+   *                 Anything else would move every existing eval's cached
+   *                 prompts on upgrade.
+   *   `"slow"`    — a line only on calls at or above `SLOW_MS`. What
+   *                 `mountWidget` turns on. The whole token argument is here:
+   *                 a snappy app pays nothing, and the bytes are spent only
+   *                 where elapsed time is a fact about the app rather than
+   *                 noise. `pruneScreens` cut a ten-step run from 5,775 to
+   *                 1,397 characters and this must not quietly give that back.
+   *   `"always"`  — a line on every call, down to tenths of a second. For the
+   *                 run that was actually asked to compare two fast verbs,
+   *                 where "both were under a second" is not the answer
+   *                 somebody wanted. Costs about five tokens per call forever,
+   *                 which is why it is not the default.
+   *
+   * What is measured is the app's own work: the clock runs across
+   * `driver.call()` and nothing else. The pace wait, a `controls` hold and this
+   * loop's own `onBeforeCommit` dialog are all outside it by construction
+   * rather than by subtraction. For a gate that lives INSIDE `driver.call()` —
+   * which is what `mountWidget` installs, through `DriverApproval.adopt` — see
+   * `waited`.
+   */
+  timing?: "off" | "slow" | "always";
+  /**
+   * Total milliseconds this host has spent waiting on a PERSON, ever.
+   *
+   * Read before and after `driver.call()`, and the difference is subtracted
+   * from what the model is told. Monotonic and cumulative on purpose: a
+   * counter that the loop diffs cannot be got wrong by a dialog that opens
+   * twice, and the loop never has to be told when a question was asked.
+   *
+   * It exists because of one lie. A host may gate commits inside
+   * `driver.call()` rather than through `onBeforeCommit` — `mountWidget` does,
+   * via `DriverApproval.adopt`, so that a commit arriving over the relay gets
+   * the same dialog — and then the wall-clock time of the call includes
+   * somebody reading a confirmation. Reporting "this call took 40 seconds"
+   * when 38 of them were a person deciding is a false claim about the app's
+   * speed, and a model that believes it will route around a verb that is not
+   * slow.
+   *
+   * Absent means nothing is subtracted, which is correct for every host whose
+   * gate is `onBeforeCommit`: that one is already outside the measurement.
+   * Ignored entirely when `timing` is `"off"`.
+   */
+  waited?: () => number;
   /**
    * Opt-in gate in front of every `commit` verb.
    *

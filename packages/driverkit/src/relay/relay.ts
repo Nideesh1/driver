@@ -84,12 +84,51 @@ import type {
 export interface RelayOptions {
   /**
    * How long a `POST /dk/tabs/:tab/call` waits for the matching `result`.
+   * **Defaults to 60 seconds.**
    *
    * PROTOCOL.md has no queue on purpose: a call either reaches a connected tab
    * or fails cleanly. The timeout is the other half of that promise. Without
    * it a tab whose JavaScript died -- stream still open, event loop wedged --
    * holds the agent's request forever, which is the one failure mode worse
    * than a refusal, because an agent cannot retry what has not returned.
+   *
+   * **WHY THE DEFAULT MOVED FROM 15s TO 60s.** The old number was tuned for a
+   * button click, where the p99 is tens of milliseconds and 15s is a margin of
+   * three hundred times. It is not a margin at all for the verb an adopter
+   * actually reaches for this library to drive: a report fetch, an export, a
+   * cross-system lookup. A legitimate 20-second fetch came back `timeout`, and
+   * `timeout` does not mean "slow" — PROTOCOL.md defines it as **outcome
+   * unknown**, so a commit that came back that way may already have run and
+   * the agent is told not to retry it. The deadline was therefore converting
+   * SUCCESSES into the most expensive answer in the system. The two errors are
+   * not symmetric: firing late costs an agent some latency, and firing early
+   * costs a task it cannot safely resume.
+   *
+   * **WHY NOT MUCH LONGER.** A long deadline is also wrong, for three reasons
+   * that are all about what else is holding a socket.
+   *
+   *   - The deadline is the only thing that answers an agent at all when a tab
+   *     is alive but wedged -- an infinite loop in a verb body, a modal nobody
+   *     will dismiss. `tab-went-away` covers a tab that DIED; nothing else
+   *     covers one that is merely stuck. At five minutes the agent and the
+   *     person both sit there with no answer and no way to tell slow from
+   *     wedged.
+   *   - Something in the middle will give up first. Nginx, ALBs, Cloud Run and
+   *     the average corporate proxy cut an idle response at 30 to 60 seconds,
+   *     so a server-side deadline above that is answered by a socket error at
+   *     the client -- an unknown outcome with no slug, no hint and no `Result`
+   *     shape, which is strictly worse than the `timeout` it was meant to
+   *     avoid.
+   *   - Each pending call holds a timer, a response and a closure.
+   *
+   * **WHAT AN ADOPTER SHOULD SET.** The p99.9 of your slowest declared verb,
+   * plus a second, and if the app gates commits in the page then plus however
+   * long a person takes to read a dialog -- that wait is inside the call. If a
+   * verb can legitimately exceed about a minute, raising this is the wrong
+   * repair: declare a `read` verb that starts the work and returns a handle,
+   * and another that reports whether it is done. An agent parked on one tool
+   * call for five minutes cannot be paced, cannot be stopped, cannot be shown
+   * to the person as progress, and will be cut off by something anyway.
    */
   timeoutMs?: number;
   /** The keep-alive comment interval. PROTOCOL.md says 20s. */
@@ -335,7 +374,7 @@ interface Tab {
 }
 
 export function createRelay(options: RelayOptions = {}): Relay {
-  const timeoutMs = options.timeoutMs ?? 15_000;
+  const timeoutMs = options.timeoutMs ?? 60_000;
   const pingMs = options.pingMs ?? 20_000;
   const allowRemote = options.allowRemote ?? false;
   const auth = options.auth;

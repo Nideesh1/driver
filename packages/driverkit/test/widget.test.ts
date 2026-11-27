@@ -12,7 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { mount } from "../src/core/registry.ts";
-import type { Driver, Scalar, Snapshot, VerbContext } from "../src/core/types.ts";
+import type { AuditEvent, Driver, Scalar, Snapshot, VerbContext } from "../src/core/types.ts";
 import type { Think, ThinkInput } from "../src/agent/types.ts";
 import { runControls } from "../src/agent/control.ts";
 import type { RunControlsOptions } from "../src/agent/control.ts";
@@ -26,7 +26,9 @@ import { FakeClock, FakeDocument, FakeNode, FakeStorage, FakeWindow, GAP, hide, 
  *  twenty-row window, and a `describe` verb that reports what it selected. The
  *  count is what the confirmation row exists to show, so a fixture that did
  *  not produce one would not test the thing. */
-function contacts(): { driver: Driver; accepted: () => number } {
+function contacts(
+  options: Partial<Parameters<typeof mount>[0]> = {},
+): { driver: Driver; accepted: () => number } {
   const all = Array.from({ length: 3412 }, (_, i) => ({ id: `c-${i}`, company: "Acme" }));
   let rev = 1;
   let selected: string[] = [];
@@ -40,6 +42,10 @@ function contacts(): { driver: Driver; accepted: () => number } {
   });
 
   const driver = mount({
+    // Spread LAST, so a test can add `onAudit` or `approve` -- the two this
+    // fixture exists to exercise now that the panel's dialog is the core's
+    // approver rather than a gate alongside it.
+    ...options,
     app: "Contacts",
     visible,
     verbs: [
@@ -107,6 +113,347 @@ function setup(script: unknown[] = [{ text: "ok" }]) {
   });
   const host = doc.host();
   return { doc, app, s, widget, host, log: () => host.one("dk-log") };
+}
+
+/**
+ * The app this whole file's half of the audit trail is about: `mountWidget`
+ * and `onAudit`, and nothing else wired up at all.
+ *
+ * No `approve`, because that is the shape of the defect — an app that mounted
+ * the panel, declared no core gate, and got
+ * `approval: "not-asked", policy: "none"` out of `onAudit` for a commit a
+ * person had clicked Approve on.
+ */
+function audited(script: unknown[] = [{ text: "ok" }], options: Partial<WidgetOptions> = {}) {
+  const doc = new FakeDocument();
+  const events: AuditEvent[] = [];
+  const app = contacts({ onAudit: (e) => void events.push(e) });
+  const s = scripted(script);
+  const widget = mountWidget(app.driver, {
+    think: s.think,
+    document: doc,
+    clock: instant,
+    open: true,
+    ...options,
+  });
+  return {
+    doc,
+    app,
+    s,
+    widget,
+    host: doc.host(),
+    events,
+    /** The record for the last call of a named verb, which is the one every
+     *  test below is about: a run emits one per call and the commit is not the
+     *  last of them when the model narrates afterwards. */
+     recordFor: (verb: string) => [...events].reverse().find((e) => e.verb === verb),
+  };
+}
+
+/** The script every gated-commit test below replays: count a selection, then
+ *  commit it. The count is what makes the question answerable. */
+const ACCEPT_SCRIPT = [
+  { calls: [{ id: "a", name: "select-where", args: { where: "company=Acme", limit: 1000 } }] },
+  { calls: [{ id: "b", name: "accept-selected", args: {} }] },
+  { text: "Done." },
+];
+
+// -------------------------------------------------------------------------
+// The record of what the person clicked.
+//
+// The panel's dialog used to gate OUTSIDE `driver.call()` -- hold the lock,
+// ask, then call the verb -- so the core never saw the question and wrote
+// `not-asked` for a commit somebody had just approved. The dialog is now
+// installed as the core's approver (`DriverApproval.adopt`), which is why the
+// answer can be written down by the thing that asked it.
+// -------------------------------------------------------------------------
+
+test("a person clicks Approve in the panel and the audit record says so", async () => {
+  // THE TEST THIS CHANGE EXISTS FOR. An app that wires up nothing but
+  // `mountWidget` and `onAudit` is the case the whole library is about -- a
+  // person sitting in front of a bulk commit -- and it was the one case whose
+  // record said nobody was asked. A record that reads as complete and says the
+  // opposite of what happened is the same class of lie as a `rev` that does
+  // not move.
+  const a = audited(ACCEPT_SCRIPT);
+  await ask(a.host, "accept the top thousand Acme contacts");
+  // Still the panel's own dialog, with the count the describe reported: the
+  // question moved into the core and the wording did not.
+  assert.equal(a.host.one("dk-ask-q").textContent, "accept the current selection — 1,000 rows?");
+  await allow(a.host);
+
+  const commit = a.recordFor("accept-selected")!;
+  assert.equal(a.app.accepted(), 1000);
+  assert.equal(commit.approval, "allowed", "a person was asked and said yes");
+  assert.equal(commit.policy, "adopted", "by the dialog this panel installed");
+  // The count is in the record beside the answer, which is the pair the whole
+  // thing exists for: "did a person approve the 1,000 rows that moved".
+  assert.equal(commit.count, 1000);
+  a.widget.unmount();
+});
+
+test("a person clicks Deny and the record says declined, not not-asked", async () => {
+  // The twin, and the distinction `AuditEvent.approval` is four values for:
+  // `declined` is a person refusing and `not-asked` is a gate that was not
+  // there. Both end with no data moving, so the outcome alone cannot tell them
+  // apart -- and before this they were the same word for this app.
+  const a = audited(ACCEPT_SCRIPT);
+  await ask(a.host, "accept them");
+  a.host.one("dk-no").dispatch("click");
+  await settle();
+
+  const commit = a.recordFor("accept-selected")!;
+  assert.equal(a.app.accepted(), 0);
+  assert.equal(commit.approval, "declined");
+  assert.notEqual(commit.approval, "not-asked");
+  assert.equal(commit.refused, "declined-by-user");
+  assert.equal(commit.policy, "adopted");
+  a.widget.unmount();
+});
+
+test("a commit the panel let through unasked records not-asked and never allowed", async () => {
+  // The fabricated yes, which would be a worse bug than the one being fixed.
+  // With confirmations switched off nobody is asked, so `allowed` -- which
+  // claims a person said yes -- must not appear. `policy: "adopted"` is what
+  // keeps this from reading like an app with no gate at all: there was a gate,
+  // and it decided this commit did not need a question.
+  const a = audited(ACCEPT_SCRIPT, { confirmCommits: false });
+  await ask(a.host, "accept them");
+  await settle();
+
+  const commit = a.recordFor("accept-selected")!;
+  assert.equal(a.app.accepted(), 1000, "it ran, as it always did");
+  assert.equal(a.host.find("dk-ask-q").length, 0, "and nobody was asked");
+  assert.equal(commit.approval, "not-asked");
+  assert.equal(commit.policy, "adopted");
+  a.widget.unmount();
+});
+
+test("unmounting the panel hands the gate back, and the records after it say so", async () => {
+  // A gate that lives in a panel is gone when the panel is, and `policy` has
+  // to be able to say that -- it is the whole reason `adopted` is a different
+  // word from `hook`. Pinned because the alternative is worse than the bug:
+  // a driver left pointing at a dead dialog waits forever on every later
+  // commit, since `approvalTimeout` is absent by default.
+  const a = audited();
+  assert.equal(a.app.driver.approval?.policy, "adopted");
+  a.widget.unmount();
+  assert.equal(a.app.driver.approval?.policy, "none");
+
+  await a.app.driver.call("accept-selected");
+  const commit = a.recordFor("accept-selected")!;
+  assert.equal(commit.approval, "not-asked");
+  assert.equal(commit.policy, "none", "no panel, no gate, and the record is honest about it");
+});
+
+test("a question still open when the panel unmounts is answered as timed out, not as declined", async () => {
+  // The dead-app case. A commit that arrived from outside the page has no run
+  // behind it, so there is no abort signal to answer its question -- and a
+  // panel torn down with one open would leave `driver.call()` waiting on a
+  // promise only that panel could resolve. Answered as `{ timedOut: true }`,
+  // because nobody answering is not somebody refusing: `timed-out` says the
+  // verb did not run and no person decided.
+  const a = audited();
+  const pending = a.app.driver.call("accept-selected");
+  await settle();
+  assert.equal(a.host.find("dk-yes").length, 1, "the question is on screen");
+
+  a.widget.unmount();
+  const out = await pending;
+  assert.equal(out.ok, false);
+  assert.equal(out.ok === false && out.refused, "approval-timeout");
+  assert.equal(a.app.accepted(), 0);
+  const commit = a.recordFor("accept-selected")!;
+  assert.equal(commit.approval, "timed-out");
+  assert.notEqual(commit.approval, "declined");
+});
+
+test("a commit from outside the page is asked about in the panel, and recorded", async () => {
+  // What adoption buys beyond the record: the dialog now covers the path it
+  // never could. `driver.call()` here stands for a relay frame or an MCP tool
+  // call -- a commit with no in-page run behind it, which used to reach the
+  // verb with nothing in front of it on an app that declared no `approve`.
+  const a = audited();
+  // Selected from outside too: a commit verb takes no predicate and acts on
+  // the current selection, so there has to be one.
+  await a.app.driver.call("select-where", { where: "company=Acme", limit: 1000 });
+  const pending = a.app.driver.call("accept-selected");
+  await settle();
+  // The panel opens itself: a question nobody can see is not a question.
+  assert.match(a.host.one("dk-ask-q").textContent!, /accept the current selection/);
+  await allow(a.host);
+
+  assert.equal((await pending).ok, true);
+  const commit = a.recordFor("accept-selected")!;
+  assert.equal(commit.approval, "allowed");
+  assert.equal(commit.policy, "adopted");
+  a.widget.unmount();
+});
+
+test("an app that declared its own approve keeps it, and gets one dialog and not two", async () => {
+  // Silently replacing an app's approver would be worse than the bug: the
+  // app's own gate would stop running with nothing anywhere saying so. So the
+  // declaration wins, the panel installs nothing, and `policy` still reads
+  // `hook` -- which is also what keeps `connect()` reading the app's own
+  // sentence rather than a panel's presence.
+  const doc = new FakeDocument();
+  const events: AuditEvent[] = [];
+  let asked = 0;
+  const app = contacts({
+    onAudit: (e) => void events.push(e),
+    approve: () => {
+      asked++;
+      return true;
+    },
+  });
+  const s = scripted(ACCEPT_SCRIPT);
+  const widget = mountWidget(app.driver, {
+    think: s.think,
+    document: doc,
+    clock: instant,
+    open: true,
+  });
+  const host = doc.host();
+  await ask(host, "accept them");
+  await settle();
+
+  assert.equal(app.driver.approval?.policy, "hook", "the app's declaration stands");
+  assert.equal(asked, 1, "its hook was asked");
+  assert.equal(host.find("dk-ask-q").length, 0, "and the panel put up no second question");
+  const commit = [...events].reverse().find((e) => e.verb === "accept-selected")!;
+  assert.equal(commit.approval, "allowed");
+  assert.equal(commit.policy, "hook");
+  widget.unmount();
+});
+
+test("`approve: \"unattended\"` is not quietly made interactive by mounting a panel", async () => {
+  // `unattended` is the app saying out loud that commits here run with nobody
+  // in front of them. A panel that installed a dialog over that would make an
+  // unattended driver interactive -- the configuration somebody deliberately
+  // chose against -- so the adoption is refused and the panel keeps the in-page
+  // gate it has always had.
+  //
+  // The cost is real and is therefore said out loud rather than papered over:
+  // the panel's question is not in the record for this app, because the core
+  // was never asked. A truthful warning beats a fabricated `allowed`.
+  const doc = new FakeDocument();
+  const events: AuditEvent[] = [];
+  const app = contacts({ onAudit: (e) => void events.push(e), approve: "unattended" });
+  const s = scripted(ACCEPT_SCRIPT);
+  const said: string[] = [];
+  const real = console.warn;
+  console.warn = (...args: unknown[]) => void said.push(args.map(String).join(" "));
+  let widget;
+  try {
+    widget = mountWidget(app.driver, {
+      think: s.think,
+      document: doc,
+      clock: instant,
+      open: true,
+    });
+  } finally {
+    console.warn = real;
+  }
+  const host = doc.host();
+
+  assert.equal(app.driver.approval?.policy, "unattended", "the declaration is untouched");
+  assert.match(said.join("\n"), /NOT in the audit record/);
+  assert.match(said.join("\n"), /approve: \(req\) => panel\.approve\(req\)/);
+
+  // And the in-page dialog still asks, which is right: somebody is plainly
+  // sitting there.
+  await ask(host, "accept them");
+  assert.match(host.one("dk-ask-q").textContent!, /1,000 rows/);
+  await allow(host);
+  assert.equal(app.accepted(), 1000);
+  const commit = [...events].reverse().find((e) => e.verb === "accept-selected")!;
+  assert.equal(commit.approval, "not-asked", "which is what the warning is about");
+  assert.equal(commit.policy, "unattended");
+  widget.unmount();
+});
+
+test("a host's own onBeforeCommit still replaces the dialog, even when it says yes", async () => {
+  // The stacking hazard, from the other side. The panel installs its dialog as
+  // the core's approver by default -- so a host that supplied `onBeforeCommit`
+  // and got a yes from it would have had the panel's own question asked
+  // immediately afterwards, inside `driver.call()`. Two questions about one
+  // commit, which is what `onBeforeCommit` is documented NOT to do. So the
+  // panel does not adopt when the host supplied one.
+  //
+  // What that costs is in the record and is said in `onBeforeCommit`'s own
+  // docs: the host's gate is outside the core, so the core was never asked and
+  // `not-asked` is the honest answer. A host that wants its dialog in the
+  // record passes it as `approve`.
+  const doc = new FakeDocument();
+  const events: AuditEvent[] = [];
+  const app = contacts({ onAudit: (e) => void events.push(e) });
+  const asked: string[] = [];
+  const s = scripted(ACCEPT_SCRIPT);
+  const widget = mountWidget(app.driver, {
+    document: doc,
+    clock: instant,
+    open: true,
+    think: s.think,
+    onBeforeCommit: ({ name }) => {
+      asked.push(name);
+      return true;
+    },
+  });
+  const host = doc.host();
+  await ask(host, "accept them");
+  await settle();
+
+  assert.deepEqual(asked, ["accept-selected"], "the host's gate was asked");
+  assert.equal(host.find("dk-ask").length, 0, "and the panel asked nothing on top of it");
+  assert.equal(app.accepted(), 1000);
+  assert.equal(app.driver.approval?.policy, "none", "the panel did not take the gate");
+  const commit = [...events].reverse().find((e) => e.verb === "accept-selected")!;
+  assert.equal(commit.approval, "not-asked");
+  assert.equal(commit.policy, "none", "which is the honest answer for a gate outside the core");
+  widget.unmount();
+});
+
+test("two panels on one driver share one gate, and the second says which", async () => {
+  // Two gates for one commit is two dialogs, which is how people learn to
+  // click Yes without reading. The first panel keeps it; the second installs
+  // nothing and asks nothing, so its own runs are confirmed in the first
+  // panel's transcript. Warned about, because that symptom is otherwise
+  // unreadable.
+  const first = audited();
+  const second = doc2(first.app.driver);
+  assert.equal(first.app.driver.approval?.policy, "adopted");
+  assert.match(second.said.join("\n"), /second approval dialog tried to adopt `Contacts`/);
+
+  await first.app.driver.call("select-where", { where: "company=Acme", limit: 1000 });
+  const pending = first.app.driver.call("accept-selected");
+  await settle();
+  assert.equal(first.host.find("dk-yes").length, 1, "the first panel asks");
+  assert.equal(second.host.find("dk-yes").length, 0, "the second does not");
+  await allow(first.host);
+  assert.equal((await pending).ok, true);
+
+  first.widget.unmount();
+  second.widget.unmount();
+});
+
+/** A second panel on an existing driver, for the two-panel decision above. */
+function doc2(driver: Driver) {
+  const doc = new FakeDocument();
+  const s = scripted([{ text: "ok" }]);
+  const real = console.warn;
+  const said: string[] = [];
+  console.warn = (...args: unknown[]) => void said.push(args.map(String).join(" "));
+  try {
+    const widget = mountWidget(driver, {
+      think: s.think,
+      document: doc,
+      clock: instant,
+      open: true,
+    });
+    return { widget, host: doc.host(), said };
+  } finally {
+    console.warn = real;
+  }
 }
 
 test("mounting puts one host element in the container and nothing else", () => {

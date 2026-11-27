@@ -975,8 +975,28 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
  * core already defines for this exact decision; this reuses it rather than
  * inventing a second one.
  */
+/**
+ * What the APP said at `mount()`, which is the only thing either check below
+ * accepts as a declaration.
+ *
+ * Not `policy`, which is who is asked right now and can be `adopted` — a
+ * dialog installed in the page after mount, by `mountWidget` in the ordinary
+ * case. That is a real gate while the panel is mounted and it is not a
+ * sentence anybody wrote in the app: it is gone when the panel unmounts, and
+ * it would make publishing a driver to the outside depend on whether a chat
+ * panel happened to be mounted first. The whole argument for these checks is
+ * three deliberate acts, so they read the declaration and nothing else.
+ *
+ * `declared` is absent on a hand-written `approval` from before it existed, and
+ * then `policy` IS the declaration — that driver has no `adopt` and nothing can
+ * have moved it. See `Driver.approval`.
+ */
+function declaredPolicy(driver: Driver): "none" | "hook" | "unattended" | "adopted" {
+  return driver.approval?.declared ?? driver.approval?.policy ?? "none";
+}
+
 function requireDeclaredKinds(driver: Driver): void {
-  if (driver.approval?.policy === "unattended") return;
+  if (declaredPolicy(driver) === "unattended") return;
   const manifest = driver.manifest();
   const silent = manifest.verbs.filter((v) => v.kind === undefined).map((v) => v.name);
   if (silent.length === 0) return;
@@ -1022,9 +1042,22 @@ function requireDeclaredKinds(driver: Driver): void {
  * declares `reversible` connects exactly as it did before. So does an app with
  * no commit verbs at all, and so does a hand-written driver that declares
  * `approval` itself.
+ *
+ * AND WHY A PANEL CANNOT SATISFY IT. `mountWidget` installs its dialog as the
+ * core's approver (`DriverApproval.adopt`), which makes the driver's live
+ * `policy` read `adopted` — a real gate, asked on this stream's calls too. It
+ * still does not satisfy this check, and that is deliberate twice over. It is
+ * not a declaration: it exists only while that panel is mounted, so a
+ * `connect()` that accepted it would publish commits that become ungated when
+ * somebody closes the assistant. And it would be ORDER-DEPENDENT — the same
+ * app starting or throwing according to whether `connect()` ran before or
+ * after `mountWidget` — which is the worst property a startup check can have.
+ * So an app that mounts the panel and connects to a relay declares the gate
+ * itself, and the documented wiring makes the panel that gate:
+ * `approve: (req) => panel.approve(req)`.
  */
 function requireApprovalPolicy(driver: Driver): void {
-  if ((driver.approval?.policy ?? "none") !== "none") return;
+  if (declaredPolicy(driver) !== "none") return;
   const exposed = driver
     .manifest()
     .verbs.filter((v) => v.kind === "commit" && v.reversible !== true)

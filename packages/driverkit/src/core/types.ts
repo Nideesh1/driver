@@ -1234,13 +1234,30 @@ export interface ApprovalRequest {
  *   `{ timedOut: true }`  nobody answered. Distinct from `false`, which is a
  *                         person deciding; see `approval-timeout` in
  *                         `RESERVED_REFUSALS`.
+ *   `{ asked: false }`    allow, and say that nobody was asked. See below.
  *
  * Anything else — an object that is none of these — is treated as a DENIAL and
  * never as consent. A hook that returns a shape the core does not recognise
  * has not approved anything, and reading an unknown answer as yes is how a
  * refactor that changes a return type silently removes the gate.
+ *
+ * WHY THERE IS A FOURTH ANSWER, AND IT IS THE RECORD'S FAULT. A real gate does
+ * not ask about every commit: the widget's dialog lets a `reversible` commit
+ * under its size threshold through without a question, and lets every commit
+ * through when the person has switched confirmations off. Such a hook used to
+ * have to answer `true`, which is right about the call and a lie in the
+ * record — the core writes `approval: "allowed"`, and that claims somebody
+ * said yes. `{ asked: false }` allows the call and records `not-asked`, which
+ * is what actually happened. A gate that asks every time never needs it, and
+ * `true` still means "asked, and the answer was yes" for every hook written
+ * before this existed.
  */
-export type Approval = boolean | string | void | { timedOut: true; hint?: string };
+export type Approval =
+  | boolean
+  | string
+  | void
+  | { timedOut: true; hint?: string }
+  | { asked: false };
 
 /** The hook itself. Async because a human is on the other end of it; a
  *  synchronous gate can only ever consult a policy, never a person. */
@@ -1262,16 +1279,99 @@ export type ApprovalPolicy = ApprovalHook | "unattended";
 /**
  * The approval state a mounted driver publishes.
  *
- * Two things live here and they are for two different readers. `policy` is for
- * whoever is about to publish this driver to the outside — `connect()` reads it
- * and refuses to publish a driver whose irreversible commits nobody has said
- * who approves. `hold` is for an approval UI that is NOT the core's hook: the
- * widget's in-page dialog, or a host's own modal, either of which needs the
- * core to stop taking calls while the question is open.
+ * Three things live here and they are for three different readers. `declared`
+ * is for whoever is about to publish this driver to the outside — `connect()`
+ * reads it and refuses to publish a driver whose irreversible commits nobody
+ * has said who approves. `policy` is for a reader of the RECORD: who is
+ * actually asked right now, which is not always what the app declared. `hold`
+ * is for an approval UI that is not an approver at all: a host's own modal that
+ * gates outside `call()` and needs the core to stop taking calls while its
+ * question is open.
  */
 export interface DriverApproval {
-  /** Which of the three the app declared at `mount()`. */
-  readonly policy: "none" | "hook" | "unattended";
+  /**
+   * Who is asked about a commit on this driver RIGHT NOW.
+   *
+   * Four values, and the fourth is the one worth reading about. Three of them
+   * are what the app wrote at `mount()` and are also `declared`: `none`,
+   * `hook`, `unattended`. The fourth, `adopted`, means an approver was
+   * installed after `mount()` by something in the page — see `adopt` — and it
+   * is a weaker claim than `hook` on purpose:
+   *
+   *   `hook` is a line in the app's own source. It is there before the first
+   *   call and it is there for every path, so `connect()` accepts it as the
+   *   declaration it requires.
+   *
+   *   `adopted` is a gate that exists only while whatever installed it is
+   *   still mounted. A panel that is unmounted takes its dialog with it and
+   *   this goes back to `declared`. That is a real gate while it lasts, and
+   *   it is not a statement the app made, so it does not satisfy `connect()`.
+   *
+   * Folding the two into one word was the alternative and it is the one thing
+   * this field must not do: an auditor reading `hook` on every record would
+   * have no way to tell the app's own gate from one that happened to be on the
+   * page that afternoon, and a field that cannot be wrong is a field that
+   * cannot be checked.
+   *
+   * It is a live read, not a constant: the same driver answers `none` before
+   * a panel mounts and `adopted` after, because that is the truth about which
+   * commits had a person in front of them.
+   */
+  readonly policy: "none" | "hook" | "unattended" | "adopted";
+  /**
+   * Which of the three the app itself declared at `mount()`, for all time.
+   *
+   * Never moves, and that is what it is for. `policy` answers "is there a gate
+   * on this driver now"; this answers "did the app say who approves", which is
+   * the question `connect()` asks before publishing a driver to an outside
+   * agent. The two were one field until the widget could install a gate of its
+   * own, and merging them would have made mounting a panel quietly satisfy the
+   * check that exists to make somebody write a sentence.
+   *
+   * Optional, so a hand-written `approval` from before this existed still
+   * satisfies the interface; a reader falls back to `policy`, which is what it
+   * meant then. See `Driver.approval`.
+   */
+  readonly declared?: "none" | "hook" | "unattended";
+  /**
+   * Install an approver now, for a dialog that lives in the page.
+   *
+   * WHAT IT IS FOR. The widget's confirmation is the one working approval UI
+   * in this repository and it used to gate OUTSIDE `call()` — `hold` the lock,
+   * ask the person, then call the verb. The core never saw the question, so an
+   * app that mounted the panel and wired `onAudit` and nothing else recorded
+   * `approval: "not-asked", policy: "none"` for a commit a person had just
+   * clicked Approve on. That record reads as complete and says the opposite of
+   * what happened, which is the one thing an audit trail cannot do.
+   *
+   * WHO WINS. The app does, always. This returns `null` and installs nothing
+   * when the app declared `approve` of either kind:
+   *
+   *   a declared `hook` is already asked on every path, so there is nothing to
+   *   fix and nothing to argue about — and replacing it would mean a commit
+   *   got two dialogs, or the app's own gate silently stopped running.
+   *
+   *   `unattended` is the app saying out loud that commits here run with
+   *   nobody in front of them. An approver installed over the top of that
+   *   would make an unattended driver interactive, which is the configuration
+   *   somebody deliberately chose against.
+   *
+   * It also returns `null` when another adopter already holds it. First one
+   * wins, because two gates for one commit is two dialogs, and the second
+   * caller is told out loud rather than left believing it is the gate.
+   *
+   * RELEASING. The return value is a disposer, and calling it is not optional
+   * for anything that can be torn down: an approver whose UI is gone is a
+   * driver where every later commit waits forever on a dialog nobody can see.
+   * After it runs, `policy` is `declared` again and the next adopter can win.
+   * A disposer only ever releases its own hook, so a late one cannot unhook
+   * whoever came after it.
+   *
+   * Optional on the interface, like the rest of `approval`: a hand-written
+   * driver need not offer it, and a caller that finds it absent is on the
+   * driver this mechanism did not exist on.
+   */
+  adopt?: (hook: ApprovalHook) => (() => void) | null;
   /**
    * Run `ask` with the driver's no-other-calls lock held.
    *
@@ -1333,6 +1433,30 @@ export interface AuditEvent {
    *  between a question being asked and a person answering it is the part of a
    *  bulk commit a reader most often wants back. */
   ms: number;
+  /**
+   * How much of `ms` was spent waiting for an approval to be answered.
+   *
+   * Present only when somebody was actually asked — so its absence means no
+   * question was open and `ms` is the app's own work, start to finish.
+   *
+   * **Why both numbers and not one.** `ms` is deliberately approval-inclusive:
+   * "this bulk accept took 41 seconds from the agent's point of view" is the
+   * fact an auditor wants, and a record that silently excluded the human would
+   * make a slow decision look like a fast app. But the two are different
+   * quantities and only one of them is about the software — `ms - waitedMs` is
+   * how long the verb took, and `waitedMs` is how long a person took — and a
+   * record that gave only the sum cannot be used to answer either question.
+   * Subtracting is cheap; recovering a figure that was never written down is
+   * not.
+   *
+   * The same separation reaches the MODEL by a different route and for a
+   * sharper reason: see `DriveOptions.timing`, where the duration a model is
+   * shown is measured so as to EXCLUDE this from the start. An auditor reading
+   * "41 seconds, 38 of them waiting" draws the right conclusion; a model told
+   * "this call took 40 seconds" draws the wrong one about the app's speed and
+   * routes around a verb that is not slow.
+   */
+  waitedMs?: number;
   /** `MountOptions.app`. Two drivers can be mounted on one page — a widget and
    *  an embedded view — and an unattributed record is one you cannot act on. */
   app: string;
@@ -1399,12 +1523,31 @@ export interface AuditEvent {
    * Four values, not three, because "declined" and "never asked" are the two
    * an auditor must never confuse: one is a person refusing and one is a gate
    * that was not there.
+   *
+   * `not-asked` has two shapes and `policy` tells them apart. With a `policy`
+   * of `none` or `unattended` there was no gate: nothing could have asked.
+   * With a `policy` of `hook` or `adopted` there WAS a gate and it let this
+   * commit through without a question — a reversible verb under the panel's
+   * size threshold, or confirmations switched off — which is a gate's decision
+   * and not a person's, so it is not `allowed`. See `Approval`'s
+   * `{ asked: false }`.
    */
   approval: "allowed" | "declined" | "timed-out" | "not-asked";
-  /** What the app declared at `mount()`. It is what turns a `not-asked` from a
-   *  silence into a sentence: `unattended` is an app saying out loud that
-   *  commits here run with nobody in front of them, and `none` is an app that
-   *  never said. */
+  /**
+   * Who was in a position to be asked, at the moment of this call.
+   *
+   * It is what turns a `not-asked` from a silence into a sentence:
+   * `unattended` is an app saying out loud that commits here run with nobody
+   * in front of them, `none` is an app that never said, and `hook` or
+   * `adopted` beside a `not-asked` is a gate that was there and decided this
+   * particular commit did not need a question.
+   *
+   * Read per call rather than once at `mount()`, because a page can acquire a
+   * gate after it starts: `adopted` is a panel's dialog installed by
+   * `DriverApproval.adopt`, and the same driver's earlier records honestly say
+   * `none`. See `DriverApproval.policy` for why that is a different word from
+   * `hook` and not a synonym for it.
+   */
   policy: DriverApproval["policy"];
 }
 
@@ -1560,6 +1703,176 @@ export interface Budget {
   calls?: number;
   /** Most `commit` verbs this driver will ever run. Omitted means no bound. */
   commits?: number;
+  /**
+   * Where the counters are kept, so a page reload does not refill them.
+   *
+   * **WHY THIS IS NOT OPTIONAL POLISH.** Navigation is one of the agent's own
+   * verbs. `goto`, `go`, `open-contact` are `read` verbs an agent calls freely,
+   * and a `goto` to a full page load tears the driver down and mounts a fresh
+   * one — with `callsUsed` back at zero. So without this field an agent that
+   * reaches a ceiling can refresh its way past it, and the `budget-spent` hint
+   * says in so many words "it does not refill, and waiting or retrying will not
+   * change it", which was then false. A ceiling that resets is not a ceiling,
+   * and a hint that lies about it is worse than no hint.
+   *
+   * Absent means in-memory counters and the behaviour this had before the field
+   * existed: the ceiling bounds one mounted driver and a reload starts over.
+   * That is still the right default for an app with no storage to reach for.
+   *
+   * **FAIL CLOSED, UNLIKE EVERY OTHER PIECE OF PERSISTENCE IN HERE.** The
+   * widget's panel position and its transcript swallow every storage failure,
+   * because the worst case is a forgotten pane and a lost conversation. Here
+   * the worst case is an uncapped agent, so the asymmetry is reversed on
+   * purpose: when `load()` answers `{ ok: false }`, or a `save()` throws, every
+   * subsequent call is refused `budget-spent` with a hint that names the cause.
+   * An app whose storage is unavailable is still fully usable by the person at
+   * the keyboard — it is only the agent that stops. See `BudgetStore`.
+   *
+   * **THIS IS A COST CONTROL AND NOT A SECURITY BOUNDARY, and the type should
+   * say so rather than imply a guarantee the browser cannot give.** Whatever
+   * holds the record is readable and writable by the person sitting there, in
+   * two keystrokes of devtools, and clearing site data resets it. That is fine:
+   * they own the machine and they are the one paying. What this stops is an
+   * agent in a loop, which is the thing it was built for. A ceiling that has to
+   * hold against the person is a ceiling that belongs on the server, behind the
+   * API the verbs call.
+   */
+  store?: BudgetStore;
+  /**
+   * The name of the current allowance. Changing it starts a fresh one.
+   *
+   * A persisted ceiling cannot reset on nothing, because a budget that is
+   * permanently spent makes the app permanently undrivable — which nobody will
+   * read as a working cost control, they will read it as this library being
+   * broken, and the next thing they do is clear site data, which resets it
+   * anyway and teaches them to do that every time.
+   *
+   * So this is the deliberate, host-held reset: a string the app chooses. A
+   * record written under a different `epoch` is discarded and the allowance
+   * starts again. A deploy can bump it, a billing period can be its name, a
+   * support tool can write a new one into the page it serves.
+   *
+   * **The agent cannot reach it.** It is an argument to `mount()`, so it lives
+   * in the page's own source, which an agent driving through verbs has no verb
+   * for. That is the test every reset mechanism here has to pass, and it is why
+   * there is no reset VERB and never should be.
+   */
+  epoch?: string;
+  /**
+   * How long one allowance lasts, in milliseconds. Omitted means forever.
+   *
+   * `{ calls: 200, window: 86_400_000 }` is two hundred calls a day: the record
+   * carries when its allowance started, and a record older than this is
+   * discarded for a fresh one.
+   *
+   * **This is not the rolling window this type rejects further up, and the
+   * difference is worth being exact about.** What was rejected was a RATE
+   * limit — calls per minute as the bound — on the grounds that it "converts an
+   * unbounded spend into a slower unbounded spend": the runaway still runs
+   * forever, politely. This is a hard ceiling with a renewal period, which is a
+   * quota. A runaway still stops dead at `calls` and stays stopped for the rest
+   * of the window; what the window buys is that tomorrow the app works again
+   * without anybody deploying anything. Tumbling and not sliding, because a
+   * sliding window needs the timestamp of every call and this needs one number.
+   *
+   * Also agent-unreachable: it is declared at `mount()`, and the only thing
+   * that advances it is the wall clock. An agent that could set the page's
+   * clock forward has bigger powers than this field.
+   *
+   * A DESIGN NOTE, NOT BUILT, so the argument is not lost: the settings view
+   * could let the VIEWER lower this app's ceiling but never raise it. A person
+   * tightening their own leash is always safe, and the app's declared number
+   * stays the hard stop, so there is no bypass in it. It is not here because a
+   * viewer-held floor is a second persisted number with its own scope question,
+   * and the ceiling that actually had to stop resetting is this one.
+   */
+  window?: number;
+}
+
+/**
+ * Where a `Budget`'s counters live between page loads.
+ *
+ * An interface and not a `localStorage` call, for the reason every other
+ * environment touch in the core is one: `mount()` runs in a browser, in a test
+ * with a fake DOM, in `jsdom`, and in whatever somebody embeds this in next.
+ * The core decides what the numbers MEAN — what counts, when an allowance has
+ * expired, what a broken store does to the next call — and the store only
+ * carries bytes. `localBudgetStore` in `driverkit/browser` is the one this
+ * library ships; it is twenty lines over the same `loadJson`/`saveJson` the
+ * widget's position and settings go through.
+ *
+ * **Scoped PER APP PER ORIGIN, which is what `localBudgetStore` does, and the
+ * scope is a design decision rather than an implementation detail.** The
+ * widget's transcript is scoped per TAB — it goes in `sessionStorage` — and a
+ * budget deliberately is not, for one reason: if the ceiling were per tab then
+ * "open a second tab" would be a budget-doubling move, which is the reload
+ * bypass this whole mechanism exists to close, wearing a different hat. Two
+ * tabs of one app therefore share one allowance, and yes, that means one tab
+ * can exhaust the other's. That is the correct failure and the honest one: it
+ * is ONE ceiling, spent by one person's agents, exactly as it would behave if
+ * it were counted on the server — and the alternative fails in the direction
+ * that costs money.
+ */
+export interface BudgetStore {
+  /**
+   * The record this store holds, or the news that it cannot be consulted.
+   *
+   * Three answers and not two, because the third is the whole of fail-closed:
+   * "nothing stored yet" and "I could not look" are indistinguishable in a
+   * plain `getItem` and must never be treated alike. A private window, blocked
+   * site data and a corrupt record all answer `{ ok: false }`, and a corrupt
+   * record is included on purpose — it cannot be told apart from tampering, and
+   * guessing in the agent's favour is the one guess with a bill attached.
+   *
+   * **Called at `mount()` and again before every charged call**, and the
+   * re-read is what makes "one app, one ceiling" true rather than aspirational.
+   * Two tabs open at once each hold their own copy of the counters, so a
+   * mount-time read alone gave each of them the whole allowance — two tabs, two
+   * ceilings, which is the reload bypass wearing a different hat. It must
+   * therefore be cheap and synchronous; `localBudgetStore` is one `getItem` and
+   * one `JSON.parse` of a four-field object.
+   *
+   * The core takes the HIGHER of what this answers and what it already holds,
+   * so a store that reads back a smaller figure — a tab that was behind, a
+   * record somebody edited — can never hand an allowance back.
+   */
+  load(): { ok: true; spent: BudgetRecord | null } | { ok: false };
+  /**
+   * Write the record back. Called after every charged call.
+   *
+   * **May throw, and a throw is load-bearing here.** Everywhere else in this
+   * library a failed storage write is swallowed, because a forgotten panel
+   * position is not worth an exception. A budget that cannot be written is a
+   * budget that will not be there after the next reload, which is the uncapped
+   * agent again — so the core catches this, refuses every later call
+   * `budget-spent`, and names the reason in the hint. Throwing is how a store
+   * says "this ceiling is no longer being kept".
+   */
+  save(record: BudgetRecord): void;
+}
+
+/**
+ * One allowance, as it is stored.
+ *
+ * Four fields and no more. In particular there is no verb name, no argument, no
+ * count and no screen: a spend record that carried any of those would be a
+ * transcript in `localStorage` under a field nobody reads as one, and the
+ * privacy class of "this app has made 41 calls" is nothing like the privacy
+ * class of what those calls were about.
+ */
+export interface BudgetRecord {
+  /** Calls charged so far, matching `BudgetState.calls.used`. */
+  calls: number;
+  /** Commits run so far, matching `BudgetState.commits.used`. */
+  commits: number;
+  /** `Date.now()` when this allowance began. Only `Budget.window` reads it; an
+   *  app with no window never looks, and the field is still written so that
+   *  adding a window later does not have to treat every existing record as
+   *  having started at the epoch. */
+  since: number;
+  /** The `Budget.epoch` in force when this record was written, absent when the
+   *  app declared none. A mismatch discards the record; see `Budget.epoch`. */
+  epoch?: string;
 }
 
 /**
@@ -1672,10 +1985,24 @@ export interface MountOptions {
    * unsafe case is still reachable — `approve: "unattended"` — but no longer
    * by accident, which is the whole of what this buys.
    *
-   * Absent here makes NO claim and changes nothing: an app mounted yesterday
-   * with no `approve` behaves identically in-page, which is why this is not a
-   * required field and why the default is not a gate. The widget keeps its own
-   * dialog for the in-page path either way.
+   * Absent here makes NO claim and changes nothing about the core: an app
+   * mounted yesterday with no `approve` behaves identically in-page, which is
+   * why this is not a required field and why the default is not a gate.
+   *
+   * WHAT THE WIDGET DOES WITH AN ABSENT ONE. `mountWidget` installs its own
+   * confirmation dialog here, through `DriverApproval.adopt`, so the question
+   * a person answers in the panel is asked inside `call()` and lands in the
+   * audit record as `approval: "allowed"` with `policy: "adopted"`. That is
+   * additive — the dialog, its wording and its thresholds are what they were,
+   * and a commit now gets asked about on paths the panel could not reach — and
+   * it does not make the driver publishable: `connect()` reads
+   * `DriverApproval.declared`, which this field alone writes.
+   *
+   * DECLARING ONE HERE OVERRULES THAT, always. A hook of your own is asked and
+   * the panel installs nothing, so one commit gets one dialog; `"unattended"`
+   * is not quietly made interactive by a panel being mounted. The documented
+   * way to have both is to declare the panel's own dialog as this hook:
+   * `approve: (req) => panel.approve(req)`. See `Widget.approve`.
    */
   approve?: ApprovalPolicy;
   /**
@@ -1805,7 +2132,11 @@ export interface Driver {
    * remain possible — still satisfies this interface. A reader treats an
    * absent one as `policy: "none"`, and `connect()` does. A hand-written
    * driver that has its own gate says so with
-   * `approval: { policy: "unattended", hold: (_, ask) => ask() }`.
+   * `approval: { policy: "unattended", hold: (_, ask) => ask() }`, and such a
+   * driver has no `declared` and no `adopt`: `connect()` reads `declared` and
+   * falls back to `policy`, so that one goes on publishing exactly as it did,
+   * and a panel mounted on it finds no `adopt` and keeps its own in-page
+   * dialog.
    */
   approval?: DriverApproval;
   /**

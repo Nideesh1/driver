@@ -14,7 +14,8 @@ export {
 } from "./registry.ts";
 export type {
   Approval, ApprovalHook, ApprovalPolicy, ApprovalRequest,
-  ArgSpec, AuditEvent, AuditHook, Budget, BudgetState, CallOptions, Driver, DriverApproval,
+  ArgSpec, AuditEvent, AuditHook, Budget, BudgetRecord, BudgetState, BudgetStore,
+  CallOptions, Driver, DriverApproval,
   ElsewhereChannel, ElsewhereNotice, Manifest, MountOptions,
   FlowSpec, FlowStep, NavigateHook, NavigateTarget,
   Refusal, RelayRefusal, Report, Result, Row, Scalar, ScreenControl, ScreenSpec, Snapshot,

@@ -56,10 +56,11 @@
 
 import type { Driver, Manifest, Result, Scalar } from "../core/index.ts";
 import { paceWait, realClock } from "./control.ts";
-import { renderOutcome, renderSnapshot } from "./render.ts";
+import { SLOW_MS, renderDuration, renderOutcome, renderSnapshot } from "./render.ts";
 import { READ_SCREEN, systemPrompt, toolsFor } from "./tools.ts";
 import type {
   CallEvent,
+  Clock,
   CommitDecision,
   DriveOptions,
   DriveOutcome,
@@ -259,7 +260,15 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
   // The static half. Computed here, used unchanged on every turn below. See
   // decision 1 in the file comment, and `the system prompt is byte-identical
   // across turns` in the tests, which asserts it rather than trusting it.
-  const system = systemPrompt(manifest, options.instructions);
+  const timing = options.timing ?? "off";
+  // The note about what a `took:` line means goes in the CACHED half, once,
+  // and the per-call line is then four words. The alternative -- a sentence of
+  // guidance beside every duration, the way `count` carries `COUNT_NOTE` --
+  // would be the one piece of boilerplate in a turn that is O(calls), for a
+  // number that needs explaining once. `systemPrompt` stays a pure function of
+  // its arguments and therefore still byte-identical across every turn of the
+  // run, which is the property the prefix cache is built on.
+  const system = systemPrompt(manifest, options.instructions, timing);
   const tools = toolsFor(manifest);
 
   const verbs = new Map<string, Manifest["verbs"][number]>(
@@ -504,7 +513,7 @@ export async function drive(driver: Driver, options: DriveOptions): Promise<Driv
 
       options.onCall?.({ ...event });
 
-      const outcome = await runOne(driver, call, verb, options, mark);
+      const outcome = await runOne(driver, call, verb, options, mark, timing, clock);
 
       // The two halves, joined with the pruning seam between them. A call that
       // reached no screen at all — an unknown tool name — gets no marker and
@@ -675,6 +684,12 @@ async function runOne(
    *  parked in front of a person's confirmation, which is a wait the run
    *  controls do not own and a panel showing "running" would misdescribe. */
   mark: (state: RunState) => void,
+  /** `DriveOptions.timing`, already defaulted by the caller. */
+  timing: "off" | "slow" | "always",
+  /** The run's clock, so a suite that pins `now` gets a byte-exact transcript
+   *  out of a timed run. See `renderDuration` on why buckets are for
+   *  production and an injected clock is for determinism. */
+  clock: Clock,
 ): Promise<{ result: Result | null; head: string; screen?: string }> {
   if (call.name === READ_SCREEN && verb === undefined) {
     // `verb === undefined` so an app that genuinely declares a verb by this
@@ -817,10 +832,43 @@ async function runOne(
     }
   }
 
+  // The clock brackets `driver.call()` and nothing else. Everything this loop
+  // does before this point -- the pace wait, a `controls` hold, the
+  // `onBeforeCommit` dialog above -- is already outside it, which is why the
+  // honest figure falls out of WHERE the measurement is taken rather than out
+  // of arithmetic afterwards. Read only when a duration is going to be
+  // rendered: an untimed run reads no clock, exactly as it did before.
+  // `clock.now?.()` and never a detached `clock.now ?? Date.now`. A `Clock` is
+  // an interface and an implementation is free to be a class -- the test suite's
+  // own fake is one, reading a `#private` field -- so a method pulled off the
+  // object and called bare loses its receiver and throws. `paceWait` calls it
+  // the same way for the same reason.
+  const now = (): number => clock.now?.() ?? Date.now();
+  const started = timing === "off" ? 0 : now();
+  // The person-wait counter before, and again after, so a gate that lives
+  // INSIDE `driver.call()` is subtracted. See `DriveOptions.waited`.
+  const waitedBefore = timing === "off" ? 0 : (options.waited?.() ?? 0);
+
   const result = await driver.call(verb.name, args, {
     ...(rev === undefined ? {} : { rev }),
     ...(screen === undefined ? {} : { screen }),
     ...(plan === undefined ? {} : { plan }),
   });
-  return { result, head: renderOutcome(result), screen: renderSnapshot(result.snapshot) };
+
+  let head = renderOutcome(result);
+  if (timing !== "off") {
+    // `Math.max(0, ...)` because `waited` is reported by a host and a host that
+    // reports more wait than the call took is a host with a bug -- in which
+    // case the floor is zero and the line is simply omitted rather than a
+    // negative duration being put in front of a model.
+    const waited = Math.max(0, (options.waited?.() ?? 0) - waitedBefore);
+    const line = renderDuration(Math.max(0, now() - started - waited), timing === "slow" ? SLOW_MS : 0);
+    // Appended to the OUTCOME half, above the screen seam, so it survives
+    // `pruneScreens`. That is the right half on its merits and not only for
+    // thrift: "how long did my third call take" is a question whose answer
+    // stays true forever, like `ok` and like the count, and unlike the table.
+    if (line) head += `\n${line}`;
+  }
+
+  return { result, head, screen: renderSnapshot(result.snapshot) };
 }
