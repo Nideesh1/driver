@@ -50,12 +50,28 @@ packages. Neither can be done from this repository.
 does not exist yet. It becomes an ordinary publisher once the first release
 lands.
 
-**npm** — the package must exist before it can have a trusted publisher, and
-trusted publishing is configured on the package's settings page on
-npmjs.com: link the GitHub repository `Nideesh1/driver` and the workflow
-`release.yml`. If `driverkit` has never been published, publish `0.0.1` once by
-hand from a machine that is logged in, then set up trusted publishing and let
-every later release come from the tag.
+**npm** — unlike PyPI, npm has **no pending-publisher equivalent**: the package
+must already exist before a trusted publisher can be attached to it. So the
+first publish of `driverkit` is a manual one, and only that one:
+
+```sh
+cd packages/driverkit && npm run build && npm publish --access public
+```
+
+from a machine logged in as the package owner. Then, on the package's settings
+page on npmjs.com, add the trusted publisher: repository `Nideesh1/driver`,
+workflow `release.yml`. Every release after that comes from a tag.
+
+**Two traps, both of which cost a release if you hit them:**
+
+- **A new trusted publisher expires if no publish succeeds within two days.**
+  So configure it when you are ready to tag, not weeks ahead — and if the first
+  tagged release fails for an unrelated reason, check the publisher is still
+  there before assuming the failure was the workflow's.
+- **npm >= 11.5.1 and Node >= 22.14.0 are required.** The runner's bundled npm
+  is older, which is what the `npm install -g npm@latest` line in the workflow
+  is for. A Node 22 runner with npm 10.x fails the publish with an error that
+  does not mention OIDC at all.
 
 ## Checking before you tag
 
