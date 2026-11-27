@@ -4,7 +4,7 @@
 #
 #   1. set the version from the tag in both halves, build both, run every test
 #   2. publish `driverkit` to PyPI (trusted publishing, OIDC, no token)
-#   3. publish `driverkit` to npm (NPM_TOKEN, with provenance)
+#   3. publish `driverkit` to npm (trusted publishing, OIDC, no token)
 #
 # No version is ever hand-edited in a commit. `packages/driverkit/package.json`
 # and `python/pyproject.toml` both say 0.0.0 on `main` and are rewritten here,
@@ -132,9 +132,12 @@ jobs:
   npm:
     needs: build
     runs-on: ubuntu-latest
-    environment: npm
     permissions:
-      id-token: write   # provenance attestation, alongside the token
+      # npm trusted publishing (OIDC) + provenance. No token, and deliberately
+      # no `environment:` -- an environment exists to hold a secret, and the
+      # whole point of OIDC is that there is no secret to hold. Keeping an
+      # empty one would imply a stored credential that nobody can find.
+      id-token: write
     steps:
       - uses: actions/download-artifact@v4
         with: { name: npm-package, path: pkg/ }
@@ -142,11 +145,10 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest   # trusted publishing needs npm >= 11.5.1
       - name: Publish
         working-directory: pkg
         # `--ignore-scripts`: dist/ was built in the build job and there is
-        # nothing left to run. A publish must not execute a lifecycle script
-        # with a token in its environment.
+        # nothing left to run, so a lifecycle script here could only be one
+        # nobody intended.
         run: npm publish --access public --provenance --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
