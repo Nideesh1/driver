@@ -3179,3 +3179,129 @@ test("prose the model had already produced does not land in the conversation tha
   assert.equal(host.find("dk-me").length, 0);
   widget.unmount();
 });
+
+// ---- the question box --------------------------------------------------
+//
+// The other direction from the confirmation above. `approve` lets the person
+// stop the agent; this lets the agent ask the person something, and the panel
+// is where a question is seen on both of driverkit's paths -- an agent
+// arriving over the relay asks through the same hook and the person answers in
+// the same transcript.
+
+/** The same fixture, with the panel wired as the driver's `ask` hook.
+ *
+ *  A forward reference, because `mount()` has to happen before the panel that
+ *  will answer for it exists -- and wired rather than adopted, because the
+ *  `ask` verb has to be in the manifest from `mount()` or the tool list would
+ *  change when a panel appeared. That is the documented wiring, so it is the
+ *  wiring the tests use. */
+function asking(script: unknown[] = [{ text: "ok" }], options: Partial<WidgetOptions> = {}) {
+  const doc = new FakeDocument();
+  let widget: ReturnType<typeof mountWidget> | undefined;
+  const app = contacts({ ask: (q) => widget!.question(q) });
+  const s = scripted(script);
+  widget = mountWidget(app.driver, {
+    think: s.think,
+    document: doc,
+    clock: instant,
+    open: true,
+    ...options,
+  });
+  return { doc, app, s, widget, host: doc.host() };
+}
+
+test("a question the agent asks appears in the panel with a box, and what is typed goes back", async () => {
+  // The whole feature, end to end, through the DOM the person actually sees.
+  // The answer is the ask's own RESULT -- not a side channel -- so the tool
+  // turn the model reads carries the person's sentence.
+  const { app, host } = asking();
+  const call = app.driver.call("ask", { question: "which Ada Duarte did you mean?" });
+  await Promise.resolve();
+
+  assert.equal(host.one("dk-ask-q").textContent, "which Ada Duarte did you mean?");
+  // The box has the focus and not the safe button, which is the opposite of
+  // the confirmation dialog: there, Enter must not accept a thousand rows, and
+  // here the only thing Enter can do is send what was typed.
+  const box = host.one("dk-ask-box");
+  assert.equal(box.focused, true);
+  // And it does NOT read like the confirmation. A question changes nothing, so
+  // it gives back the commit colour the confirmation is allowed to be loud in;
+  // two dialogs that look alike are one dialog as far as attention goes.
+  assert.ok(host.one("dk-q"), "a question carries its own class");
+  assert.match(host.one("dk-ask-why").textContent!, /answering is not approving/);
+
+  box.value = "the one at Acme";
+  host.one("dk-yes").dispatch("click");
+  const out = await call;
+  assert.equal(out.ok, true);
+  assert.match(String((out as { note?: string }).note), /the one at Acme/);
+  // The controls go and the answer stays: scrolling back and finding a live box
+  // beside a question answered twenty turns ago is worse than no record.
+  assert.equal(host.find("dk-ask-box").length, 0);
+  assert.match(host.one("dk-ask-said").textContent!, /You answered: the one at Acme/);
+});
+
+test("Enter in the box sends the answer, and an empty box sends nothing at all", async () => {
+  // An empty box is not an answer and must not be sent as one: the question
+  // stays open, because they have not answered yet. "Not now" is how somebody
+  // declines to answer, and it says so -- which is the distinction the core
+  // keeps `ask-unanswered` for.
+  const { app, host } = asking();
+  const call = app.driver.call("ask", { question: "which one?" });
+  await Promise.resolve();
+
+  const box = host.one("dk-ask-box");
+  box.dispatch("keydown", { key: "Enter" });
+  await Promise.resolve();
+  assert.equal(host.find("dk-ask-box").length, 1, "still open, because nothing was typed");
+
+  box.value = "the first";
+  box.dispatch("keydown", { key: "Enter" });
+  const out = await call;
+  assert.match(String((out as { note?: string }).note), /the first/);
+});
+
+test("Not now is an unanswered question and never an answer the model can act on", async () => {
+  // THE DECISION: a person who declines to answer has not said anything, so the
+  // refusal is `ask-unanswered` and the model is told nothing changed. A panel
+  // that answered "" or "no" here would be putting a word in somebody's mouth,
+  // and the model would act on it.
+  const { app, host } = asking();
+  const call = app.driver.call("ask", { question: "which one?" });
+  await Promise.resolve();
+  host.one("dk-no").dispatch("click");
+  const out = await call;
+  assert.equal(out.ok, false);
+  assert.equal(out.ok === false && out.refused, "ask-unanswered");
+  assert.match(host.one("dk-ask-said").textContent!, /did not answer/);
+});
+
+test("unmounting the panel with a question open answers it unanswered rather than wedging the app", async () => {
+  // The same hazard the approval dialog's teardown exists for, and one step
+  // worse: a question asked over the relay has no run behind it and therefore
+  // no abort signal, so a panel torn down with one open would leave
+  // `driver.call()` waiting on a promise nobody can resolve. The core's 45
+  // second deadline would eventually answer, but a dead panel for 45 seconds
+  // is still a dead app, caused by closing a chat panel.
+  const { app, widget } = asking();
+  const call = app.driver.call("ask", { question: "which one?" });
+  await Promise.resolve();
+  widget.unmount();
+  const out = await call;
+  assert.equal(out.ok === false && out.refused, "ask-unanswered");
+});
+
+test("the panel never claims there is nobody to ask, because a mounted panel is somewhere a question is seen", async () => {
+  // `{ nobody: true }` is a claim about the DEPLOYMENT -- a cron run, a tab
+  // with no panel -- and it tells an agent to stop asking for the rest of the
+  // run. A panel that is mounted is a place a question can be seen even if
+  // nobody is looking this minute, so it is not the panel's claim to make. Its
+  // only two answers are the person's words and `{ answered: false }`.
+  const { widget } = asking();
+  const answers: unknown[] = [];
+  const open = widget.question({ question: "which one?" }).then((a) => answers.push(a));
+  await Promise.resolve();
+  widget.unmount();
+  await open;
+  assert.deepEqual(answers, [{ answered: false }]);
+});

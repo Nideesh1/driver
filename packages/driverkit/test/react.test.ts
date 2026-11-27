@@ -13,12 +13,15 @@
  * which is a plain object with no framework in it, and is driven here
  * directly. What is left for the components is markup, and the handful of
  * claims about that markup which actually matter (no live region on the
- * transcript, a `role="status"` receipt keyed on its phase, buttons that are
- * gone once a decision is made) are asserted through the one-pass renderer
- * below.
+ * transcript, a `role="status"` receipt whose line is keyed on its phase,
+ * buttons that are gone once a decision is made) are asserted through the
+ * one-pass renderer below.
  *
  * What that renderer cannot tell you is written down beside it, so nobody
- * reads a passing suite as more than it is.
+ * reads a passing suite as more than it is — and since `react` is now a dev
+ * dependency of the workspace, the half that needs a real dispatcher,
+ * real re-renders, real effect cleanups and a real bound `ref` lives in
+ * `test/react-dom.test.ts`. That file found two of the claims here false.
  */
 
 import { test } from "node:test";
@@ -591,6 +594,7 @@ test("the session's ceiling is reported where one is declared and absent where n
   assert.deepEqual(store.getSnapshot().budget, {
     calls: { used: 0, limit: 4 },
     commits: { used: 0 },
+    asks: { used: 0 },
   });
 
   await bounded.call("ping", {});
@@ -678,12 +682,21 @@ test("an asking card has buttons and a decided one has a role=status receipt ins
   assert.equal(status[0]!.props["tabIndex"], -1);
 });
 
-test("the receipt's status element is keyed on its phase, so each change is re-announced", () => {
-  // A `role="status"` whose text is merely updated is re-announced by some
-  // screen readers and silently ignored by others; a remount is announced by
-  // all of them. The key is what forces the remount, which makes it load
-  // bearing rather than React bookkeeping — hence a test, because a key looks
-  // exactly like the sort of thing somebody tidies away.
+test("the receipt's status region stays and the line inside it is keyed on the phase", () => {
+  // The region is mounted once, when the phase leaves `asking`, and then
+  // stays; the key is on the LINE, so each verdict replaces a node inside a
+  // region that was already in the document. Both halves are load-bearing and
+  // a key looks exactly like the sort of thing somebody tidies away:
+  //
+  //   - a live region is announced when its contents change while it is in the
+  //     document, and a region inserted together with its text is the case
+  //     screen readers most often miss, so the stable region is the reliable
+  //     shape rather than a concession;
+  //   - and the region is the focus target. This used to be the other way
+  //     round — the key on the status component, so the whole region remounted
+  //     — and that made the focus move fire on every phase change AND removed
+  //     the node holding focus from the document. `test/react-dom.test.ts`
+  //     renders both facts with React; this is the markup half.
   const { components } = createDriverPanel(fakeReact());
   for (const phase of ["allowed", "allowed-ok", "denied"] as const) {
     const tree = render(components.ApprovalCard as Component<unknown>, {
@@ -700,9 +713,13 @@ test("the receipt's status element is keyed on its phase, so each change is re-a
       decide: () => {},
       notes: false,
     });
-    const keyed = collect(tree, (n) => typeof n.type === "function" && "key" in n.props);
-    assert.equal(keyed.length, 1, `${phase}: one keyed status element`);
+    const region = collect(tree, (n) => n.props["role"] === "status");
+    assert.equal(region.length, 1, `${phase}: one status region`);
+    assert.ok(!("key" in region[0]!.props), `${phase}: the region itself must not be keyed`);
+    const keyed = collect(tree, (n) => "key" in n.props && n.props["role"] !== "status");
+    assert.equal(keyed.length, 1, `${phase}: one keyed line`);
     assert.equal(keyed[0]!.props["key"], phase);
+    assert.equal(text(keyed[0]!), receiptLine({ phase } as ApprovalEntry));
   }
 });
 
@@ -766,9 +783,12 @@ test("the default prose renderer is the markdown seam and injects no HTML", () =
 // cleanups are never called; and `ref` is a prop here rather than a bound DOM
 // node, so the focus move on a decision is NOT exercised — only the
 // `tabIndex`, the `role` and the key that make it possible are. Those three
-// are the parts a refactor would silently remove. The focus move itself is a
-// browser behaviour and belongs in `e2e/`, which is where the vanilla panel's
-// equivalent claims are checked.
+// are the parts a refactor would silently remove.
+//
+// Everything in that list is now covered by `test/react-dom.test.ts`, which
+// renders this area with React and jsdom. This renderer is kept rather than
+// replaced: it is what lets the markup claims above be read as one assertion
+// about one pass, with no commit, no act and no window in the way.
 
 interface Rendered {
   type: unknown;
@@ -793,7 +813,6 @@ function fakeReact(): ReactRuntime {
       effect();
     },
     useMemo: (factory) => factory(),
-    useCallback: (fn) => fn,
   };
 }
 

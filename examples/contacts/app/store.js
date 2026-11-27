@@ -134,7 +134,9 @@ const INSTRUCTIONS =
   "select verb returns beside its count: pass it back on the same turn, because a person " +
   "clicking a checkbox while you think is the ordinary case here and not a rare one. If the " +
   "person asked for something this app cannot select, say so rather than selecting something " +
-  "near it.";
+  "near it. Five of the contacts share a name with another contact at a different company, " +
+  "and several company names are near-misses for companies this app does not have, so an " +
+  "instruction naming either is one to ask about rather than resolve.";
 
 /**
  * The cross-screen job, declared as a recipe rather than written in prose.
@@ -219,10 +221,11 @@ const FLOWS = [
  *   moved. The page redraws, syncs the address bar and pushes a snapshot to
  *   the relay from here.
  * @param {{ approve?: import("driverkit").ApprovalPolicy, approvalTimeout?: number,
+ *           ask?: import("driverkit").AskHook, askTimeout?: number,
  *           elsewhere?: import("driverkit").ElsewhereChannel,
  *           onAudit?: import("driverkit").AuditHook }} [options] who
- *   approves a commit and where the records go, passed straight through to
- *   `mount()`.
+ *   approves a commit, who answers a question, and where the records go,
+ *   passed straight through to `mount()`.
  *
  *   It is an argument rather than a constant in here because the answer is not
  *   the app's to give: this module is the store and the verb table, and WHO IS
@@ -759,6 +762,38 @@ export function createApp(onChange = () => {}, options = {}) {
     // one tab changes nothing in the other's store and the other's `rev` does
     // not move. Without a channel the second tab reports accepted rows as
     // `new`, at a `rev` that passes every staleness check there is.
+    // HOW THIS APP ASKS, when the embedding has somebody to ask. An argument
+    // rather than a constant for the reason `approve` is one: this module is
+    // the store and the verb table, and WHETHER THERE IS A PERSON is a
+    // property of the embedding. `app.js` wires the chat panel's question box,
+    // so an agent arriving over the relay asks the same question in the same
+    // panel; `evals/app.mjs` wires a hook that says there is nobody, which is
+    // the truth about a suite run; `check.mjs` wires none at all, so the
+    // checker's manifest does not even carry the verb.
+    //
+    // Two of this app's eval cases are about ambiguity -- five people are
+    // called Ada Duarte, and "accept the selected contacts" with nothing
+    // selected -- and before this line the right answer to both was
+    // unexpressible. The agent could guess or give up.
+    ...(options.ask === undefined ? {} : { ask: options.ask }),
+    // Forwarded like `approvalTimeout` above, and for the opposite reason. A
+    // lapsed approval DENIES a commit somebody was still reading about, so
+    // waiting forever is the kind default; a lapsed question denies nothing, so
+    // the core's 45 seconds -- chosen to sit under the relay's 60, which is
+    // what keeps "nobody answered" a fact rather than "nobody knows" -- is
+    // already right and an embedding only overrides it to go faster in a test.
+    ...(options.askTimeout === undefined ? {} : { askTimeout: options.askTimeout }),
+    // A CEILING ON QUESTIONS, and only when there is somebody to ask. Five is
+    // generous for anything this app can be asked to do and small enough to
+    // bite on an agent that has started asking instead of thinking -- which is
+    // the failure `budget.asks` exists for, and the one `refusalLimit` cannot
+    // see, because every one of those questions succeeds.
+    //
+    // No `calls` or `commits` ceiling beside it, deliberately: this is a demo
+    // somebody drives by hand and a spend limit would stop it mid-
+    // demonstration. The asymmetry is the honest one -- a person's patience is
+    // the resource this app can actually run out of.
+    ...(options.ask === undefined ? {} : { budget: { asks: 5 } }),
     ...(options.elsewhere === undefined ? {} : { elsewhere: options.elsewhere }),
     // Where this driver's audit records go, when the embedding wants them.
     // Absent otherwise, for the reason the three above are: an app that passes

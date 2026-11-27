@@ -193,8 +193,12 @@ class Tab:
     def hello(self, **extra: Any) -> tuple[int, Any]:
         return self._post({"t": "hello", "tab": self.id, **HELLO, **extra})
 
-    def answer(self, call_id: str, result: dict[str, Any]) -> tuple[int, Any]:
-        return self._post({"t": "result", "id": call_id, "result": result})
+    def answer(self, call_id: str, result: dict[str, Any], **extra: Any) -> tuple[int, Any]:
+        # ``extra`` so a test can send the fields a `result` frame may now carry
+        # beside the app's answer — the tab's own ``tookMs`` and ``waitedMs`` —
+        # without a second helper that would drift from this one. The same
+        # reason ``push`` takes them.
+        return self._post({"t": "result", "id": call_id, "result": result, **extra})
 
     def push(self, snapshot: dict[str, Any], **extra: Any) -> tuple[int, Any]:
         # ``extra`` so a test can send the fields a push may now carry — the

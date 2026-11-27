@@ -119,8 +119,28 @@ export interface ArgSpec {
  * a token the core minted over the selection it left behind, and the commit has
  * to present it. See `Verb.consumes`, `Snapshot.selectionId` and
  * `CallOptions.plan`.
+ *
+ * `ask` IS THE FOURTH KIND, AND THIS FILE HAS ALREADY REFUSED ONE ONCE, so the
+ * difference is worth stating before the type. Navigation was refused a kind of
+ * its own on the grounds that the three are a ladder of WHAT A WRONG CALL COSTS
+ * YOU and a wrong navigation costs exactly what a wrong read costs. A wrong
+ * question is not on that ladder at all: it costs a PERSON'S ATTENTION, which
+ * is the one currency the other three never spend. `read` says "free to call,
+ * free to get wrong", and that sentence is false of a question — asking is
+ * budgeted (`Budget.asks`), it blocks every other call while it is open, and
+ * the cost of getting it wrong is paid by somebody who then trusts the next
+ * question less. `describe` reports a count about the app and `commit` moves the
+ * app's data; a question reads and writes nothing in the app. So it is neither
+ * `read` in the ladder's own terms nor a lie dressed as one.
+ *
+ * **ONLY THE CORE MAY MINT IT.** An app verb declaring `kind: "ask"` is refused
+ * at `mount()`. A question is put through `MountOptions.ask` so that the core
+ * owns the lock, the deadline, the allowance and the audit row; an app verb
+ * wearing the kind would be a question none of those applied to, and the first
+ * thing somebody would build with it is a confirmation dialog that answers for
+ * the approval gate. See `AskHook`.
  */
-export type VerbKind = "read" | "describe" | "commit";
+export type VerbKind = "read" | "describe" | "commit" | "ask";
 
 /**
  * Something the app can do.
@@ -826,6 +846,109 @@ export type NavigateHook = (
 ) => void | Refusal | Report | Promise<void | Refusal | Report>;
 
 /**
+ * What the agent wants to know, handed to `MountOptions.ask`.
+ *
+ * One field today and a shape rather than a bare string all the same, because
+ * the hook is implemented by a UI and a UI that took a positional argument
+ * would have to be rewritten to be told anything else — `screen`, the verb that
+ * prompted it, a suggested set of answers. A `{ question }` is the version of
+ * this that can grow without every implementation changing.
+ */
+export interface AskQuestion {
+  /**
+   * What the agent is asking, in its own words, as it typed it.
+   *
+   * Never built by the core and never rewritten by it: a question the library
+   * paraphrased is a question the person answers and the model did not ask.
+   * Bounded at `SIZE_LIMITS.describe` and refused as `bad-argument` above
+   * that — an agent that needs a paragraph to state its question has not
+   * worked out what it does not know, and a wall of text in front of somebody
+   * is a question they will dismiss.
+   */
+  question: string;
+}
+
+/**
+ * What a person said, or the news that nobody did.
+ *
+ * THREE ANSWERS, AND THE SPLIT IS THE WHOLE DISCIPLINE OF THIS TYPE. The
+ * library already keeps `approval-timeout` apart from `declined-by-user`
+ * because "nobody answered" and "the person said no" are different facts an
+ * auditor must never confuse. A question has the same hazard one layer over,
+ * with a different pair:
+ *
+ *   a string             the person's words. They reach the model as the
+ *                        RESULT of the ask, not as a side channel — see
+ *                        `AskHook` — so a model reads an answer where it reads
+ *                        every other outcome.
+ *   `{ answered: false }` a question was put in front of somebody and no answer
+ *                        came back: they closed the panel, walked away, or the
+ *                        deadline lapsed. The agent is told plainly that the
+ *                        question was seen by nobody who replied, and that
+ *                        nothing in the app changed.
+ *   `{ nobody: true }`   there is no person on this path at all. A cron run, a
+ *                        test harness, a tab with no panel. The question was
+ *                        never put.
+ *
+ * `{ answered: false }` AND `{ nobody: true }` ARE NOT ONE ANSWER, and the
+ * repairs are why. Unanswered says the channel works and this particular
+ * question went unanswered, so asking once more later, or more briefly, is a
+ * move that can succeed. Nobody-to-ask says the channel does not exist on this
+ * run, so every further question is wasted and the only honest ending is to
+ * decide from what is already known or to stop and say what is missing. An
+ * agent handed one word for both will keep asking into an empty room.
+ *
+ * There is deliberately NO "the person refused to answer". Somebody who says "I
+ * would rather not say" has answered; their words are the result, and the model
+ * is better at reading that sentence than the core is at classifying it.
+ *
+ * A HOOK THAT THROWS IS `{ answered: false }`, never `{ nobody: true }`. The
+ * precedent is `ApprovalHook`, where a failed ask is a no — here a failed ask is
+ * an unanswered question, because a broken question UI is not evidence that
+ * nobody is sitting there, and claiming it is would tell an agent to stop asking
+ * for the rest of a run over one exception.
+ *
+ * An answer that is none of these three is treated as `{ answered: false }` and
+ * said out loud once. The same rule as `Approval`'s unknown shape being a
+ * denial: the core must not read a shape it does not recognise as somebody
+ * having spoken.
+ */
+export type AskAnswer = string | { answered: false } | { nobody: true };
+
+/**
+ * How the app puts a question to the person. The body of the reserved `ask`
+ * verb.
+ *
+ * WHY THERE IS A HOOK AT ALL, which is the same answer `NavigateHook` gives:
+ * the core cannot ask. It has no DOM, no panel, no notification channel and no
+ * idea whether anybody is looking. What it CAN own — and does — is everything
+ * that is the same in every app: the verb's name, its one argument, its
+ * description, the lock that stops the agent acting while a question is open,
+ * the deadline that keeps "nobody answered" a FACT rather than a transport
+ * mystery, the allowance that stops an agent asking instead of thinking, and
+ * the audit row.
+ *
+ * **DECLARED AT `mount()` AND NOWHERE ELSE, AND THIS IS NOT A CONVENIENCE.**
+ * The approval gate has `DriverApproval.adopt`, so a panel mounted after the
+ * driver can install one. A question cannot work that way, and the constraint
+ * is the one the whole library is priced on: `system` and `tools` are
+ * byte-identical on every turn so the prompt prefix stays cached, and a verb
+ * that appeared when a panel mounted would be a tool list that changed
+ * underneath a running conversation. So an app that may ever want to ask
+ * declares this at mount; an app that declares nothing gets no `ask` verb, the
+ * manifest it had before this field existed, and the same fingerprint.
+ *
+ * **THE ANSWER IS THE TOOL'S RESULT AND NOTHING ELSE KEEPS IT.** The person's
+ * words come back as the `note` of the ask's own `Result` — `ok — they said:
+ * "…"` — and the core stores not one byte of them. That is the structural half
+ * of "a question is not consent": there is no field a later `commit` could
+ * consult, no remembered yes, and `ApprovalRequest` has no way to reach an
+ * answer, so the approval gate is asked exactly as it would have been if the
+ * question had never happened. See `MountOptions.ask`.
+ */
+export type AskHook = (question: AskQuestion) => AskAnswer | Promise<AskAnswer>;
+
+/**
  * One step of a `FlowSpec`: a verb, and a line about using it here.
  *
  * The shape is webmachinelearning/webmcp#340's `steps[].{section, tool, hint}`,
@@ -1423,6 +1546,43 @@ export interface DriverApproval {
  * an audit trail: `declined-by-user` is a person saying no, `stale-plan` is an
  * agent trying to spend a receipt for a count that moved, and a log that only
  * recorded successes would have nothing to say about either.
+ *
+ * ---
+ *
+ * **HOW A QUESTION APPEARS IN HERE, AND WHY IT NEEDED NO NEW FIELD.** An `ask`
+ * is a human interaction and belongs in the record as much as an approval does,
+ * and the fields already here say all of it — which is worth spelling out
+ * because the instinct is to add an `asked:` enum beside `approval`, and a
+ * second way to say one thing is a second thing to get wrong.
+ *
+ *   `verb: "ask"`, `kind: "ask"`   this row is a question.
+ *   `args.question`                what was asked, as the agent typed it.
+ *   `waitedMs`                     how long it was open. **Present exactly when
+ *                                  a question reached somebody**, which is the
+ *                                  field that tells "asked" from "never put".
+ *   `ok: true`                     asked AND ANSWERED.
+ *   `refused: "ask-unanswered"`    asked AND IGNORED. `waitedMs` says for how
+ *                                  long.
+ *   `refused: "nobody-to-ask"`     never put: no person on this path.
+ *   `refused: "asks-spent"`        never put: the allowance was gone.
+ *
+ * So "asked and answered" and "asked and ignored" are two values of a field
+ * that already exists, and the two kinds of not-asking are told apart by slug
+ * and by the absence of `waitedMs`. `approval` stays `not-asked` on every one
+ * of these rows, because nobody approved anything: a question is not consent,
+ * and a record in which a question could read as an approval would be the
+ * bypass this feature was built not to be.
+ *
+ * **WHAT THE ANSWER'S TEXT IS DOING OUTSIDE THE RECORD, DELIBERATELY.** The
+ * person's words are the `Result`'s `note` and the core keeps no copy, so they
+ * are not here. That is the same argument `ArgSpec.sensitive` makes about this
+ * very hook being "the one boundary where a record is most likely to leave the
+ * box": an answer is free text a person typed, it may be anything, and a host
+ * that wires `onAudit` straight to a vendor's tracer should not thereby ship it
+ * there. What an auditor needs is that a question was asked, what it was, and
+ * whether somebody answered — all of which is above. If you need the words,
+ * they are in the transcript, which is the artefact that is supposed to hold
+ * what was said.
  */
 export interface AuditEvent {
   /** `Date.now()` when the call settled. Milliseconds since the epoch, not an
@@ -1671,6 +1831,27 @@ export interface ElsewhereChannel {
  *               thousand commits costs DATA. An app may happily allow the
  *               first and not the second, and one number cannot say that.
  *
+ *   `asks`    — questions actually put to somebody. A third counter by the
+ *               same argument the second one is made of: a thousand reads
+ *               costs tokens, a thousand commits costs data, and a thousand
+ *               questions costs A PERSON'S PATIENCE, which is the one of the
+ *               three that cannot be topped up. One number cannot bound all
+ *               three because an app may well want two hundred calls, ten
+ *               commits and three questions.
+ *
+ *               It is the counter with the sharpest failure mode behind it: an
+ *               agent that is confused can ask instead of thinking, and each
+ *               question looks individually reasonable while the sequence is a
+ *               person being interrogated by something that has stopped
+ *               working. `drive`'s `refusalLimit` cannot see it, because every
+ *               one of those questions SUCCEEDS.
+ *
+ *               It refuses `asks-spent` and never `budget-spent`, and that is
+ *               the one place this field departs from the two above. See the
+ *               slug in `RESERVED_REFUSALS`: those two end in no repair — stop,
+ *               and tell the person — and this one ends in a real one, which is
+ *               to say in the final answer what you would have asked.
+ *
  * REJECTED: **runs per minute**, or calls per minute, or any rolling window.
  * It is the one that looks most like a cost control and is the least like one.
  * A rate limit converts an unbounded spend into a slower unbounded spend — the
@@ -1703,6 +1884,17 @@ export interface Budget {
   calls?: number;
   /** Most `commit` verbs this driver will ever run. Omitted means no bound. */
   commits?: number;
+  /**
+   * Most questions this driver will ever put to a person. Omitted means no
+   * bound, which is the same default the two above have and is deliberately
+   * not a small number: a ceiling the library picked would be a ceiling that
+   * fires in somebody's app for a reason they never wrote down.
+   *
+   * Counted only when a question actually reached the hook — a question
+   * refused for a spent allowance, or one the app answered `{ nobody: true }`
+   * to, charged nothing, because neither one took anybody's attention.
+   */
+  asks?: number;
   /**
    * Where the counters are kept, so a page reload does not refill them.
    *
@@ -1865,6 +2057,20 @@ export interface BudgetRecord {
   calls: number;
   /** Commits run so far, matching `BudgetState.commits.used`. */
   commits: number;
+  /**
+   * Questions put so far, matching `BudgetState.asks.used`.
+   *
+   * Optional, and that is the migration: a record written before this field
+   * existed reads back with no `asks`, which the core takes as 0 rather than
+   * discarding the record — the two numbers beside it are still true, and
+   * throwing an allowance away because a field was added would hand every app
+   * with a store a fresh ceiling on upgrade.
+   *
+   * Still four fields' worth of privacy class and no more: a count of
+   * questions, never a question. Nothing a person typed is written here, by
+   * the rule the rest of this type is built on.
+   */
+  asks?: number;
   /** `Date.now()` when this allowance began. Only `Budget.window` reads it; an
    *  app with no window never looks, and the field is still written so that
    *  adding a window later does not have to treat every existing record as
@@ -1890,6 +2096,11 @@ export interface BudgetRecord {
 export interface BudgetState {
   calls: { used: number; limit?: number };
   commits: { used: number; limit?: number };
+  /** Questions put to a person, and the ceiling if the app set one. Reported
+   *  whatever the app declared, like the two above, so a settings view has one
+   *  shape to render — and so "it has asked me four things" is a number
+   *  somebody can see. */
+  asks: { used: number; limit?: number };
 }
 
 export interface MountOptions {
@@ -1937,6 +2148,74 @@ export interface MountOptions {
    * ours.
    */
   navigate?: NavigateHook;
+  /**
+   * How the app puts a question to the person. Declaring it is what makes the
+   * core offer the reserved `ask` verb.
+   *
+   * THE GAP THIS CLOSES. `approve` is a GATE, not a channel. A person could
+   * stop the agent and the agent could not ask the person anything, so an
+   * agent meeting an ambiguous instruction — "select the contact called Ada
+   * Duarte", and five people are called that — had two moves: guess, or give
+   * up. The argument is the one `declined-by-user` already rests on, one level
+   * up: a model that cannot tell "the person said no" from "your arguments
+   * were wrong" will retry with different arguments, and **a model that cannot
+   * ask will guess.** Two of this library's own eval cases were written for an
+   * outcome it could not express.
+   *
+   * Absent means absent, which is the whole of the additive promise here: no
+   * `ask` verb appears, the manifest is the document it was before this field
+   * existed, and `fingerprint()` does not move. An app that cannot ask is an
+   * app where the guidance in `systemPrompt` about asking is never rendered
+   * either, so a model is not told about a tool it has not got.
+   *
+   * BOTH WAYS IN, which is the half that makes this a feature rather than a
+   * widget. The verb lives in `call()`, like every other, so an agent arriving
+   * over the relay or MCP asks the same question through the same hook and the
+   * person answers it in the same panel. What the outside path needs that the
+   * in-page one does not is `askTimeout`; see it for why the default is a
+   * deadline here and "wait forever" for an approval.
+   *
+   * IT IS NOT AN APPROVAL AND MUST NOT BECOME ONE. Nothing the person types
+   * here is stored, nothing reaches `ApprovalRequest`, and a `commit` after a
+   * question is gated exactly as a commit before one would have been — so an
+   * agent that asks "shall I accept these 3,412?" and is told yes still meets
+   * `approve`, and a `false` from `approve` still refuses the commit. The
+   * separation is structural because there is no state for it to be a policy
+   * about. See `AskHook`.
+   */
+  ask?: AskHook;
+  /**
+   * How long to wait for an answer before giving up, in milliseconds.
+   * **Defaults to `DEFAULT_ASK_TIMEOUT_MS`, which is 45 seconds.**
+   *
+   * **THE OPPOSITE DEFAULT FROM `approvalTimeout`, ON PURPOSE.** That one waits
+   * forever, because the person may be reading the rows the question is about
+   * and a deadline that DENIES while they are deciding teaches them the dialog
+   * is a race. Both halves of that argument invert here.
+   *
+   * Nothing is denied by a lapsed question: no verb was going to run and no
+   * data was going to move, so giving up costs the agent one refusal it can
+   * read and act on, and costs the person nothing at all.
+   *
+   * And waiting past the transport's own deadline is actively dishonest. The
+   * relay gives a call 60 seconds and then answers `timeout`, which PROTOCOL.md
+   * defines as **outcome unknown** — a commit that came back that way may
+   * already have run. A question that outlived it would convert "nobody
+   * answered", which is a fact the agent can act on, into "nobody knows", which
+   * is the most expensive answer in the system, over the one call where the
+   * truth was plainly knowable. So the default sits comfortably under the
+   * relay's: the page answers `ask-unanswered` first, every time, and the
+   * outside agent learns the fact rather than the mystery.
+   *
+   * 45 seconds is also about as long as a question can sit in front of
+   * somebody before it is stale: an agent that asked a minute ago is asking
+   * about a screen that has moved. Raise it for a gate that is a webhook or a
+   * phone, and raise `RelayOptions.timeoutMs` with it or the relay will answer
+   * first — which is the one combination that gives back exactly the honesty
+   * this default is protecting. A non-positive number means wait forever, which
+   * is the right answer for an app that is only ever driven in-page.
+   */
+  askTimeout?: number;
   /**
    * The app's multi-step recipes, for an agent to read and follow.
    *

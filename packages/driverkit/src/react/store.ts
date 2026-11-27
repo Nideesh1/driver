@@ -326,8 +326,20 @@ export interface PanelStore {
    */
   approve: (req: ApprovalRequest) => Promise<Approval>;
   /** Stop the run, answer any open question as lapsed, and release the
-   *  listeners. Called from the hook's unmount effect. */
+   *  listeners. Called from the hook's unmount effect. It is FINAL: a
+   *  destroyed store answers no further `ask`, which is what `destroyed`
+   *  below exists to let a caller find out before it tries. */
   destroy: () => void;
+  /**
+   * Whether `destroy` has already run.
+   *
+   * For a caller that did not do the destroying and cannot be sure it did not
+   * happen — which is `useDriver` on a remount, because React can run an
+   * effect's cleanup and then mount the same effect again. A store that has
+   * been closed cannot be reopened, so the hook asks rather than assuming, and
+   * builds a new one when the answer is yes.
+   */
+  destroyed: () => boolean;
 }
 
 export interface Decision {
@@ -992,11 +1004,22 @@ export function createPanelStore(driver: Driver, options: PanelOptions): PanelSt
       bump();
     },
     approve,
+    destroyed: () => !live,
     destroy: () => {
       live = false;
-      running?.abort();
+      // The open questions are lapsed BEFORE the run is aborted, and the order
+      // is the whole difference between two records. An abort answers an open
+      // question `stopped` through the signal listener in `ask`, and on an
+      // unmount that would be the less true of the two available facts: the
+      // run was stopped because the panel went away, and "the panel closed
+      // before anybody answered" is what somebody reading the receipt needs.
+      // Lapsing first is safe — a lapse answers the core with a refusal
+      // string, never an allow — and the abort still lands before the loop
+      // resumes, because it runs synchronously here and the loop can only
+      // continue on a later microtask.
       for (const lapse of [...teardowns.values()]) lapse();
       teardowns.clear();
+      running?.abort();
       listeners.clear();
     },
   };

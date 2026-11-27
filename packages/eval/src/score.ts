@@ -30,24 +30,50 @@ import type {
 import { parseBound } from "./case.ts";
 
 /** Slugs an app might plausibly use for "ask the person", tried when the
- *  caller did not name one. A guess, and a named `--ask-verb` always wins: a
- *  harness that silently matched the wrong verb would report an app as asking
- *  when it did something else entirely. */
+ *  caller did not name one and the manifest declares no `kind: "ask"` verb. A
+ *  guess, and a named `--ask-verb` always wins: a harness that silently matched
+ *  the wrong verb would report an app as asking when it did something else
+ *  entirely. */
 export const ASK_VERB_GUESSES: readonly string[] = ["ask", "ask-user", "ask-person", "clarify"];
 
 /**
  * The verb this app uses to ask the person something, or `null`.
  *
- * The library may have no ask mechanism yet — one is being added — and a case
- * with `asks: true` must not fail an app for that. So this reports its
- * absence, `judge` marks the expectation `skip` rather than `wrong`, and the
- * case's other expectations (above all `commits: "none"`) are still enforced.
- * The moment the mechanism lands, `--ask-verb <name>` turns those cases from
- * observations into assertions without a single case file changing.
+ * THREE SOURCES, IN THIS ORDER, AND THE ORDER IS THE POINT.
+ *
+ *   1. `--ask-verb NAME`, which always wins. A caller who names a verb has
+ *      looked at their own app, and a harness that overruled them would report
+ *      an app as asking when it did something else entirely.
+ *   2. **A verb declaring `kind: "ask"`**, which is the structural answer and
+ *      the one this now finds without being told. Only the core mints that
+ *      kind — `mount()` throws on an app verb that claims it — so a match here
+ *      is not a guess at all: it is a verb whose question is locked,
+ *      deadlined, counted against `budget.asks` and recorded, with an answer
+ *      that comes back as the call's own result.
+ *   3. The name guesses, for an app that asks through a verb of its own. Those
+ *      are still guesses and still the weakest of the three, which is why they
+ *      are last and why `--ask-verb` exists.
+ *
+ * THIS FUNCTION PREDATES THE MECHANISM IT LOOKS FOR, and it is worth saying
+ * what has changed now that the mechanism is here. The flag taking a NAME
+ * rather than being a boolean was a guess that the ask would be an
+ * app-declared verb; it turned out to be a reserved verb the core synthesises
+ * from `MountOptions.ask`, for a reason that only shows up at this level — the
+ * tool list must be byte-identical on every turn, so a question cannot be a
+ * thing a panel installs after mount. The flag keeps its meaning all the same,
+ * for case 3: an app may decline the core's verb and keep its own, and `ask`
+ * is reserved only in the weak sense.
+ *
+ * `null` still means the app cannot ask, in which case `judge` marks an
+ * `asks: true` expectation `skip` rather than `wrong` and the case's other
+ * expectations — above all `commits: "none"` — are still enforced. An app
+ * should not fail a case for a feature it has not adopted.
  */
 export function askMechanism(manifest: Manifest, override?: string): string | null {
   const names = new Set(manifest.verbs.map((v) => v.name));
   if (override) return names.has(override) ? override : null;
+  const declared = manifest.verbs.find((v) => v.kind === "ask");
+  if (declared) return declared.name;
   for (const guess of ASK_VERB_GUESSES) if (names.has(guess)) return guess;
   return null;
 }

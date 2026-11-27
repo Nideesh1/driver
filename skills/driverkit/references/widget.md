@@ -133,6 +133,46 @@ question still on screen is answered `{ timedOut: true }` — nobody answered, w
 refusing. Without that, closing a chat panel with a question open would leave every later commit waiting forever
 on a dialog nobody can see.
 
+## The question box
+
+The other direction. The gate above lets the person stop the agent; this lets the agent ask the person something,
+which an agent meeting an ambiguous instruction had no way to do — so its only moves were to guess or to give up.
+
+**You have to wire it, unlike the gate**, and the asymmetry is not an oversight. The panel adopts `approve`
+because a gate can be installed at any time; a verb cannot. `system` and `tools` are byte-identical on every turn
+so that the prompt prefix stays cached, so the `ask` verb has to be in the manifest from `mount()` or not at all —
+a verb that appeared when a panel mounted would be a tool list changing underneath a running conversation.
+
+```ts
+let panel: Widget;
+const driver = mount({ …, ask: (q) => panel.question(q), budget: { asks: 5 } });
+panel = mountWidget(driver, { think });
+```
+
+It is `panel.question` and not `panel.ask` because **`Widget.ask(text)` already exists and means the opposite**:
+that one types a sentence into the panel as if the person had.
+
+What the panel renders is the agent's question verbatim, a text box with the focus, **Answer** and **Not now** —
+and it deliberately does not look like the confirmation, which is the one place in this panel allowed to be loud.
+Two dialogs that look alike are one dialog as far as somebody's attention is concerned.
+
+There is no threshold and no "ask before questions" switch, which is the other difference from the gate. The gate
+has thresholds because a confirmation that stops you over a page-size change is one you learn to click through.
+A question is not a gate: the agent asked because it could not act without guessing, so a panel that answered on
+its behalf would be inventing the answer. Every question reaches the person; what bounds them is `Budget.asks`,
+which is the app's to set rather than a viewer's comfort setting — somebody who can raise their own ceiling does
+not have one.
+
+Every exit that is not somebody typing is `{ answered: false }`: **Not now**, a stopped run, a torn-down panel.
+Never a string, because nobody spoke, and never `{ nobody: true }` — a mounted panel is a place a question can be
+seen, so "there is nobody on this run" is a claim about the deployment and is the app's to make from its own hook.
+The core's `askTimeout` catches the rest at 45 seconds, which is under the relay's 60 so that "nobody answered"
+stays a fact rather than becoming the transport's "nobody knows".
+
+**An answer is not an approval.** A commit after an answered question still renders the confirmation above and can
+still come back `declined-by-user`. The core keeps no part of an answer, so there is nothing for a later call to
+consult.
+
 ## Options worth knowing
 
 | option | default | |

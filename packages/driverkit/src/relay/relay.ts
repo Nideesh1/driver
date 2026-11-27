@@ -215,8 +215,21 @@ export interface RelayOptions {
 export interface RelayAuditEvent {
   /** `Date.now()` when the call settled, in milliseconds since the epoch. */
   at: number;
-  /** How long the relay held the call, in milliseconds: the round trip to the
-   *  tab, which on a gated commit includes the time a person spent deciding. */
+  /**
+   * How long the relay held the call, in milliseconds: the round trip to the
+   * tab, which on a gated commit includes the time a person spent deciding.
+   *
+   * THE TAB'S OWN `tookMs` IS DELIBERATELY NOT HERE, although the relay now
+   * carries one to the agent. It is a figure measured in another process, and
+   * copying somebody else's measurement into this record is the same mistake as
+   * copying their verdict -- see `outcome`, and "a relay logging `ok` for a call
+   * whose tab died mid-commit asserts an outcome nobody observed". The relay
+   * cannot check it and would be asserting it. It would also invite the one
+   * subtraction nobody should make: `ms - tookMs` is not "the network", it is
+   * the network plus however long the frame sat in the tab's event loop plus
+   * whatever a proxy buffered. The duration belongs in the driver's own record,
+   * where it was measured, and in the answer the agent gets.
+   */
   ms: number;
   /** Who asked, as the relay resolved them — a token's subject, a host's own
    *  session id, or `LOCAL_PRINCIPAL` on an unconfigured loopback relay, where
@@ -667,7 +680,9 @@ export function createRelay(options: RelayOptions = {}): Relay {
         }
         // `delivered`, and nothing more. The tab answered; what it answered is
         // the driver's own record to make, in the process where it was decided.
-        pending.settle(frame.result, "delivered");
+        // The tab's own elapsed time rides along on the answer and is NOT in
+        // the record: see `timed`, and `RelayAuditEvent` for the argument.
+        pending.settle(timed(frame.result, frame), "delivered");
         return { ok: true };
       }
     }
@@ -1170,6 +1185,56 @@ export function createRelay(options: RelayOptions = {}): Relay {
  * though it were a screen. Absence cannot be mistaken for either: a client
  * reads it as "the call did not arrive", never as "the screen is empty".
  */
+/**
+ * The tab's answer, plus the two timing fields the tab sent beside it.
+ *
+ * THE RELAY DOES NOT MEASURE, AND MUST NOT. It has one number of its own --
+ * the round trip it held the call open for, which is in the audit record -- and
+ * that number is the network out, plus the tab's work, plus any question the
+ * page put to a person, plus the network back. Substituting it for a missing
+ * `tookMs` would hand an agent exactly the sum `tookMs` exists to take apart.
+ * So this copies, validates and otherwise has no opinion, which is the same
+ * restraint `rev`, `screen`, `plan` and `focus` get on their way through.
+ *
+ * WHY THE KEYS ARE STRIPPED FIRST. They are reserved on this body. `result` is
+ * what the APP returned, and an app that filled in `tookMs` itself would be
+ * making a claim about its own speed where the agent is entitled to an
+ * observation -- so a value found in there is dropped and only the frame's own
+ * field, written by the page-side harness around its one call into the driver,
+ * is forwarded. The copy is shallow and touches nothing else: every other field
+ * of the `result`, a `stale` hint and the snapshot included, is forwarded byte
+ * for byte as before.
+ *
+ * ABSENT MEANS UNKNOWN. A tab from before this existed, or one that cannot say
+ * honestly, sends nothing, and nothing is what the agent gets: never a zero,
+ * which every client would render as "instant". A figure that is not a finite
+ * number at or above zero is dropped on the way through, the rule `Tab.focus`
+ * already has for a value that is not a string.
+ */
+function timed(result: WireResult, frame: { tookMs?: unknown; waitedMs?: unknown }): WireResult {
+  const out = { ...(result as Record<string, unknown>) };
+  delete out.tookMs;
+  delete out.waitedMs;
+  const took = ms(frame.tookMs);
+  if (took !== undefined) {
+    out.tookMs = took;
+    // Only beside a `tookMs`, never on its own. `waitedMs` is defined as the
+    // amount already subtracted from it, so without one it is a quantity
+    // relative to nothing -- and a reader might well subtract it a second time.
+    const waited = ms(frame.waitedMs);
+    if (waited !== undefined) out.waitedMs = waited;
+  }
+  return out as WireResult;
+}
+
+/** A duration off the wire, or undefined for anything that is not one. Whole
+ *  milliseconds: a float survives JSON and nothing downstream wants tenths of a
+ *  millisecond, so it is floored here rather than in each reader. */
+function ms(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
+  return Math.floor(value);
+}
+
 function relayRefusal(refused: RelayRefusal, hint: string): WireResult {
   return { ok: false, refused, hint };
 }

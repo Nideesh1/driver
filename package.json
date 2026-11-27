@@ -36,9 +36,31 @@
     ],
     "e2e": "node --test e2e/*.spec.mjs"
   },
+  "//devDependencies": [
+    "`react`, `react-dom`, `jsdom` and their types are here -- in the WORKSPACE root,",
+    "deliberately, and not in packages/driverkit -- so that test/react-dom.test.ts can",
+    "render `driverkit/react` with the real thing. They must never move into the",
+    "package: `react` is an OPTIONAL PEER of what is published, no emitted file names",
+    "it, and dist/react is unreachable from dist/core. test/packaging.test.ts asserts",
+    "all three, and it asserts them against packages/driverkit/package.json and dist/,",
+    "so a renderer installed up here cannot weaken them. See REACT.md, `How the",
+    "optional peer is enforced`.",
+    "",
+    "Pinned exactly, like `playwright` and for the same reason: they are a test",
+    "harness, and a harness that drifts on its own turns someone else's release into",
+    "this repository's red build. The peer range is `>=18` because",
+    "`useSyncExternalStore` is an 18 API; what is pinned here is what the suite has",
+    "actually rendered, which is a 19."
+  ],
   "devDependencies": {
+    "@types/jsdom": "21.1.7",
     "@types/node": "^22.20.7",
+    "@types/react": "19.3.3",
+    "@types/react-dom": "19.3.0",
+    "jsdom": "26.1.0",
     "playwright": "1.65.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "typescript": "^5.9.2"
   },
   "dependencies": {

@@ -11,9 +11,18 @@ export {
   // would have been. Exported so a sink, a test or a redaction check can
   // recognise it rather than spell it out and eventually spell it differently.
   REDACTED,
+  // The reserved question verb's name and its one argument, and the default
+  // deadline on an answer. Exported so a host, a test or an eval harness can
+  // recognise the verb without spelling the string again -- and so the 45
+  // seconds is one number that `RelayOptions.timeoutMs` can be reasoned
+  // against rather than a literal buried in two files. See `MountOptions.ask`.
+  ASK,
+  ASK_QUESTION_ARG,
+  DEFAULT_ASK_TIMEOUT_MS,
 } from "./registry.ts";
 export type {
   Approval, ApprovalHook, ApprovalPolicy, ApprovalRequest,
+  AskAnswer, AskHook, AskQuestion,
   ArgSpec, AuditEvent, AuditHook, Budget, BudgetRecord, BudgetState, BudgetStore,
   CallOptions, Driver, DriverApproval,
   ElsewhereChannel, ElsewhereNotice, Manifest, MountOptions,

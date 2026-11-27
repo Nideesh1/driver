@@ -1389,11 +1389,34 @@ await check("backendThink posts to the real /api/chat and the widget says so", a
 let approver = () => true;
 const asked = [];
 
+/**
+ * What the person on the other side of the relay says, and what they were
+ * asked.
+ *
+ * The same shape as `approver` above and for the same reason: the interesting
+ * thing about the question channel is not that it exists in the page but that
+ * it is reachable FROM OUTSIDE and that every answer it can give is. A question
+ * that only worked in the widget would be half a feature shipped as a whole
+ * one, so the checks below drive all three answers down the wire.
+ *
+ * @type {(question: string) => unknown}
+ */
+let answerer = () => "the one at Acme";
+const questions = [];
+
 const connected = createApp(() => {}, {
   approve: (req) => {
     asked.push(req.name);
     return approver(req);
   },
+  ask: ({ question }) => {
+    questions.push(question);
+    return answerer(question);
+  },
+  // Under the relay's 60-second deadline by a wide margin, which is the whole
+  // point of there being a deadline at all -- see the check below. Short here
+  // so the suite does not sit for 45 seconds proving it.
+  askTimeout: 300,
 });
 let connection;
 let tabId = "";
@@ -1427,7 +1450,19 @@ await check("a tab connects to /dk and the relay lists it with a manifest", asyn
 
   const manifest = await getJson(`${BASE}/dk/tabs/${tabId}/manifest`);
   assert.equal(manifest.status, 200);
-  assert.equal(manifest.body.verbs.length, 18);
+  // NINETEEN HERE AND EIGHTEEN IN PROCESS, and the difference is the feature.
+  // This driver was mounted with an `ask` hook -- `connected` above wires one,
+  // because the question channel has to be reachable from outside or it is half
+  // a feature -- so the core adds its reserved `ask` verb, and the app the
+  // in-process checks use declares no hook and therefore has no such verb. That
+  // asymmetry is the additive promise as a number: an app that declares nothing
+  // new gets the manifest it had before this existed.
+  assert.equal(manifest.body.verbs.length, 19);
+  assert.equal(
+    manifest.body.verbs.filter((v) => v.kind === "ask").length,
+    1,
+    "the question verb is in the cached half, where an outside agent reads it",
+  );
   // The other half of the briefing argument, over the wire: an agent that
   // arrives here and never sees the widget still reads the app's own words,
   // and reads them once rather than in every snapshot.
@@ -1555,6 +1590,104 @@ await check("an outside call runs the verb and comes back with the count", async
     `snapshot after selecting ${out.body.count} rows: ${size} bytes ` +
       "(selected ids capped to the visible page — see the report)",
   );
+});
+
+// ---- the question channel, from outside ---------------------------------
+//
+// THE HALF THAT MAKES THIS A FEATURE RATHER THAN A WIDGET. The panel has a
+// person at a keyboard; an agent reaching a browser tab from another process
+// has no screen and may have nobody in front of it. These four checks are the
+// answer: the question surfaces in the tab, the relay call blocks on it, and
+// the three ways it can fail to be answered each come back as a FACT rather
+// than as the relay's `timeout`, which means nobody knows.
+
+await check("an outside agent can ask the person a question and gets their words back", async () => {
+  answerer = () => "the Ada Duarte at Acme Industrial";
+  questions.length = 0;
+  const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "ask",
+    args: { question: "which Ada Duarte did you mean?" },
+  });
+  assert.equal(out.status, 200);
+  assert.equal(out.body.ok, true, "an answered question is an ordinary ok");
+  // The answer is the call's own RESULT and not a side channel, which is what
+  // makes it work on this path for nothing: it rides in `note`, which the relay
+  // already carried and both renderers already printed.
+  assert.match(out.body.note, /the person answered: "the Ada Duarte at Acme Industrial"/);
+  assert.deepEqual(questions, ["which Ada Duarte did you mean?"]);
+  assert.ok(out.body.snapshot, "a result must carry the screen after the call");
+  notes.push("relay ask: the person's words came back as the call's own note");
+});
+
+await check("a question nobody answers is ask-unanswered and never the relay's timeout", async () => {
+  // THE ONE THING THAT MAKES THE OUTSIDE PATH HONEST. The relay gives a call 60
+  // seconds and then says `timeout`, which PROTOCOL.md defines as outcome
+  // UNKNOWN -- so a question that outlived it would convert "nobody answered",
+  // which an agent can act on, into "nobody knows", over the one call where the
+  // truth was plainly knowable: no verb ran and no data moved. So the ask's own
+  // deadline sits under the relay's and the page answers first, every time.
+  answerer = () => new Promise(() => {});
+  const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "ask",
+    args: { question: "is anybody there?" },
+  });
+  assert.equal(out.status, 200);
+  assert.equal(out.body.ok, false);
+  assert.equal(out.body.refused, "ask-unanswered");
+  assert.notEqual(out.body.refused, "timeout");
+  assert.match(out.body.hint, /did not run/);
+  assert.ok(out.body.snapshot, "the page answered, so there is a screen to report");
+  notes.push("relay ask with nobody answering: ask-unanswered, with a screen, not timeout");
+});
+
+await check("an app that says there is nobody to ask says so, and it is not the same slug", async () => {
+  // The third answer, and the one an unattended deployment needs: a cron run or
+  // a tab with no panel. Kept apart from `ask-unanswered` because the repairs
+  // differ -- ask again, versus stop asking for the rest of this run -- which
+  // is the same discipline `approval-timeout` is kept apart from
+  // `declined-by-user` by.
+  answerer = () => ({ nobody: true });
+  const out = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "ask",
+    args: { question: "which one?" },
+  });
+  assert.equal(out.body.ok, false);
+  assert.equal(out.body.refused, "nobody-to-ask");
+  assert.match(out.body.hint, /stop asking/);
+});
+
+await check("a question answered yes over the relay still does not approve a commit", async () => {
+  // THE BYPASS THIS FEATURE IS SHAPED NOT TO BE, checked on the path where it
+  // would matter most: an outside agent with no person watching it asks "shall
+  // I accept these?", is told yes, and commits. The gate is asked anyway,
+  // because the core keeps no part of an answer -- there is no remembered yes
+  // for a commit to consult, so the separation is structural and not a policy
+  // somebody could relax.
+  answerer = () => "yes, accept them all";
+  asked.length = 0;
+  const answer = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "ask",
+    args: { question: "shall I accept the selected contacts?" },
+  });
+  assert.equal(answer.body.ok, true);
+  assert.deepEqual(asked, [], "a question is not a commit and is not put to the approver");
+
+  approver = () => "not until finance signs off";
+  const commit = await postJson(`${BASE}/dk/tabs/${tabId}/call`, {
+    name: "accept-selected",
+    plan: "whatever",
+  });
+  assert.equal(commit.body.ok, false);
+  // Refused for the plan, or declined by the gate, depending on what the
+  // selection is doing by now -- either way the commit did NOT run on the
+  // strength of a yes typed into a question box, which is the claim.
+  assert.ok(
+    ["declined-by-user", "stale-plan"].includes(commit.body.refused),
+    `a commit went through on an answered question: ${commit.body.refused}`,
+  );
+  approver = () => true;
+  answerer = () => "the one at Acme";
+  notes.push("relay: an answered yes authorised nothing; the gate was asked anyway");
 });
 
 await check("a refusal from the app is 200 with ok:false, not a 4xx", async () => {

@@ -718,8 +718,26 @@ async function runOne(
   // `rev` is ours unless the verb claimed the name, in which case it is an
   // ordinary argument and goes through untouched. Mirrors the MCP server.
   const args: Record<string, Scalar> = { ...call.args };
+
+  // NEITHER CLAIM IS OFFERED ON AN `ask`, AND NEITHER IS HONOURED HERE.
+  //
+  // `verbTool` leaves both properties off a question's schema -- a question
+  // acts on no screen, so there is nothing for it to be stale about -- and this
+  // is the other half of that. A model volunteering a `rev` it was told to
+  // quote would otherwise have its question refused `stale` because the person
+  // clicked a row while it was being composed, which is the likeliest thing in
+  // the world when they are sitting right there, and a question refused for a
+  // reason that has nothing to do with the question teaches a model not to ask.
+  // So the keys are dropped: not hoisted into a claim, and not left behind to
+  // become an argument the core has never heard of. Mirrors the MCP server.
+  const asking = verb.kind === "ask";
+  if (asking) {
+    delete args.rev;
+    delete args.screen;
+  }
+
   let rev: number | undefined;
-  if (!(verb.args && "rev" in verb.args)) {
+  if (!asking && !(verb.args && "rev" in verb.args)) {
     const raw = args.rev;
     delete args.rev;
     const hoisted = readRev(raw);
@@ -755,7 +773,7 @@ async function runOne(
   // it declared one: `go(screen)` is a real verb in a real app, and the app's
   // meaning wins over ours.
   let screen: string | undefined;
-  if (!(verb.args && "screen" in verb.args)) {
+  if (!asking && !(verb.args && "screen" in verb.args)) {
     const raw = args.screen;
     delete args.screen;
     const hoisted = readScreen(raw);

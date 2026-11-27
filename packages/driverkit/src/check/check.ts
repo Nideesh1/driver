@@ -159,7 +159,13 @@ export async function checkDriver(driver: Driver, options: CheckOptions = {}): P
   // of what a wrong call costs you, cheapest first. Not the manifest's order:
   // an app whose first verb is `accept-selected` would otherwise have its
   // whole check run against a table that had already been emptied.
-  const order = { read: 0, describe: 1, commit: 2, undeclared: 3 } as const;
+  // `ask` is in here only so the sort has a number for it; the loop below
+  // skips every ask verb before it could be called. It sits at the cheap end
+  // because that is where an uncallable verb does least harm if the skip ever
+  // goes missing -- which would be a checker that stopped to ask somebody a
+  // question, and a checker is run by a test or a CLI with nobody in front of
+  // it.
+  const order = { ask: 0, read: 1, describe: 2, commit: 3, undeclared: 4 } as const;
   const verbs = [...manifest.verbs].sort(
     (a, b) => order[a.kind ?? "undeclared"] - order[b.kind ?? "undeclared"],
   );
@@ -209,6 +215,20 @@ export async function checkDriver(driver: Driver, options: CheckOptions = {}): P
       skipped.push({
         verb: verb.name,
         why: "a commit, and `options.commits` is off. `rev-did-not-move` is the check this costs you",
+      });
+      continue;
+    }
+    if (verb.kind === "ask") {
+      // NEVER CALLED, and this is the one skip in here that is about the person
+      // rather than about the app. `ask` puts a question in front of somebody
+      // and holds the driver's lock until they answer; a checker is run by a
+      // CLI, a test or CI, where the honest answer is that nobody is there, so
+      // calling it would either interrupt a person who did not ask to be
+      // interrupted or park the whole check on the ask deadline. There is also
+      // nothing here to check: the verb's body is the core's, not the app's.
+      skipped.push({
+        verb: verb.name,
+        why: "a question for the person, and nobody is watching a check run",
       });
       continue;
     }

@@ -185,6 +185,12 @@ export async function dryRun(
       );
     }
 
+    // A case with `asks: true` IS watching the ask verb, so it counts as
+    // mentioning it. Without this the summary listed `ask` under "verbs no case
+    // mentions" while two cases were asserting against it, which is the one
+    // line in the dry run somebody reads to find out what nothing is watching.
+    if (c.expect.asks && askVerb) mentioned.add(askVerb);
+
     if (c.expect.asks && !askVerb) {
       warnings.push(
         `${where}: expects the agent to ASK, and this manifest has no ask verb. The case will ` +

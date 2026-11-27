@@ -899,8 +899,10 @@ class Relay:
                 self._push(tab)
             # `delivered`, and nothing more. The tab answered; what it
             # answered is the driver's own record to make, in the process where
-            # it was decided.
-            self._settle(pending, dict(result), "delivered")
+            # it was decided. The tab's own elapsed time rides along on the
+            # answer and is NOT in the record: see :func:`_timed`, and
+            # :meth:`_audit` for the argument.
+            self._settle(pending, _timed(result, frame), "delivered")
             return _accepted()
 
     # ---- the agent's end ---------------------------------------------------
@@ -1183,6 +1185,17 @@ class Relay:
         both logs must not have to convert one. A throw goes to ``on_error``,
         where everything else this relay cannot help goes: a 500 because the
         logging backend is down would turn an audit trail into an outage.
+
+        THE TAB'S OWN ``tookMs`` IS DELIBERATELY NOT HERE, although the relay
+        now carries one to the agent. It is a figure measured in another
+        process, and copying somebody else's measurement into this record is the
+        same mistake as copying their verdict: ``outcome`` says ``delivered``
+        rather than ``ok`` because "a relay logging ``ok`` for a call whose tab
+        died mid-commit asserts an outcome nobody observed", and a duration the
+        relay cannot check is in that category. It would also invite the one
+        subtraction nobody should make: ``ms - tookMs`` is not "the network", it
+        is the network plus however long the frame sat in the tab's event loop
+        plus whatever a proxy buffered.
         """
         if self._on_audit is None:
             return
@@ -1255,6 +1268,67 @@ class Relay:
 
 
 # --- small helpers ----------------------------------------------------------
+
+
+def _timed(result: Mapping[str, Any], frame: Mapping[str, Any]) -> dict[str, Any]:
+    """The tab's answer, plus the two timing fields the tab sent beside it.
+
+    THE RELAY DOES NOT MEASURE, AND MUST NOT. It has one number of its own —
+    the round trip it held the call open for, which is in the audit record —
+    and that number is the network out, plus the tab's work, plus any question
+    the page put to a person, plus the network back. Substituting it for a
+    missing ``tookMs`` would hand an agent exactly the sum ``tookMs`` exists to
+    take apart. So this copies, validates and otherwise has no opinion, the
+    same restraint ``rev``, ``screen``, ``plan`` and ``focus`` get on their way
+    through.
+
+    WHY THE KEYS ARE STRIPPED FIRST. They are reserved on this body.
+    ``result`` is what the APP returned, and an app that filled in ``tookMs``
+    itself would be making a claim about its own speed where the agent is
+    entitled to an observation — so a value found in there is dropped and only
+    the frame's own field, written by the page-side harness around its one call
+    into the driver, is forwarded. The copy is shallow and touches nothing
+    else: every other field of the ``result``, a ``stale`` hint and the
+    snapshot included, is forwarded byte for byte as before.
+
+    ABSENT MEANS UNKNOWN. A tab from before this existed, or one that cannot
+    say honestly, sends nothing, and nothing is what the agent gets: never a
+    zero, which every client would render as "instant". A figure that is not a
+    finite number at or above zero is dropped on the way through, the rule
+    ``Tab.from_dict`` already has for a ``focus`` that is not a string.
+
+    Behaviourally identical to the TypeScript relay's ``timed``, field for
+    field and name for name, by the standing promise that governs both files.
+    """
+    out = dict(result)
+    out.pop("tookMs", None)
+    out.pop("waitedMs", None)
+    took = _ms(frame.get("tookMs"))
+    if took is not None:
+        out["tookMs"] = took
+        # Only beside a `tookMs`, never on its own. `waitedMs` is defined as
+        # the amount already subtracted from it, so without one it is a
+        # quantity relative to nothing — and a reader might well subtract it a
+        # second time.
+        waited = _ms(frame.get("waitedMs"))
+        if waited is not None:
+            out["waitedMs"] = waited
+    return out
+
+
+def _ms(value: Any) -> int | None:
+    """A duration off the wire, or None for anything that is not one.
+
+    ``bool`` is excluded explicitly, as everywhere else in this package that
+    reads a number off JSON: ``True`` is an ``int`` in Python and
+    ``tookMs: true`` is not a measurement. Whole milliseconds, because a float
+    survives JSON and nothing downstream wants tenths of a millisecond.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")) or value < 0:
+        return None
+    return int(value)
 
 
 def bad_request(status: int, hint: str, error: str = "bad-request") -> Response:

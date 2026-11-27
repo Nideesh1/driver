@@ -109,6 +109,7 @@ So a verb declares what it does to the world:
 | `read` | changes no data and reports no count. Navigation is a read |
 | `describe` | changes what is **selected**, changes no data, reports a `count` |
 | `commit` | changes data. `reversible: true` says the app can undo it |
+| `ask` | puts a question to the **person** and hands back their answer. Only the core mints it |
 
 `read` does not promise that nothing changes, because the commonest verb in a
 multi-screen app moves the person's screen out from under them. The two
@@ -135,6 +136,51 @@ model in plain words rather than capitals. Changing a page size and accepting
 3,412 contacts were both just `commit`, so both got the same shouted banner —
 and a banner that fires on a page size is a banner a model learns to read past,
 the same way a person learns to click Yes without reading.
+
+## When it does not know, it can ask
+
+`approve` is a gate: the person can stop the agent. It is not a channel — the
+person could say no and the agent could not say anything. So an agent that met
+an ambiguous instruction had two moves: guess, or give up. "Select the contact
+called Ada Duarte", and five people in the demo's data are called that; picking
+one is wrong even when it picks the one you meant, because it did not know.
+
+It is the same argument `declined-by-user` rests on, one level up. A model that
+cannot tell "the person said no" from "your arguments were wrong" retries with
+different arguments. **A model that cannot ask will guess.**
+
+```ts
+let panel: Widget;
+const driver = mount({
+  …,
+  ask: ({ question }) => panel.question({ question }),   // the one function the core cannot write
+  budget: { asks: 5 },                                    // a ceiling on the person's patience
+});
+panel = mountWidget(driver, { think });
+```
+
+The person's answer comes back as **the call's own result** — `ok — the person
+answered: "the one at Acme"` — so it reads where every other outcome reads, and
+it works the same whether the agent is the panel in the corner or a process on
+the other side of the relay. There are three different ways there is no answer,
+because there are three different next moves: `ask-unanswered` (put in front of
+somebody, and ignored — ask again, shorter), `nobody-to-ask` (nobody is there at
+all — stop asking) and `asks-spent` (the allowance is gone — say in your answer
+what you would have asked). Collapsing those is the same mistake as reporting a
+lapsed approval as a refusal.
+
+**An answered question is not consent.** A commit after one still goes to
+`approve` and can still come back `declined-by-user`. The core keeps no part of
+an answer, so there is nothing for a later call to consult: an agent cannot ask
+"shall I accept these 3,412?", read a yes, and spend it at the gate. That is
+structural rather than a rule, which matters because the shape of the bug is
+common — a framework whose auto-added sub-agent inherits the parent's tools has
+an approval gate that delegation walks around.
+
+Asking is not free, which is why it is budgeted: each question costs a round
+trip and somebody's attention, and an agent that is confused can ask repeatedly
+instead of thinking once. Nothing else on the driver runs while a question is
+open.
 
 ## What the agent sees
 

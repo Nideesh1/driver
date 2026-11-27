@@ -23,8 +23,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
 from driverkit import Driverkit, Manifest
-from driverkit.types import VerbSpec
+from driverkit.types import Result, VerbSpec
 from driverkit.mcp_core import TabTools
+from driverkit.mcp_core import instructions_for
 from driverkit.mcp_server import (
     LIST_TABS,
     PROTOCOL_VERSION,
@@ -1342,3 +1343,121 @@ class AConditionalStepAndThePlanHandoff(unittest.TestCase):
         text = instructions_for(Manifest.from_dict(plain))
         self.assertNotIn("OPTIONAL", text)
         self.assertIn("it did not expect — then say so.\n\n`prune-a-descent`", text)
+
+
+class TheQuestionVerb(unittest.TestCase):
+    """The ``ask`` verb, as an MCP client's agent reads it.
+
+    The verb is the core's and is synthesised from ``MountOptions.ask``, so
+    nothing in Python implements it -- but everything an outside agent LEARNS
+    about it comes from this half: the kind note, the schema, and the paragraph
+    in the server instructions. A verb the widget's model is told costs a
+    person's attention and this half is told nothing about is the same verb
+    being described two ways, which is what both renderers exist not to do.
+    """
+
+    def setUp(self) -> None:
+        self.manifest = TheQuestionVerb._with_ask()
+        self.tools = tools_for(self.manifest)
+
+    def test_the_fourth_kind_survives_the_manifest_round_trip(self):
+        # ``Manifest.from_dict`` drops a kind it does not recognise -- "a word
+        # this code does not know is a manifest from a newer library" -- so a
+        # Python half that had not learned the fourth kind would silently
+        # describe a question as a verb that made no safety claim at all.
+        self.assertEqual(self.manifest.verb("ask").kind, "ask")
+
+    def test_asking_is_not_described_as_free(self):
+        # ``read`` says "free to call, free to get wrong" and that sentence is
+        # false of a question: it costs the person's attention, the app may cap
+        # how many you get, and nothing else runs while one is open. Describing
+        # a question as a read is the one wrong answer that teaches an agent to
+        # ask instead of thinking.
+        description = tool(self.tools, "ask")["description"]
+        self.assertIn("ASK:", description)
+        self.assertIn("NOT free", description)
+        self.assertNotIn("READ-ONLY", description)
+
+    def test_an_answer_is_said_not_to_be_permission(self):
+        # The single most likely misuse: ask "shall I accept these 3,412?",
+        # read a yes, and treat it as the consent the approval gate exists to
+        # collect. It is in the CACHED half because a model that learns it from
+        # a refusal has already interrupted somebody for permission it was never
+        # going to get.
+        description = tool(self.tools, "ask")["description"]
+        self.assertIn("An answer is not permission", description)
+
+    def test_a_question_is_offered_no_rev_and_no_screen(self):
+        # The one exception to hoisting the two claims onto every verb. A
+        # question acts on no screen, so there is nothing for it to be stale
+        # about -- and the instructions tell a model to quote the rev it is
+        # acting on, so a model that has read them WILL send one. Then the
+        # question is refused `stale` because the person clicked a row while it
+        # was being composed, which is the likeliest thing in the world when
+        # they are sitting right there.
+        schema = tool(self.tools, "ask")["inputSchema"]
+        self.assertEqual(sorted(schema["properties"]), ["question"])
+        # Every other verb still gets both.
+        other = tool(self.tools, "accept-selected")["inputSchema"]["properties"]
+        self.assertIn("rev", other)
+        self.assertIn("screen", other)
+
+    def test_the_instructions_tell_an_outside_agent_to_ask_rather_than_guess(self):
+        # And only for an app that can: a model told to ask, in an app with no
+        # way to ask, has been told to do something it cannot do -- and the
+        # paragraph would be paid for in the cached prefix of every session of
+        # every user of every app that never adopted the feature.
+        text = instructions_for(self.manifest)
+        self.assertIn("ASK INSTEAD OF GUESSING", text)
+        self.assertIn("never permission", text)
+        # The three slugs, each with its own repair, and the transport
+        # `timeout` named as none of them -- which is the distinction this path
+        # has and the in-page one does not.
+        for slug in ("ask-unanswered", "nobody-to-ask", "asks-spent"):
+            self.assertIn(slug, text)
+        self.assertIn("nobody knows whether the question was even seen", text)
+        self.assertNotIn("ASK INSTEAD OF GUESSING", instructions_for(Manifest.from_dict(MANIFEST)))
+
+    def test_a_rev_an_agent_sends_anyway_is_dropped_rather_than_turned_into_a_claim(self):
+        # The other half of leaving the properties off the schema, and it has to
+        # be here as well: a client that ignores `additionalProperties: false`,
+        # or an agent driving the tools by hand, must not have its question
+        # refused for a staleness claim it did not mean to make. Dropped and not
+        # forwarded -- and not left in `args` either, where the core would see an
+        # argument the verb never declared.
+        sent: dict = {}
+
+        class Stub:
+            def manifest(self, tab):  # noqa: ANN001, ANN201
+                return TheQuestionVerb._with_ask()
+
+            def call(self, tab, name, args, rev=None, screen=None, plan=None):  # noqa: ANN001, ANN201
+                sent.update(name=name, args=dict(args), rev=rev, screen=screen)
+                return Result.from_dict(
+                    {
+                        "ok": True,
+                        "note": 'the person answered: "the first"',
+                        "snapshot": {"where": "descents", "rev": 1, "rows": []},
+                    }
+                )
+
+        tools = TabTools(Stub(), TAB)
+        out = tools.call("ask", {"question": "which one?", "rev": 999, "screen": "elsewhere"})
+        self.assertIsNone(sent["rev"])
+        self.assertIsNone(sent["screen"])
+        self.assertEqual(sent["args"], {"question": "which one?"})
+        self.assertIn("the person answered", out.text)
+
+    @staticmethod
+    def _with_ask() -> Manifest:
+        manifest = dict(MANIFEST)
+        manifest["verbs"] = [
+            *MANIFEST["verbs"],
+            {
+                "name": "ask",
+                "kind": "ask",
+                "describe": "ask the person a question",
+                "args": {"question": {"type": "string", "describe": "what to ask"}},
+            },
+        ]
+        return Manifest.from_dict(manifest)

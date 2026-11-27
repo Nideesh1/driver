@@ -100,5 +100,14 @@ export interface ReactRuntime {
   useRef<T>(initial: T): { current: T };
   useEffect(effect: () => void | (() => void), deps?: readonly unknown[]): void;
   useMemo<T>(factory: () => T, deps?: readonly unknown[]): T;
-  useCallback<T>(fn: T, deps?: readonly unknown[]): T;
+  // NO `useCallback`. It used to be here, unused by this area, and it was a
+  // compile error in the adopter's own `createDriverPanel(React)` line: React
+  // types it `<T extends Function>(callback: T, deps: DependencyList) => T`,
+  // which does not satisfy a `<T>(fn: T, deps?) => T` that accepts any `T` at
+  // all. That is the cost of a structural interface written against types
+  // nobody in this repository could resolve, and it is exactly the kind of
+  // thing "the narrowest set that works" above is a defence against: a member
+  // this file does not call cannot be checked by anything, and this one was
+  // wrong. `test/react-dom.test.ts` now assigns React's own namespace to this
+  // interface, so `tsc` answers the question rather than the prose.
 }

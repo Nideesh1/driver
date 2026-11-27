@@ -88,6 +88,28 @@ const app = createApp(
     // tells it the outcome is unknown. An app whose approver is on a phone, or
     // whose gate is a webhook, sets one.
     approve: (req) => panel.approve(req),
+    // THE CHANNEL, as against the gate above. `approve` lets the person stop
+    // the agent; this lets the agent ask the person something, which is the
+    // other direction and was the gap. An instruction like "select the contact
+    // called Ada Duarte" names five different people in this fixture, and
+    // without this line the agent's only moves were to pick one -- wrong even
+    // when it picks the one you meant, because it did not know -- or to give
+    // up.
+    //
+    // Wired here rather than adopted by the panel, and that is not an
+    // inconsistency with `approve`: the `ask` verb has to be in the manifest
+    // from `mount()`, because `system` and `tools` are byte-identical on every
+    // turn so the prompt prefix stays cached, and a verb that appeared when a
+    // panel mounted would be a tool list changing underneath a running
+    // conversation. So an app that may ever want to ask says so in its own
+    // source. The forward reference to `panel` is the same one `approve` uses
+    // above and for the same reason.
+    //
+    // No `askTimeout` here: the core's 45 seconds is already under the relay's
+    // 60, which is what keeps "nobody answered" a fact rather than the relay's
+    // "nobody knows", and somebody driving this demo by hand answers in
+    // seconds.
+    ask: (question) => panel.question(question),
     // CROSS-TAB STALENESS, AND WHY THIS DEMO NEEDS IT MOST. Every tab of this
     // page builds its own 3,412 contacts, so two tabs are two stores over what
     // a real app would call one backend. Accept 403 rows in one tab and the

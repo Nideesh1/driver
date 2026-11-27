@@ -192,6 +192,21 @@ export interface DriverPanelProps {
 }
 
 /**
+ * One store, and the mounted components holding it.
+ *
+ * `holds` is why this is an object rather than two refs: the hook's cleanup
+ * and its next mount have to agree about whether anybody still wants the
+ * store, and the cleanup closes over the holding it was mounted with — which
+ * is also what makes a `driver` change tear down the right store rather than
+ * the current one.
+ */
+interface Holding {
+  driver: Driver;
+  store: PanelStore;
+  holds: number;
+}
+
+/**
  * Visually hidden and still read aloud.
  *
  * Inline rather than a stylesheet because this area ships no CSS at all — a
@@ -244,17 +259,55 @@ export function createDriverPanel(react: ReactRuntime): {
    * reason. A host that genuinely needs new options re-keys the component.
    */
   function useDriver(driver: Driver, options: PanelOptions): Driving {
-    const held = react.useRef<{ driver: Driver; store: PanelStore } | null>(null);
+    // Forces one re-render, for the single case the effect below cannot repair
+    // on its own: a mount onto a store that has already been torn down.
+    const [, revive] = react.useState(0);
+    const held = react.useRef<Holding | null>(null);
     if (held.current === null || held.current.driver !== driver) {
-      held.current?.store.destroy();
-      held.current = { driver, store: createPanelStore(driver, options) };
+      // The outgoing store is NOT destroyed here. Render must not tear
+      // anything down: React may double-invoke this function, or throw the
+      // render away entirely, and `destroy` aborts a run and lapses an open
+      // question — the two things that must not happen speculatively. The
+      // effect below owns the teardown, and a `driver` change reaches it as a
+      // changed dependency.
+      held.current = { driver, store: createPanelStore(driver, options), holds: 0 };
     }
-    const store = held.current.store;
+    const holding = held.current;
+    const store = holding.store;
 
-    // The run is aborted and any open question is answered `lapsed` on
-    // unmount. Not `denied`: nobody refused it, and the record must not say
-    // somebody did. See `store.ts`.
-    react.useEffect(() => () => store.destroy(), [store]);
+    // The run is aborted and any open question is answered `lapsed` when the
+    // last holder goes. Not `denied`: nobody refused it, and the record must
+    // not say somebody did. See `store.ts`.
+    //
+    // WHY THIS IS A RETAIN COUNT AND A DEFERRED TEARDOWN rather than the one
+    // line it looks like it should be. `destroy` is final — it clears the
+    // listeners and latches the store closed, so `ask` returns immediately
+    // afterwards. React mounts an effect, runs its cleanup and mounts it again
+    // in StrictMode, which is how every React app runs in development, and a
+    // plain `return () => store.destroy()` therefore kills the store during
+    // mount and leaves the adopter a panel whose composer does nothing. That
+    // was real: it is what this hook did, and it was invisible here until
+    // there was a React to render it with. So the cleanup gives up its hold
+    // and defers the decision past the synchronous remount; only a hold count
+    // that is still zero one microtask later is an unmount.
+    react.useEffect(() => {
+      if (holding.store.destroyed()) {
+        // A remount onto a torn-down store — a hide and a re-show far enough
+        // apart that the microtask already ran. Nothing can revive the store,
+        // so build another one; the conversation is gone either way, because
+        // the panel was not on screen.
+        held.current = null;
+        revive((n) => n + 1);
+        return;
+      }
+      holding.holds += 1;
+      return () => {
+        holding.holds -= 1;
+        queueMicrotask(() => {
+          if (holding.holds === 0) holding.store.destroy();
+        });
+      };
+    }, [holding]);
 
     const snapshot = react.useSyncExternalStore(
       store.subscribe,
@@ -315,19 +368,41 @@ export function createDriverPanel(react: ReactRuntime): {
     );
 
   /**
-   * The receipt's status line, remounted on every phase change.
+   * The receipt's status line: one region that stays, and a line inside it
+   * that is replaced on every phase change.
    *
-   * Two things make this work and both are easy to lose in a refactor. The
-   * `key` carries the phase, so React unmounts the old node and mounts a new
-   * one — a `role="status"` whose text is merely updated is re-announced by
-   * some screen readers and silently ignored by others, and a remount is
-   * announced by all of them. And focus moves here the first time the phase
-   * leaves `asking`, so somebody who pressed a button lands on the answer
-   * rather than on whatever followed the buttons that have just gone.
+   * THE STRUCTURE IS THE POINT, and the first version of it had it inside out,
+   * so the reasoning is written down rather than implied. The region itself —
+   * the `role="status"`, which is also the focus target — is mounted once,
+   * when the phase leaves `asking`, and then stays. Only the line inside it is
+   * keyed on the phase, so each new verdict replaces a node rather than
+   * mutating the text of one.
    *
-   * Focus is moved only on that transition, never on a later one: a receipt
-   * that stole focus again when the app's verdict arrived would yank somebody
-   * out of the message they had started typing.
+   * Three things follow, and the earlier shape (the key on this component, so
+   * that the whole region remounted) got two of them wrong:
+   *
+   *   **Focus moves once.** It moves here the first time the phase leaves
+   *   `asking`, so somebody who pressed a button lands on the answer rather
+   *   than on whatever followed the buttons that have just gone — and never
+   *   again, because a receipt that stole focus when the app's verdict
+   *   arrived a moment later would yank somebody out of the message they had
+   *   started typing. A remounting region made that promise false twice over:
+   *   the `moved` ref died with the old node so the move ran again on every
+   *   phase, and had it not, the node holding focus would have been removed
+   *   from the document and the focus dropped to `<body>`. Both were real and
+   *   both are now tested — see `test/react-dom.test.ts`, which is the first
+   *   thing in this repository to render this file with React.
+   *
+   *   **The announcement still happens.** A live region is announced when its
+   *   contents change while it is in the document; a region inserted together
+   *   with its text is the case screen readers most often miss. Keeping the
+   *   region and replacing the line inside it is therefore the more reliable
+   *   of the two shapes, not a concession — and the `key` is still
+   *   load-bearing, because it is what makes the line a new node instead of an
+   *   updated one.
+   *
+   *   **`data-phase` is on the region**, where a stylesheet and a test can
+   *   find it without caring which node holds the words.
    */
   const ReceiptStatus: Component<{ entry: ApprovalEntry; decided: boolean }> = ({
     entry,
@@ -340,17 +415,20 @@ export function createDriverPanel(react: ReactRuntime): {
       moved.current = true;
       node.current?.focus?.();
     }, [decided]);
-    return h("div", {
-      ref: node,
-      // -1 so it can be focused programmatically and is not a tab stop. The
-      // receipt is a record, not a control.
-      tabIndex: -1,
-      role: "status",
-      className: "dk-ask-said",
-      "data-dk": "receipt",
-      "data-phase": entry.phase,
-      children: receiptLine(entry),
-    });
+    return h(
+      "div",
+      {
+        ref: node,
+        // -1 so it can be focused programmatically and is not a tab stop. The
+        // receipt is a record, not a control.
+        tabIndex: -1,
+        role: "status",
+        className: "dk-ask-said",
+        "data-dk": "receipt",
+        "data-phase": entry.phase,
+      },
+      h("span", { key: entry.phase, className: "dk-ask-line" }, receiptLine(entry)),
+    );
   };
 
   /**
@@ -470,7 +548,10 @@ export function createDriverPanel(react: ReactRuntime): {
                   ),
                 ),
           )
-        : h(ReceiptStatus, { key: entry.phase, entry, decided: true }),
+        : // NO `key` on this: the region must not remount when the phase
+          // moves on. The keyed node is the line inside it. See
+          // `ReceiptStatus`.
+          h(ReceiptStatus, { entry, decided: true }),
       entry.note === undefined || entry.note === ""
         ? null
         : h("div", { className: "dk-ask-noted" }, `You noted: ${entry.note}`),
@@ -507,9 +588,13 @@ export function createDriverPanel(react: ReactRuntime): {
    * One short sentence about what the run is doing, for somebody who cannot see
    * the buttons change.
    *
-   * Keyed on the state so it remounts and re-announces, and rendered only
-   * while a run is in flight: a status region that said "running" to an idle
-   * panel would be announcing the absence of news.
+   * Rendered only while a run is in flight: a status region that said
+   * "running" to an idle panel would be announcing the absence of news.
+   *
+   * Same shape as `ReceiptStatus` and for the same reason: the region stays
+   * mounted and the sentence inside it is keyed, so each change replaces a
+   * node in a region that was already in the document. A live region inserted
+   * with its text already in it is the case screen readers most often miss.
    */
   const RunAnnouncer: Component<{ driving: Driving }> = ({ driving }) => {
     const said =
@@ -518,12 +603,11 @@ export function createDriverPanel(react: ReactRuntime): {
         : driving.runState === "awaiting-approval"
           ? "Waiting for you"
           : "Run continuing";
-    return h("div", {
-      key: said,
-      role: "status",
-      style: SR_ONLY,
-      children: driving.busy ? said : "",
-    });
+    return h(
+      "div",
+      { role: "status", style: SR_ONLY },
+      h("span", { key: said }, driving.busy ? said : ""),
+    );
   };
 
   const RunControlsBar: PanelComponents["RunControlsBar"] = ({ driving }) => {

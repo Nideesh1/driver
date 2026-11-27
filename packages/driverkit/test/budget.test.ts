@@ -93,6 +93,9 @@ test("no budget means no ceiling, and an app mounted without one is untouched", 
   assert.deepEqual(driver.budget!(), {
     calls: { used: 200 },
     commits: { used: 0 },
+    // Reported although this app cannot ask at all, by the rule the two above
+    // follow: a panel renders one shape whatever the app declared.
+    asks: { used: 0 },
   });
 });
 
@@ -108,6 +111,7 @@ test("a run under the limit is not affected by the limit existing", async () => 
   assert.deepEqual(driver.budget!(), {
     calls: { used: 3, limit: 10 },
     commits: { used: 1, limit: 5 },
+    asks: { used: 0 },
   });
 });
 

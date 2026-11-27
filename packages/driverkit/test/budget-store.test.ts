@@ -282,7 +282,11 @@ test("the stored record carries counts and dates and nothing about what was done
   await driver.call("look", { q: "the person's own words" });
   await driver.call("accept");
   const record = JSON.parse(storage.items.get(budgetKey("Contacts"))!);
-  assert.deepEqual(Object.keys(record).sort(), ["calls", "commits", "since"]);
+  // `asks` joined the three when questions became countable, and it is the same
+  // privacy class as the two counters beside it: how MANY questions, never what
+  // any of them was, and never a word of what was answered.
+  assert.deepEqual(Object.keys(record).sort(), ["asks", "calls", "commits", "since"]);
+  assert.equal(record.asks, 0);
   assert.equal(record.calls, 2);
   assert.equal(record.commits, 1);
   assert.doesNotMatch(storage.items.get(budgetKey("Contacts"))!, /own words|accept|look/);

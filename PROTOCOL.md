@@ -241,7 +241,8 @@ forwards, all of them cacheable for the life of the app:
 ```json
 { "t": "result", "tab": "7f3a-...", "id": "c-17",
   "result": { "ok": true, "count": 3412, "plan": "dkp1.7.1.4c1f8a20b3de",
-              "snapshot": {...} } }
+              "snapshot": {...} },
+  "tookMs": 2100 }
 ```
 
 `result.plan` is the plan token, present only on a `describe` that reported a
@@ -252,6 +253,66 @@ behind. A client stores it and sends it back on the commit; it is **opaque** and
 nothing but the core that minted it reads anything out of it, which is also why
 no relay can check it. A relay forwards the whole `result` untouched, so nothing
 is required of it here beyond not stripping unknown fields.
+
+`tookMs` is **how long the tab's own work took, with any person's time already
+taken out of it**, in whole milliseconds. It is the one duration anybody in this
+system can state honestly, and it exists because the figure an agent on the
+outside could otherwise compute — its own round trip — is three things added
+together: the network out, the tab's work, any question the page put to a
+person, and the network back. A model told "this call took 40 seconds" when 38
+of them were somebody reading a confirmation goes looking for a faster route
+around a verb that is not slow.
+
+`waitedMs` is the person's time, as the amount that was **subtracted** from
+`tookMs`, and it is here so that the gap between a round trip and `tookMs` is
+accounted for rather than guessed at. Omitted, or `0`, when nobody was waited
+on. It is never added back: a client rendering a duration for a model renders
+`tookMs` and nothing else.
+
+**Only the tab may originate either one**, exactly as with `focus`, and for the
+same reason: the measurement is taken around the one call the tab makes into its
+own driver, and nothing outside the page can see where that call started or
+ended. **A relay must not compute, estimate, substitute or fill in either
+field.** In particular it must not offer its own round trip in place of a
+missing `tookMs` — that number is the sum this field exists to take apart — and
+it must not derive one from the other. It carries them, as it carries `rev` and
+`focus`, and has no opinion.
+
+**Absent is UNKNOWN, and never `0` and never "fast".** A tab from before this
+existed, a hand-written `fetch` loop, or a tab that cannot say honestly says
+nothing, and a client that read silence as zero would report every such app as
+instant. A client renders no duration at all for an absent `tookMs`. A relay
+must not fill the field in; a number that is not a finite number at or above
+zero is dropped on the way through, the same rule `focus` has for a value that
+is not a string.
+
+**A tab must omit `tookMs` rather than send one it cannot vouch for.** The
+measurement is around the call into the driver, so anything the page does to a
+person inside that call is inside the number: a confirmation gate on a `commit`,
+and a verb like `ask` whose whole purpose is to put a question to somebody. A
+tab that cannot isolate such a wait must send no `tookMs` for that call. Silence
+means "nobody measured", which is true; a figure with a person in it is a false
+claim about the app, and it is the claim this field was added to prevent, so the
+two are not close to equally bad. A tab that CAN isolate it subtracts it and
+reports it as `waitedMs`.
+
+**A field, not a frame**, the rule `focus` established. A relay or a client
+written before this reads the same `result` frame it always read and ignores two
+keys, and a tab that sends nothing is a tab a new relay handles exactly as it
+did before.
+
+The relay's own audit record does **not** gain either field, and that is a
+decision rather than an oversight. The record is what the RELAY observed —
+`{at, ms, principal, tab, verb, outcome}`, where `ms` is the round trip it held
+the call open for and `outcome` is `delivered` rather than the tab's verdict,
+because "a relay logging `ok` for a call whose tab died mid-commit asserts an
+outcome nobody observed". `tookMs` is in exactly that category: a figure
+measured in another process, which the relay cannot check and would be copying.
+Logging it beside `ms` would also invite the subtraction nobody should make —
+`ms - tookMs` is not "the network", it is the network plus however long the
+frame sat in the tab's event loop plus whatever a proxy buffered. The duration
+belongs in the driver's own record, where it was measured, and in the answer the
+agent gets.
 
 **`snapshot`** — the page moved on its own, because a person clicked something.
 
@@ -587,6 +648,18 @@ even for a malformed frame from the tab. That is the one promise the endpoint
 makes, and a client that has to handle `undefined` as a third shape will handle
 it badly.
 
+**`tookMs` and `waitedMs` ride on the `/call` answer**, beside `ok`, and are the
+relay's copy of the two fields the tab sent on its `result` frame — see
+`result` above for what they mean and for the rules a relay is held to about
+them. They are **reserved keys on this body**: a relay sets them from the frame
+or omits them, and must not pass through a value it found inside the tab's
+`result` object. The distinction is the whole point of the field. The `result`
+is what the APP returned, and an app reporting its own speed would be a claim
+rather than an observation; these two are measured by the page-side harness
+around the one call it makes into the driver, and the agent has to be able to
+read the number as something nobody asked the app for. Everything else in the
+body is the tab's `result`, forwarded untouched as before.
+
 **Body size limit**: 1 MiB, and over it is `413`. A snapshot approaching that
 size is a bug in the app's `visible()`, not a limit to raise — the whole design
 says an agent sees a screenful.
@@ -651,8 +724,9 @@ The relay answers with a `WireResult` whose `snapshot` is **absent** and whose
 These three slugs, plus `stale`, `wrong-screen`, `stale-plan`, `unknown-verb`,
 `bad-argument`, `unmounted` and `threw` from the core, `declined-by-user`,
 `approval-pending` and `approval-timeout` from the core's approval gate,
-`budget-spent` from the core's cost ceiling, and `changed-elsewhere` from its
-cross-tab check, are
+`budget-spent` from the core's cost ceiling, `changed-elsewhere` from its
+cross-tab check, and `ask-unanswered`, `nobody-to-ask` and `asks-spent` from
+its question verb, are
 **reserved**. (`wrong-screen` is the core's answer
 to a call aimed at a screen the app is not on — either because the verb declared
 a `screen` of its own and the live one is something else, or because the call
@@ -736,6 +810,32 @@ what got through — and the `hint` names which one is spent along with both
 numbers. An agent that reads this should report progress and stop; a client
 should show the person that a limit was reached rather than a run that appears
 to have died.
+
+**The three question slugs are three facts, and an agent given one word for
+all of them keeps asking into an empty room.** `MountOptions.ask` adds a
+reserved `ask` verb whose result is the person's own answer; these are the
+three ways there is no answer, and each has a different repair, which is the
+only thing that earns a slug its own place on this list.
+
+| slug | means | the next move |
+|---|---|---|
+| `ask-unanswered` | the question was put in front of somebody and no answer came back | ask once more, shorter, if it is genuinely the one thing in the way |
+| `nobody-to-ask` | there is no person on this run at all — a scheduled job, a test, a tab with no panel. The question was never put | stop asking: decide from what is known, or say what could not be settled |
+| `asks-spent` | the app's `budget.asks` allowance is gone, so this one was never put | the same, for the rest of this run — and say in the final answer what you would have asked |
+
+All three say the verb was **not reached and nothing changed**, which is what
+keeps them apart from the relay's `timeout`. A question that outlived the
+relay's deadline would convert "nobody answered", which an agent can act on,
+into "nobody knows", over the one call where the truth was plainly knowable —
+so `MountOptions.askTimeout` defaults to 45 seconds, under the relay's 60, and
+a relay deadline lowered below it gives that honesty back. `asks-spent` is
+deliberately not `budget-spent`: that slug's whole justification is that its
+repair is no repair, and this one has a real one.
+
+**An answered question is not an approval, and a relay must not let it look
+like one.** An `ask` carries no consent: a `commit` that follows one still goes
+through the approval gate and can still come back `declined-by-user`. The core
+keeps no part of an answer, so there is nothing for a later call to consult.
 
 **`approval-timeout` is not `timeout` and the difference is the point.** The
 relay's `timeout` means the call was accepted and no answer came back, so the

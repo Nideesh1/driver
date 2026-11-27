@@ -293,6 +293,69 @@ export interface ConnectOptions {
    */
   focus?: boolean;
   /**
+   * Report how long this tab's own work took, on every `result` frame. On by
+   * default.
+   *
+   * WHAT IT FIXES. An agent in the page measures a verb by bracketing
+   * `driver.call()` and nothing else, which is why `took: ~2s` means the app
+   * there. An agent on the far side of the relay can measure only its own round
+   * trip -- network out, this tab's work, any question this page put to a
+   * person, network back -- and three of those four are not the app. So the
+   * figure is taken HERE, where the bracket can be the same one, and carried in
+   * the frame; see PROTOCOL.md on the `result` frame, and `renderDuration` for
+   * what is then rendered from it.
+   *
+   * Not `DriveOptions.timing`'s three words, because there is nothing to render
+   * on this side: this decides only whether the tab measures and says. A client
+   * decides what reaches a model, and an absent figure renders as nothing at
+   * all rather than as zero.
+   *
+   * On by default and in the same category as `focus`, `title` and `url`: a
+   * field only the careful adopters send is a field no client can rely on. It
+   * costs two clock reads and about fifteen bytes per call. `false` opts out
+   * entirely and the frames are exactly the bytes they were.
+   *
+   * It does NOT make this tab report a figure it cannot vouch for. A call that
+   * may have had a person inside it -- a gated `commit`, the `ask` verb -- is
+   * sent with no `tookMs` unless `waited` is wired up to say how long they
+   * took. See `canTime`.
+   */
+  timing?: boolean;
+  /**
+   * Total milliseconds this page has spent waiting on a PERSON, ever.
+   *
+   * The same contract as `DriveOptions.waited`, deliberately: monotonic,
+   * cumulative, and read before and after the call so the difference is what
+   * this one call spent on somebody. A counter that is diffed cannot be got
+   * wrong by a dialog that opens twice, and nothing here has to be told when a
+   * question was asked. A host that already passes a `waited` to `drive` or
+   * `mountWidget` passes the same function here.
+   *
+   * It buys two things. The person's time is subtracted from `tookMs`, so a
+   * 38-second confirmation around a 400ms commit reports the 400ms; and it is
+   * reported as `waitedMs`, so the gap between an agent's round trip and
+   * `tookMs` is accounted for rather than guessed at.
+   *
+   * Absent means the two calls this page cannot see inside -- a gated `commit`
+   * and `ask` -- report no duration at all rather than one with a person in it.
+   * That is the honest trade: silence says nobody measured, which is true,
+   * where a figure would make a false claim about the app's speed.
+   *
+   * WHAT IS STILL MISSING, stated rather than left to be discovered: a page
+   * that mounts the panel AND connects gets the panel's dialog as the core's
+   * approver, and `mountWidget` keeps that counter to itself -- it passes its
+   * own `waited` to `drive` and publishes it nowhere. So commits driven from
+   * OUTSIDE such a page report no duration until the widget hands its counter
+   * out, which is a change in `widget.ts` and not here. Until then the honest
+   * answer over the relay for those calls is the silence above, and a host that
+   * gates with its own dialog can wire this option today.
+   */
+  waited?: () => number;
+  /** The clock `timing` reads, defaulting to `Date.now`. Injectable for the
+   *  reason `DriveOptions.clock` is: a suite that pins it gets an exact figure
+   *  out of a timed call instead of whatever the machine was doing. */
+  now?: () => number;
+  /**
    * The document, defaulting to the global. Where `title`, `visibilityState`,
    * `hasFocus()` and `visibilitychange` come from.
    */
@@ -340,6 +403,11 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
       ? (globalThis as unknown as FocusEventsLike)
       : undefined);
   const wantsFocus = options.focus !== false;
+  const wantsTiming = options.timing !== false;
+  /** `options.now?.()` and never a detached `options.now ?? Date.now`, the rule
+   *  the loop's clock already follows: a method pulled off an object and called
+   *  bare loses its receiver, and a fake clock reading a private field throws. */
+  const nowMs = (): number => options.now?.() ?? Date.now();
 
   if (!ES) throw new Error("driverkit: no EventSource. Pass options.EventSource.");
   if (!post) throw new Error("driverkit: no fetch. Pass options.fetch.");
@@ -683,7 +751,109 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
     up(frame);
   }
 
+  /**
+   * The verb kinds this app declared, read off the manifest once.
+   *
+   * The manifest is the static half and is guaranteed not to vary between two
+   * calls, so this is cached rather than rebuilt per call -- but keyed on
+   * `version`, because a hand-written driver is free to be stranger than the
+   * core's and a stale map would decide `canTime` with yesterday's kinds.
+   */
+  let kinds: { version: string; of: Map<string, string | undefined> } | null = null;
+  function kindOf(name: string): string | undefined {
+    const manifest = driver.manifest();
+    if (kinds === null || kinds.version !== manifest.version) {
+      kinds = {
+        version: manifest.version,
+        of: new Map(manifest.verbs.map((v) => [v.name, v.kind])),
+      };
+    }
+    return kinds.of.get(name);
+  }
+
+  /**
+   * Whether this tab can state this call's duration without a person in it.
+   *
+   * THE WHOLE HONESTY ARGUMENT, and it is about WHERE the measurement is taken
+   * rather than about arithmetic afterwards. The clock brackets
+   * `driver.call()`, which is the same bracket the in-page loop uses -- so
+   * everything the page does outside that call is outside the figure for free.
+   * What is INSIDE it, and invisible from here, is a person:
+   *
+   *   `ask`     IS a question put to somebody. Its whole duration is a human
+   *             reading and typing, so a `tookMs` for one would be a false
+   *             claim about the app with no true part to it at all.
+   *   `commit`  may be held by the core's approval gate, which is the
+   *             configuration `mountWidget` creates through
+   *             `DriverApproval.adopt`. `policy` is a LIVE read for exactly
+   *             this reason: the same driver answers `none` before a panel
+   *             mounts and `adopted` after, and only `hook` and `adopted` can
+   *             put a question in front of anybody -- `unattended` answers
+   *             itself and `none` is no gate.
+   *
+   * Everything else -- a `read`, a `describe`, a commit nobody is asked about,
+   * a verb that declared no `kind` at all and so is never gated by the core --
+   * is the app's own work and is reported.
+   *
+   * `waited` settles all of it: a host that counts its own person-time has the
+   * figure this cannot see, so it is subtracted and the call is timed whatever
+   * its kind. Without one, the answer here is silence, which PROTOCOL.md pins
+   * as UNKNOWN rather than zero. A tab that waits on a person inside a verb
+   * BODY is beyond anything this can know and must report it through `waited`
+   * or pass `timing: false`; that is stated in PROTOCOL.md as a must and is the
+   * one case left where a wrong figure is reachable.
+   */
+  function canTime(name: string): boolean {
+    if (options.waited !== undefined) return true;
+    const kind = kindOf(name);
+    if (kind === "ask") return false;
+    if (kind !== "commit") return true;
+    const policy = driver.approval?.policy;
+    return policy !== "hook" && policy !== "adopted";
+  }
+
+  /**
+   * The two fields a `result` frame carries about its own elapsed time, or
+   * nothing at all.
+   *
+   * Both figures are whole milliseconds and both are floored at zero.
+   * `Math.max(0, ...)` twice, because `waited` is reported by a host and a host
+   * that reports more wait than the call took is a host with a bug -- in which
+   * case the honest figure is the floor and not a negative number on the wire.
+   * A clock that went backwards lands in the same place; `renderDuration`
+   * refuses to print a negative duration either way, and this refuses to send
+   * one.
+   *
+   * `waitedMs` is sent only when somebody actually waited. Zero is the normal
+   * case and a key that says "no person, this time" on every call in every
+   * session is rent paid forever for a fact the absence already carries -- the
+   * same argument `renderDuration` makes for saying nothing about a fast call.
+   */
+  function timing(timed: boolean, started: number, waitedBefore: number): {
+    tookMs?: number;
+    waitedMs?: number;
+  } {
+    if (!timed) return {};
+    const waited = Math.max(0, (options.waited?.() ?? 0) - waitedBefore);
+    const took = Math.max(0, Math.floor(nowMs() - started - waited));
+    // A broken clock, or a `waited` that returned something that is not a
+    // number, is a measurement that did not happen -- and the honest rendering
+    // of one of those is silence, not `null` on the wire for a relay to throw
+    // away at the other end.
+    if (!Number.isFinite(took)) return {};
+    return { tookMs: took, ...(waited > 0 ? { waitedMs: Math.floor(waited) } : {}) };
+  }
+
   async function onCall(frame: CallFrame): Promise<void> {
+    // Read before the call and again after, with nothing of this function's own
+    // between the two reads: the pace of the loop, the POST that carries the
+    // answer and this tab's own error handling are all outside the bracket by
+    // construction. `timed` is null for a call this tab cannot speak for, and
+    // then no clock is read at all -- an app that opts out, or a question put to
+    // a person, costs exactly the bytes and the cycles it did before.
+    const timed = wantsTiming && canTime(frame.name);
+    const started = timed ? nowMs() : 0;
+    const waitedBefore = timed ? (options.waited?.() ?? 0) : 0;
     let result: Result;
     try {
       result = await driver.call(
@@ -718,7 +888,7 @@ export function connect(driver: Driver, options: ConnectOptions): Connection {
         snapshot: driver.snapshot(),
       };
     }
-    up({ t: "result", id: frame.id, result, tab });
+    up({ t: "result", id: frame.id, result, tab, ...timing(timed, started, waitedBefore) });
   }
 
   /**

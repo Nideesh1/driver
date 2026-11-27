@@ -245,6 +245,14 @@ class Driverkit:
 
         Returns a Result either way. Only the relay being unreachable, or
         answering with something that is not a Result, raises.
+
+        The Result may carry :attr:`driverkit.types.Result.took_ms`: how long
+        the TAB's own work took, with any person's time already taken out of
+        it. It is the only honest duration this side has — the one figure this
+        client could measure for itself is the whole round trip, which is the
+        network plus the tab's work plus any question the page put to
+        somebody — and it is ``None`` whenever the tab did not say, which means
+        UNKNOWN and never zero.
         """
         payload: dict[str, Any] = {"name": name, "args": dict(args or {})}
         if rev is not None:

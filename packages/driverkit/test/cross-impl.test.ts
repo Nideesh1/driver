@@ -32,6 +32,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 
 import { HttpEventSource, getJson, postJson } from "./sse-client.ts";
+import { serve } from "../src/relay/serve.ts";
 import { TabAuth, anonPrincipalId, mintAnonCredential } from "../src/relay/index.ts";
 import { SLOW_MS, renderDuration, renderResult, renderSnapshot } from "../src/agent/index.ts";
 import type { Result, Snapshot } from "../src/core/index.ts";
@@ -361,6 +362,76 @@ test("both renderers say the same words about a plan token, byte for byte", asyn
 });
 
 /**
+ * The results a QUESTION produces, which are the newest pair of sentences a
+ * model reads and the ones with the least margin for drift.
+ *
+ * It gets its own crossing although neither renderer gained a line for it, and
+ * that is the claim being pinned. The person's answer rides in `Result.note`,
+ * so it renders through `ok — …`, which both halves already had; the three
+ * refusals render through `refused:`/`hint:`, which both halves already had.
+ * **Nothing about the question channel is in either renderer** — which is why
+ * it works identically on both paths, and why a crossing is the only thing that
+ * can prove it stayed that way.
+ *
+ * An agent told "the person answered: yes" through one relay and something else
+ * through the other would be driven differently by the same prompt, and the
+ * answer is the one piece of text in this library that a person typed.
+ */
+const ASK_RESULTS: Result[] = [
+  // Answered: the words, attributed, as the core wraps them.
+  {
+    ok: true,
+    note: 'the person answered: "the one at Acme, please"',
+    snapshot: { where: "contacts", screen: "contacts", rev: 12, rows: [] },
+  },
+  // Asked and ignored. The hint says the verb did not run, which is the
+  // sentence that keeps this apart from the relay's `timeout`.
+  {
+    ok: false,
+    refused: "ask-unanswered",
+    hint: "the question was put to the person and no answer came back.",
+    snapshot: { where: "contacts", rev: 12, rows: [] },
+  },
+  // Never put, because there is nobody.
+  {
+    ok: false,
+    refused: "nobody-to-ask",
+    hint: "there is nobody to ask on this run.",
+    snapshot: { where: "contacts", rev: 12, rows: [] },
+  },
+  // Never put, because the allowance is gone.
+  {
+    ok: false,
+    refused: "asks-spent",
+    hint: "this app allows 5 questions per mounted session and all 5 have been asked.",
+    snapshot: { where: "contacts", rev: 12, rows: [] },
+  },
+];
+
+test("both renderers say the same words about a question and its answer, byte for byte", async (t) => {
+  const expected = ASK_RESULTS.map((r) => renderResult(r)).join("\n--\n");
+
+  const script =
+    "import json,sys\n" +
+    "sys.path.insert(0, sys.argv[1])\n" +
+    "from driverkit import render_result\n" +
+    "from driverkit.types import Result\n" +
+    "cases=json.load(sys.stdin)\n" +
+    'sys.stdout.write("\\n--\\n".join(render_result(Result.from_dict(c)) for c in cases))\n';
+
+  const rendered = await renderInPython(script, JSON.stringify(ASK_RESULTS));
+  if (rendered === null) {
+    t.skip("no python3 with driverkit importable from python/src");
+    return;
+  }
+  assert.equal(
+    rendered,
+    expected,
+    "render.py and render.ts have drifted on a question: a person's own answer, or the news that nobody gave one, reads differently depending on how the agent connected",
+  );
+});
+
+/**
  * Every band boundary of the duration bucket, and both sides of each.
  *
  * Boundaries only, because the bands are the whole of what could drift: the
@@ -419,6 +490,66 @@ test("both renderers say the same words about a duration, byte for byte", async 
     expected,
     "render.py and render.ts have drifted on durations: the same call reads as a different length of time depending on how the agent connected",
   );
+});
+
+test("both relays carry a tab's own elapsed time identically, field for field", async (t) => {
+  // The newest field on the wire, and the one with the most ways for two
+  // relays to disagree quietly: carried, dropped, derived, or passed through
+  // from the app's own `result`. So one frame is sent through BOTH relays and
+  // the two answers are compared to each other rather than to a literal --
+  // which is the assertion that fails when either half grows an opinion.
+  //
+  // The frame carries a figure beside the `result` AND a different one inside
+  // it. The first is the page-side harness's measurement and must arrive; the
+  // second is an app's claim about its own speed and must not, because the
+  // whole point of the field is that the number a model reads is an
+  // observation nobody asked the app for.
+  const running = await pythonRelay();
+  if (!running) {
+    t.skip("no python3 with driverkit importable from python/src");
+    return;
+  }
+  t.after(() => running.stop());
+  const ts = await serve({ port: 0, pingMs: 20_000 });
+  t.after(() => {
+    ts.relay.close();
+    ts.server.close();
+  });
+
+  const answers: Record<string, unknown>[] = [];
+  for (const url of [running.url, ts.url]) {
+    const es = new HttpEventSource(`${url}/dk/events?tab=xover`);
+    await new Promise<void>((r) => es.addEventListener("open", () => r()));
+    t.after(() => es.close());
+    await postJson(`${url}/dk/result?tab=xover`, {
+      t: "hello",
+      tab: "xover",
+      app: "toy",
+      snapshot: { where: "descents", rev: 7, rows: [] },
+    });
+
+    const answered = postJson(`${url}/dk/tabs/xover/call`, { name: "goto" });
+    const frame = (await es.next("call")) as { id: string };
+    await postJson(`${url}/dk/result?tab=xover`, {
+      t: "result",
+      tab: "xover",
+      id: frame.id,
+      result: { ok: true, snapshot: { where: "descents", rev: 8, rows: [] }, tookMs: 5 },
+      tookMs: 2_100.7,
+      waitedMs: 38_000,
+    });
+    answers.push((await answered).body);
+  }
+
+  assert.deepEqual(
+    answers[0],
+    answers[1],
+    "the two relays disagree about a call's duration: an operator switching relays would change what every agent is told about how fast the app is",
+  );
+  // And what they agree ON, because two relays can agree by both being wrong:
+  // the harness's figure, floored, and not the app's.
+  assert.equal(answers[0]!.tookMs, 2_100);
+  assert.equal(answers[0]!.waitedMs, 38_000);
 });
 
 test("both halves agree on what counts as slow", async (t) => {

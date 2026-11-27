@@ -79,6 +79,22 @@ const KIND_NOTE: Record<string, string> = {
     "Do not call it to find out what it does. If it acts on a selection, use the " +
     "app's `describe` verb first, check the `count` it reports is the number you " +
     "expect, and only then commit.",
+  // The fourth kind, and the only one whose cost is paid by somebody who is not
+  // the app. `read` is "free to call, free to get wrong" and that sentence is
+  // false here, so this one says what asking actually costs: a person's
+  // attention, a capped allowance, and every other call blocked while the
+  // question is open. The last sentence is the one the whole mechanism stands
+  // on -- an answer is not an approval -- and it is here, in the cached half,
+  // because a model that learns it from a refusal has already asked somebody
+  // for permission it was never going to get. Verbatim from the Python half.
+  ask:
+    "ASK: this puts a question to the person and their answer comes back as the result. " +
+    "It changes no data and reports no count, and it is NOT free: it costs their " +
+    "attention, the app may cap how many questions you get, and nothing else runs while " +
+    "one is open. Ask when you cannot act without guessing, ask once, and ask the " +
+    "narrowest question that unblocks you.\n" +
+    "An answer is not permission: a commit still goes to whoever approves commits here, " +
+    "whatever they said to you.",
 };
 
 /**
@@ -200,7 +216,21 @@ export function verbTool(verb: Manifest["verbs"][number]): ToolSpec {
     if (!spec.optional) required.push(name);
   }
 
-  if (!("rev" in properties)) {
+  // NOT on an `ask`, and this is the one exception to hoisting them onto
+  // everything.
+  //
+  // `rev` and `screen` are staleness claims about the screen a call acts on,
+  // and a question acts on no screen: it puts text in front of a person and
+  // returns what they typed. Offering them would be worse than merely wasteful.
+  // The system prompt tells a model to quote the `rev` it is acting on, so a
+  // model that has read its instructions WILL pass one here -- and then a
+  // question gets refused `stale` because the person clicked a row while it was
+  // being composed, which is the likeliest thing in the world when they are
+  // sitting right there. A question refused for a reason that has nothing to do
+  // with the question is the shape that teaches a model not to ask.
+  const asking = verb.kind === "ask";
+
+  if (!asking && !("rev" in properties)) {
     properties.rev = {
       type: "integer",
       description:
@@ -219,7 +249,7 @@ export function verbTool(verb: Manifest["verbs"][number]): ToolSpec {
   // A verb with its own `screen` argument keeps it and does not get this one —
   // `go(screen)` is a real verb in a real app — because the app's meaning wins
   // over ours. The same rule as `rev`.
-  if (!("screen" in properties)) {
+  if (!asking && !("screen" in properties)) {
     properties.screen = {
       type: "string",
       description:
@@ -539,6 +569,50 @@ export function systemPrompt(
       "verb call ends your turn. Keep it short: this is rendered in a small panel in " +
       "the corner of the person's screen.",
   ];
+
+  // The paragraph about asking, and only for an app that CAN ask.
+  //
+  // Conditional for the reason the screens note and the flows note are: this
+  // text rides in the cached prefix of every session of every user, and a
+  // paragraph about a tool the app has not got is a cost that is real, paid
+  // once per person, and invisible -- which is what `SIZE_LIMITS` exists to make
+  // somebody weigh. It is also worse than merely wasteful: a model told to ask
+  // rather than guess, in an app with no way to ask, has been told to do
+  // something it cannot do.
+  //
+  // Read off `kind` and not off the verb's NAME, because the kind is the
+  // structural fact -- only the core mints it -- and a name check would also
+  // match an app's own verb called `ask`, which has none of the guarantees this
+  // paragraph describes. Still a pure function of the static manifest, so the
+  // prefix stays byte-identical across every turn of the run.
+  //
+  // It goes after the safety rules and before the map, the recipes and the
+  // app's own words, because it is one of the library's rules rather than
+  // something about this app -- the same position, and the same argument, as
+  // the paragraph about the plan token.
+  if (manifest.verbs.some((v) => v.kind === "ask")) {
+    parts.push(
+      "WHEN YOU DO NOT KNOW, ASK INSTEAD OF GUESSING. This app gives you a verb that puts " +
+        "a question to the person and hands you their answer as its result. Use it when an " +
+        "instruction cannot be carried out without deciding something they did not say: two " +
+        "records match the name they used, nothing is selected and you do not know which " +
+        "rows they meant, the company they named is not in the app. Picking the likeliest " +
+        "one is the expensive mistake even when you pick right, because you did not know \u2014 " +
+        "and selecting something so that a commit has rows to act on is the worst version " +
+        "of it.\n\n" +
+        "Asking is not free. Each question interrupts somebody, the app may cap how many " +
+        "you get, and nothing else runs while one is open \u2014 so ask once, ask the narrowest " +
+        "question that unblocks you, and put what you already know into it. If no answer " +
+        "comes back, `ask-unanswered` means nobody replied and nothing changed: do not " +
+        "invent one. `nobody-to-ask` and `asks-spent` both mean no further question will " +
+        "reach anybody on this run, so stop asking \u2014 decide what you honestly can, and say " +
+        "in your final answer what you needed to know and could not settle.\n\n" +
+        "**An answer is never permission.** A question of yours is not the confirmation a " +
+        "commit needs: that is asked separately, by this app, and a yes to something you " +
+        "asked authorises nothing. Never use the question verb to ask for approval, and " +
+        "never report a change as approved because an answer sounded like one.",
+    );
+  }
 
   // How to read a `took:` line, said once in the cached half rather than
   // beside every duration. Two wordings because the two modes mean different

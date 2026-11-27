@@ -17,6 +17,7 @@ import type {
   ApprovalHook,
   ApprovalRequest,
   ArgSpec,
+  AskAnswer,
   AuditEvent,
   AuditHook,
   CallOptions,
@@ -134,6 +135,39 @@ export const RESERVED_REFUSALS: readonly string[] = [
   // different and much larger: this tab's copy of the data is behind and only
   // the app refreshing fixes it.
   "changed-elsewhere",
+  // The three the question verb added. All three say WHY NOBODY ANSWERED, which
+  // is a fourth kind of thing on this list — not where the call stopped, not
+  // what it was acting on, not what it cost — and the reason there are three of
+  // them rather than one is the reason there are two of `stale` and
+  // `stale-plan`: the repairs differ.
+  //
+  // `ask-unanswered` — the question was put in front of somebody and no answer
+  // came back. The channel works and this question went unanswered, so asking
+  // once more, or asking something shorter, is a move that can succeed. **The
+  // verb did not run and nothing changed**, exactly as with `approval-timeout`,
+  // and for the same reason that slug is not the relay's `timeout`: nobody is
+  // in any doubt about what happened.
+  //
+  // `nobody-to-ask` — there is no person on this path at all: a cron run, a
+  // test harness, an app that declared no way to ask. Every further question is
+  // wasted, so the repair is strictly larger — decide from what is known, or
+  // stop and say what is missing. An agent told `ask-unanswered` for this will
+  // ask again into an empty room until something else stops it, which is why
+  // folding the two would be the same mistake as folding `stale` into
+  // `stale-plan`.
+  //
+  // `asks-spent` — the app's question allowance is gone, so this one was never
+  // put. Deliberately NOT `budget-spent`, and this is the one departure from
+  // "one slug for both ceilings" a few lines up. That rule's own justification
+  // is that the call ceiling and the commit ceiling "end in the identical
+  // repair, which is no repair: stop, and tell the person" — and a spent
+  // question allowance ends in a real one: say in your answer what you would
+  // have asked. It also must not be `budget-spent` because `drive` ends the
+  // whole run on that slug, which would mean an agent that asked one question
+  // too many could no longer finish the sentence it was asking about.
+  "ask-unanswered",
+  "nobody-to-ask",
+  "asks-spent",
 ];
 
 const RESERVED = new Set(RESERVED_REFUSALS);
@@ -153,6 +187,9 @@ const APPROVAL_TIMEOUT = "approval-timeout";
 const STALE_PLAN = "stale-plan";
 const BUDGET_SPENT = "budget-spent";
 const CHANGED_ELSEWHERE = "changed-elsewhere";
+const ASK_UNANSWERED = "ask-unanswered";
+const NOBODY_TO_ASK = "nobody-to-ask";
+const ASKS_SPENT = "asks-spent";
 
 /** What a `stale-plan` refusal tells an agent to do when it HAD a plan and the
  *  plan is no longer good. Spelled once because four of the five reasons end in
@@ -328,6 +365,85 @@ const GOTO_DESCRIBE =
   "be told which record. Refused as `bad-screen-argument` when a screen's own argument is " +
   "missing or the wrong type, and the app may refuse it for its own reasons, such as a " +
   "screen this person is not allowed to open.";
+
+/**
+ * The reserved question verb.
+ *
+ * Reserved in the same WEAK sense `goto` is, and the same rule decides it: an
+ * app that declares its own verb named `ask` keeps it and the core adds
+ * nothing, because the app's meaning wins over ours. What "reserved" buys is
+ * one name instead of one per app — `ask`, `ask-user`, `clarify`, `check-with-
+ * me`, none of which the next agent recognises — which is the argument that
+ * made `goto` reserved and `wrong-screen` a reserved refusal.
+ *
+ * It is NOT in `RESERVED_REFUSALS`, so a verb may be named this. The three
+ * slugs the mechanism added are, for the usual reason: an app that refused
+ * `nobody-to-ask` on a business rule would be telling an agent to stop asking
+ * for the rest of a run over something it could have phrased differently.
+ */
+const ASK = "ask";
+
+/** The name of `ask`'s one argument. Spelled once: it is named in the schema,
+ *  in two refusals and in the record. */
+const ASK_QUESTION_ARG = "question";
+
+/**
+ * How long a question waits for an answer when the app did not say.
+ *
+ * **45 seconds, and the number is chosen against the relay's 60.** See
+ * `MountOptions.askTimeout`: a question that outlives the transport's deadline
+ * converts "nobody answered", which is a fact the agent can act on, into the
+ * relay's `timeout`, which PROTOCOL.md defines as outcome unknown. Of the two
+ * errors, firing late is the expensive one here — the opposite way round from
+ * `approvalTimeout`, which waits forever because a lapsed approval DENIES a
+ * commit and a lapsed question denies nothing.
+ *
+ * Exported so the two numbers can be reasoned about together rather than being
+ * two literals in two packages.
+ */
+const DEFAULT_ASK_TIMEOUT_MS = 45_000;
+
+export { ASK, ASK_QUESTION_ARG, DEFAULT_ASK_TIMEOUT_MS };
+
+/**
+ * `ask`'s description, which every agent reads in the cached half.
+ *
+ * Here rather than in `driverkit/agent` and `mcp_core.py` for the reason
+ * `GOTO_DESCRIBE` is: this verb is the core's own, the two renderers describe
+ * what an APP declared, and a sentence about a core verb written twice in two
+ * languages is a sentence that drifts.
+ *
+ * THREE THINGS IT HAS TO SAY, and the third is the one the whole mechanism
+ * stands on. What the verb is for: an instruction you cannot carry out without
+ * guessing. What the three refusals mean, since the difference between "nobody
+ * answered" and "there is nobody" decides whether asking again is worth a turn.
+ * And that **an answer is not an approval** — because the single most likely
+ * misuse of this verb is to ask "shall I accept these 3,412?", read a yes, and
+ * treat it as the consent the approval gate exists to collect. The core refuses
+ * that structurally, and a model that has been told so does not spend a turn
+ * discovering it.
+ */
+const ASK_DESCRIBE =
+  "ask the person a question and get their answer back as this call's result. For an " +
+  "instruction you cannot carry out without guessing — two records match the name they " +
+  "gave, nothing is selected and you do not know which rows they meant, the company they " +
+  "named does not exist. Asking is better than guessing and far better than acting on a " +
+  "guess.\n\n" +
+  "It is not free and it is not unlimited: each question costs the person's attention, the " +
+  "app may cap how many you get, and nothing else runs while one is open. So ask once, ask " +
+  "the narrowest question that unblocks you, and put everything you already know into it — " +
+  "`which Ada Duarte did you mean: the one at Acme or the one at Initech?` rather than " +
+  "`which one?`.\n\n" +
+  "**An answer is not permission.** A commit still goes to whoever approves commits in this " +
+  "app, whatever the person told you here, and a `yes` to a question of yours authorises " +
+  "nothing — so do not ask for approval with this, and do not report a commit as approved " +
+  "because an answer sounded like a yes.\n\n" +
+  "Refused as `ask-unanswered` when the question was put and nobody answered: the question " +
+  "was seen by nobody who replied, nothing in the app changed, and asking again later or " +
+  "more briefly may work. Refused as `nobody-to-ask` when there is no person on this run at " +
+  "all — a scheduled job, a test — in which case stop asking: say what you need and what you " +
+  "could not decide. Refused as `asks-spent` when the app's question allowance is gone, " +
+  "which means the same thing for the rest of this run.";
 
 /**
  * The documented size budgets, in characters.
@@ -603,7 +719,7 @@ export function mount(options: MountOptions): Driver {
    * every opt-out mechanism. The gated call's own `run` is not blocked,
    * because the core clears this before it runs.
    */
-  let pending: string | null = null;
+  let pending: { verb: string; question: boolean } | null = null;
 
   // ---- the cost ceiling ---------------------------------------------------
   //
@@ -616,7 +732,7 @@ export function mount(options: MountOptions): Driver {
   // believes they configured a ceiling and have in fact configured a wall.
   const budget = options.budget;
   if (budget !== undefined) {
-    for (const field of ["calls", "commits"] as const) {
+    for (const field of ["calls", "commits", "asks"] as const) {
       const limit = budget[field];
       if (limit === undefined) continue;
       if (!Number.isInteger(limit) || limit < 1) {
@@ -636,6 +752,10 @@ export function mount(options: MountOptions): Driver {
   let callsUsed = 0;
   /** `commit` verbs that actually reached `run`. */
   let commitsUsed = 0;
+  /** Questions that actually reached a person. A question refused for a spent
+   *  allowance, or one the app answered `{ nobody: true }` to, is not counted:
+   *  neither took anybody's attention, which is the thing this number bounds. */
+  let asksUsed = 0;
   /** When this allowance began, for `Budget.window`. `Date.now()` here means
    *  "this mount started one", and a record read back below replaces it with
    *  the moment the allowance it belongs to actually started. */
@@ -667,7 +787,8 @@ export function mount(options: MountOptions): Driver {
    * invented out of a field that set none.
    */
   const budgetKept =
-    budget?.store !== undefined && (budget.calls !== undefined || budget.commits !== undefined);
+    budget?.store !== undefined &&
+    (budget.calls !== undefined || budget.commits !== undefined || budget.asks !== undefined);
 
   /**
    * Pull the stored allowance into the counters, taking the HIGHER figure.
@@ -711,6 +832,12 @@ export function mount(options: MountOptions): Driver {
     if (budget!.window !== undefined && Date.now() - record.since >= budget!.window) return;
     if (Number.isInteger(record.calls)) callsUsed = Math.max(callsUsed, record.calls);
     if (Number.isInteger(record.commits)) commitsUsed = Math.max(commitsUsed, record.commits);
+    // Absent on a record written before questions were counted, which is read
+    // as 0 rather than as a reason to throw the record away: see
+    // `BudgetRecord.asks`. The other two numbers in it are still true, and
+    // discarding an allowance because a field was added would hand every app
+    // with a store a fresh ceiling on upgrade.
+    if (Number.isInteger(record.asks)) asksUsed = Math.max(asksUsed, record.asks!);
     if (Number.isFinite(record.since)) budgetSince = record.since;
   }
 
@@ -734,6 +861,10 @@ export function mount(options: MountOptions): Driver {
       budget!.store!.save({
         calls: callsUsed,
         commits: commitsUsed,
+        // Written whatever the app declared, like the two above, so that adding
+        // `budget.asks` later does not have to treat every existing record as
+        // having asked nothing since the epoch.
+        asks: asksUsed,
         since: budgetSince,
         ...(budget!.epoch === undefined ? {} : { epoch: budget!.epoch }),
       });
@@ -791,6 +922,38 @@ export function mount(options: MountOptions): Driver {
         `driverkit: the verb \`${verb.name}\` declares \`screen: []\`, which says it works on ` +
           `no screen at all. Omit \`screen\` to mean "anywhere", or name the screens it works ` +
           `on.`,
+      );
+    }
+
+    // THE ONE KIND AN APP MAY NOT DECLARE, and this throw is the structural
+    // half of "a question is not consent".
+    //
+    // Every other kind is a claim about what the app's own code does, and the
+    // app is the only thing that can make it. `ask` is a claim about a PERSON,
+    // and the core is the only thing that can make it good: it owns the lock
+    // that stops the agent acting while a question is open, the deadline that
+    // keeps "nobody answered" a fact rather than the relay's unknown outcome,
+    // the allowance, and the audit row. A verb wearing the kind with none of
+    // those behind it would be a question nothing counted and nothing locked --
+    // and the first thing anybody would build with it is a confirmation
+    // dialog, whose yes would then be the one thing `MountOptions.approve`
+    // exists to be asked for. So the kind is the core's and the hook is the
+    // app's; see `MountOptions.ask`.
+    //
+    // Thrown rather than warned because it is a safety claim being made
+    // falsely, which is the same grounds the misspelt `approve` policy throws
+    // on. Additive, because no app can already be declaring it: it was not a
+    // value of `VerbKind` until this feature, so nothing that compiles today
+    // can hit this.
+    if (verb.kind === ASK) {
+      throw new Error(
+        `driverkit: the verb \`${verb.name}\` declares \`kind: "ask"\`, which only the core ` +
+          `may mint. A question has to be locked, deadlined, counted against ` +
+          `\`budget.asks\` and recorded, and none of that can be true of a verb body — a ` +
+          `verb wearing this kind would be a question nothing counted, and a "yes" to it ` +
+          `would look like the approval \`approve\` exists to collect. Pass ` +
+          `\`ask: ({ question }) => …\` to \`mount()\` and the core offers the \`ask\` verb ` +
+          `itself; declare this verb with the kind it really has, or leave \`kind\` off.`,
       );
     }
 
@@ -1026,6 +1189,94 @@ export function mount(options: MountOptions): Driver {
         );
       },
     });
+  }
+
+  // ---- the one question the core implements ------------------------------
+  //
+  // Added exactly as `goto` is: after the app's own verbs so a collision can be
+  // seen, before the manifest because it has to appear in it, and only when the
+  // app supplied the one function the core cannot write. See `MountOptions.ask`.
+  //
+  // The whole of the mechanism's behaviour is in `decide()`, not in the `run`
+  // below. That is not an accident of where it fitted: the lock, the deadline,
+  // the allowance and the `waitedMs` the record needs are all things `call()`
+  // owns and a verb body cannot see. What `run` is for is the dead placeholder
+  // underneath -- see the comment on it.
+  const askFn = options.ask;
+  if (askFn !== undefined && typeof askFn !== "function") {
+    // Thrown at mount for the reason a misspelt `approve` is: an app that
+    // believes it can ask and cannot has a verb in everybody's cached prefix
+    // that only ever refuses, and the author finds out from a model's
+    // transcript rather than from a stack trace.
+    throw new Error(
+      `driverkit: \`ask\` must be a function; got ${JSON.stringify(askFn)}. It is handed ` +
+        `\`{ question }\` and returns the person's words, \`{ answered: false }\` when nobody ` +
+        `replied, or \`{ nobody: true }\` when there is nobody on this path.`,
+    );
+  }
+  if (askFn !== undefined && verbs.has(ASK)) {
+    // The app claimed the name, so the app keeps it -- the `goto` rule, and the
+    // `rev`/`screen` argument rule one layer up: the app's meaning wins over
+    // ours. Said once all the same, because an author with two ways to ask the
+    // same person the same thing has one of them by accident.
+    warn(
+      "`ask` was declared and this app also declares its own verb named `ask`, so the " +
+        "core's reserved one is not added and the `ask` hook is never called. The app's " +
+        "verb wins; drop one of the two. Note that an app's own ask verb is gated, " +
+        "counted and recorded as an ordinary verb and gets none of what the core's does: " +
+        "no lock while the question is open, no deadline, no `budget.asks`.",
+    );
+  }
+  /** Whether the core's own `ask` is the verb under that name, so `decide` can
+   *  tell it from an app's verb that happens to be called the same thing. An
+   *  identity check and not a name check, because the name is the thing an app
+   *  is allowed to take. */
+  let coreAsk: Verb<any> | undefined;
+  if (askFn !== undefined && !verbs.has(ASK)) {
+    coreAsk = {
+      name: ASK,
+      kind: ASK,
+      describe: ASK_DESCRIBE,
+      // No `refuses`. The three slugs this verb can come back with are all
+      // reserved, and `refuses` may not name a reserved slug -- which is the
+      // right answer rather than an awkward one: they say where the question
+      // stopped and not what the app decided, so they belong in the reserved
+      // list and are named in the description instead. The same shape as
+      // `goto`, whose one core refusal is also described rather than declared.
+      args: {
+        [ASK_QUESTION_ARG]: {
+          type: "string",
+          describe:
+            "what to ask, in your own words, as one short question. Put everything you " +
+            "already know into it so the person can answer in a word.",
+        },
+      },
+      /**
+       * The dead placeholder, and it is load-bearing.
+       *
+       * Lifted straight from the pattern that works elsewhere: a tool whose
+       * body returns a plain, honest "no response was recorded for this", so
+       * that if the mechanism above it is ever skipped the model is told the
+       * truth instead of reading an `ok` for a question nobody saw. `decide()`
+       * answers every `ask` before `run` is reached, so **this should be
+       * unreachable** — which is exactly why it has to say something a model
+       * can act on rather than throw or return nothing.
+       *
+       * It refuses rather than reporting, because `ok — …` is the shape an
+       * ANSWER has and a placeholder that borrowed it would be a fabricated
+       * answer. `nobody-to-ask` is the honest slug: no question was put to
+       * anybody.
+       */
+      run: (_args: Record<string, Scalar>, ctx: VerbContext) =>
+        ctx.refuse(
+          NOBODY_TO_ASK,
+          "no question was put to anybody: this app offers the `ask` verb and the call did " +
+            "not reach the person. Nothing in the app changed and no answer was recorded. " +
+            "Do not treat this as a reply, and do not ask again — say what you needed to " +
+            "know and what you could not decide without it.",
+        ),
+    };
+    verbs.set(ASK, coreAsk);
   }
 
   // ---- the app's recipes --------------------------------------------------
@@ -1706,7 +1957,7 @@ export function mount(options: MountOptions): Driver {
   ): Promise<Result | null> {
     const req: ApprovalRequest = { name, args, verb: entries.get(name)!, snapshot: before };
     const was = pending;
-    pending = name;
+    pending = { verb: name, question: false };
     // The one wait in this file that is a PERSON rather than the app, and
     // therefore the one worth timing separately. Read only when a record is
     // going to be built -- an app with no `onAudit` reads no clock here, the
@@ -1714,7 +1965,7 @@ export function mount(options: MountOptions): Driver {
     const askedAt = onAudit === undefined ? 0 : Date.now();
     let decision: Approval;
     try {
-      decision = await deadline(ask(req), options.approvalTimeout);
+      decision = await deadline<Approval>(ask(req), { timedOut: true }, options.approvalTimeout);
     } catch (err) {
       decision = `the approval could not be asked for (${
         err instanceof Error ? err.message : String(err)
@@ -1789,6 +2040,205 @@ export function mount(options: MountOptions): Driver {
       "the app's approval hook answered with something that is not a decision, so this was " +
         "not allowed. That is a bug in the app rather than in your call.",
       read(),
+    );
+  }
+
+  /**
+   * Put the agent's question to the person, and answer the agent honestly.
+   *
+   * THE FIVE THINGS THIS OWNS, none of which a verb body could:
+   *
+   *  1. **The lock.** `pending` is held for as long as the question is open, so
+   *     every other call on this driver -- from this agent or another one over
+   *     the relay -- is refused `approval-pending`. An agent that could carry
+   *     on acting while somebody is mid-decision is an agent acting on a screen
+   *     the person is about to change, and over the relay it is two agents, one
+   *     of which asked.
+   *  2. **The deadline.** `MountOptions.askTimeout`, defaulting to 45 seconds,
+   *     which is under the relay's 60. That is what keeps "nobody answered" a
+   *     FACT rather than the relay's `timeout`, which means outcome unknown.
+   *  3. **The allowance.** `budget.asks`, checked before the question is put
+   *     and charged only when it actually reached somebody.
+   *  4. **The record.** `trail.waitedMs`, written on every exit, which is the
+   *     field that tells an auditor a question was genuinely put and for how
+   *     long it stood. See `AuditEvent`.
+   *  5. **Keeping nothing.** The answer is turned into this call's `Result` and
+   *     is not stored anywhere. That is the whole of "a question is not
+   *     consent": there is no remembered yes for a later commit to consult, so
+   *     the separation is structural rather than a policy somebody could
+   *     relax. `ApprovalRequest` has no field that could carry one.
+   *
+   * It is called from `decide` rather than from `run` because four of those
+   * five are things `call()` owns, and because the fifth is only true if the
+   * answer never leaves this function.
+   */
+  async function putQuestion(
+    args: Record<string, Scalar>,
+    before: Snapshot,
+    trail: Trail,
+  ): Promise<Result> {
+    const question = String(args[ASK_QUESTION_ARG] ?? "").trim();
+    // An empty question after trimming. `checkArg` has already refused a
+    // missing or non-string one, so what is left is whitespace -- which would
+    // put a blank box in front of somebody and is the one argument error worth
+    // catching here rather than passing on.
+    if (question === "") {
+      return no(
+        "bad-argument",
+        `\`${ASK_QUESTION_ARG}\` is blank. Ask something: the person sees this text and ` +
+          `nothing else, so a blank question is a box they cannot answer.`,
+        before,
+      );
+    }
+    // Bounded, and refused rather than truncated. `SIZE_LIMITS.describe` is the
+    // library's one-line budget and a question is a one-line thing; truncating
+    // would put half a question in front of somebody, which reads as the whole
+    // of a different question. An agent that needs a paragraph has not worked
+    // out what it does not know.
+    if (question.length > SIZE_LIMITS.describe) {
+      return no(
+        "bad-argument",
+        `that question is ${question.length} characters and the limit is ` +
+          `${SIZE_LIMITS.describe}. Ask the narrowest question that unblocks you, in one ` +
+          `line: a wall of text in front of somebody is a question they will dismiss. Say ` +
+          `the rest in your final answer.`,
+        before,
+      );
+    }
+
+    // The allowance, BEFORE the question is put and before the lock is taken.
+    // The order matters for the same reason the commit ceiling sits one line
+    // above the approval gate: nobody is interrupted for a call that was
+    // already going to be refused.
+    if (budget?.asks !== undefined && asksUsed >= budget.asks) {
+      return no(
+        ASKS_SPENT,
+        `this app allows ${budget.asks} question${budget.asks === 1 ? "" : "s"} per mounted ` +
+          `session and all ${budget.asks} have been asked, so this one was not put to ` +
+          `anybody. It does not refill, and no further question will reach them. **The rest ` +
+          `of the app still works**: this is a ceiling on the person's attention, not on ` +
+          `your calls. Carry on with what you can decide, and in your final answer say ` +
+          `exactly what you would have asked and what you could not settle without it.`,
+        before,
+      );
+    }
+
+    const was = pending;
+    pending = { verb: ASK, question: true };
+    // Read only when a record is going to be built, the promise `call` and
+    // `askApproval` both already make: an app with no `onAudit` reads no clock.
+    const askedAt = onAudit === undefined ? 0 : Date.now();
+    let answer: AskAnswer;
+    try {
+      answer = await askDeadline(askFn!({ question }), options.askTimeout);
+    } catch (err) {
+      // A question UI that throws must not take the app down, and must not be
+      // read as an answer. The precedent is `ApprovalHook`, where a failed ask
+      // is a no; here a failed ask is an UNANSWERED question and emphatically
+      // not `nobody-to-ask` -- a broken panel is not evidence that nobody is
+      // sitting there, and saying it is would tell an agent to stop asking for
+      // the rest of the run over one exception. The message is folded in
+      // because the author reading the transcript is the one who can fix it.
+      answer = { answered: false };
+      warn(
+        `the \`ask\` hook threw, so the question was treated as unanswered: ` +
+          `${err instanceof Error ? err.message : String(err)}. A failed ask is an ` +
+          `unanswered question, never an answer and never a claim that nobody is there.`,
+      );
+    } finally {
+      pending = was;
+      // In the `finally`, so EVERY exit is timed -- an answer, a silence, a
+      // deadline, a hook that threw. A question somebody read for two minutes
+      // and then ignored is exactly as interesting to an auditor as one they
+      // answered, and a figure recorded only on the happy path vanishes from
+      // the records somebody is most likely to be reading. The one exit that
+      // deliberately does NOT get a figure is `{ nobody: true }`, below: see
+      // `AuditEvent`, where the presence of `waitedMs` is what says a question
+      // reached somebody.
+      if (onAudit !== undefined) trail.waitedMs = Math.max(0, Date.now() - askedAt);
+    }
+
+    const shape =
+      typeof answer === "object" && answer !== null
+        ? (answer as { answered?: unknown; nobody?: unknown })
+        : undefined;
+
+    // Nobody is there. The question was never put, so nothing is charged and
+    // the record carries no wait: both of those are the honest reading, and
+    // both are what tell this apart from a question that stood in front of
+    // somebody for 45 seconds.
+    if (shape?.nobody === true) {
+      delete trail.waitedMs;
+      return no(
+        NOBODY_TO_ASK,
+        "there is nobody to ask on this run: this app is being driven with no person in " +
+          "front of it. The question was not put to anybody, nothing in the app changed, " +
+          "and no later question will reach them either — so stop asking. Decide from what " +
+          "you already know if you honestly can, and if you cannot, say what you needed to " +
+          "know and what you could not settle without it.",
+        before,
+      );
+    }
+
+    // Charged here and nowhere else: the question reached somebody, whether or
+    // not they answered. A question that sat in front of a person and was
+    // ignored has spent their attention as surely as one they replied to, and a
+    // counter that only counted replies would never fire on the agent that
+    // interrupts somebody who has stopped reading it.
+    asksUsed++;
+    rememberSpend();
+
+    if (typeof answer === "string" && answer.trim() !== "") {
+      // THE ANSWER IS THE RESULT, which is the one structural thing about this
+      // feature worth saying twice. It rides in `Report.note`, so it renders
+      // through `ok — …` exactly as every other verb's note does and no
+      // renderer in either language needed a line for it. A side channel --
+      // another field on `Result`, a block in the snapshot -- would have been a
+      // second place a model has to learn to look, and would have put a
+      // person's words somewhere this core could keep them.
+      //
+      // Attributed, because `ok — yes, the one at Acme` is indistinguishable
+      // from the app reporting something. The quotes and the words "the person
+      // answered" are the core saying whose sentence this is, and they are the
+      // core's words rather than the app's for the reason `ASK_DESCRIBE` is
+      // here: a sentence written twice in two languages is a sentence that
+      // drifts.
+      //
+      // The answer itself is passed through verbatim and never parsed. Nothing
+      // in here looks for "yes": a core that classified an answer would be one
+      // step from a core that acted on the classification, which is the
+      // approval bypass this whole design is shaped against.
+      const said = answer.trim();
+      return {
+        ok: true,
+        note: `the person answered: "${said}"`,
+        snapshot: read(),
+      };
+    }
+
+    // Everything else is an unanswered question, including an answer shape this
+    // core does not recognise and an empty string. The same rule `Approval`
+    // applies to an unknown shape, pointed the other way: there the safe
+    // reading of a shape nobody recognises is a DENIAL, and here it is that
+    // nobody spoke. Reading it as an answer would put words in a person's mouth
+    // and let a model act on them, which is strictly the worse of the two
+    // mistakes.
+    if (shape?.answered !== false) {
+      warn(
+        `the \`ask\` hook answered with ${JSON.stringify(answer)}, which is not an answer. ` +
+          `Treated as unanswered. Return the person's words as a string, ` +
+          `{ answered: false }, or { nobody: true }.`,
+      );
+    }
+    return no(
+      ASK_UNANSWERED,
+      "the question was put to the person and no answer came back — they closed it, walked " +
+        "away, or it stood too long. **Nothing in the app changed and the verb did not " +
+        "run**; this is not the transport `timeout`, where nobody knows what happened. Do " +
+        "not invent an answer and do not act on what you were going to ask about. You may " +
+        "ask once more, shorter, if it is genuinely the one thing in the way; otherwise say " +
+        "what you needed to know and stop.",
+      before,
     );
   }
 
@@ -1961,9 +2411,28 @@ export function mount(options: MountOptions): Driver {
     // it is refused here — including when it is the same verb, and including
     // when it is the gate's own Approve button arriving as a `press`.
     if (pending !== null) {
+      // One slug for both kinds of open question, and a different sentence.
+      //
+      // The slug is `approval-pending` either way because to the AGENT the two
+      // are the same fact and call for the same move: nothing ran, somebody is
+      // being asked something, wait. A second slug would be a second word for
+      // one repair, which is what `RESERVED_REFUSALS` keeps refusing to add.
+      //
+      // The hint differs because the two are not the same thing to the PERSON
+      // reading a transcript, and because the hazard the approval wording
+      // exists for -- an agent pressing the Approve button of the dialog that
+      // is asking it -- is not what a question is about. An agent told
+      // "`accept-selected` is waiting to be approved" while what is actually
+      // on screen is "which Ada Duarte did you mean?" has been told something
+      // false about its own app.
       return no(
         APPROVAL_PENDING,
-        `\`${pending}\` is waiting to be approved, so ${PENDING_HINT}`,
+        pending.question
+          ? `this app has put a question of yours to the person and is waiting for their ` +
+            `answer, so it is not taking calls. Nothing ran. Wait for the answer: it comes ` +
+            `back as the result of the \`${ASK}\` call you already made, and asking again ` +
+            `will not reach them any sooner.`
+          : `\`${pending.verb}\` is waiting to be approved, so ${PENDING_HINT}`,
         read(),
       );
     }
@@ -2198,6 +2667,21 @@ export function mount(options: MountOptions): Driver {
         const reason = checkArg(argName, spec, args[argName]);
         if (reason) return no("bad-argument", reason, before);
       }
+    }
+
+    // THE QUESTION, and it is answered here rather than by `verb.run` below.
+    //
+    // After the argument check, so a question with no text is `bad-argument`
+    // like every other malformed call. Before the commit ceiling and the
+    // approval gate, which cannot apply: an `ask` is not a `commit`, and that
+    // is the first of the several reasons an answer cannot be consent.
+    //
+    // `verb === coreAsk` is an IDENTITY check and not a name check, because the
+    // name is the one thing an app is allowed to take -- an app with its own
+    // verb called `ask` falls straight through to `run` and is an ordinary
+    // verb, which is what the warning at mount says out loud.
+    if (coreAsk !== undefined && verb === coreAsk) {
+      return await putQuestion(args, before, trail);
     }
 
     // LAST of the checks and immediately before `run`, which is the only place
@@ -2490,7 +2974,10 @@ export function mount(options: MountOptions): Driver {
       // reach this driver.
       hold: async <T>(verb: string, ask: () => Promise<T>): Promise<T> => {
         const was = pending;
-        pending = verb;
+        // `question: false`: this is the lock for an approval UI, which is what
+        // `hold` is documented as being for. The core's own question verb takes
+        // the lock through `putQuestion`, which sets the other flag.
+        pending = { verb, question: false };
         try {
           return await ask();
         } finally {
@@ -2507,6 +2994,7 @@ export function mount(options: MountOptions): Driver {
         used: commitsUsed,
         ...(budget?.commits === undefined ? {} : { limit: budget.commits }),
       },
+      asks: { used: asksUsed, ...(budget?.asks === undefined ? {} : { limit: budget.asks }) },
     }),
     unmount: () => {
       live = false;
@@ -2537,10 +3025,10 @@ export function mount(options: MountOptions): Driver {
  * a hook that answers in time does not hold a Node process open for the rest
  * of the deadline.
  */
-function deadline(promise: Approval | Promise<Approval>, ms?: number): Promise<Approval> {
+function deadline<T>(promise: T | Promise<T>, lapsed: T, ms?: number): Promise<T> {
   if (ms === undefined || !(ms > 0)) return Promise.resolve(promise);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const lapse = new Promise<Approval>((resolve) => {
+  const lapse = new Promise<T>((resolve) => {
     // Deliberately NOT unref'd, and that is not an oversight. `unref` says the
     // timer is not work worth staying alive for -- true right up until the hook
     // never answers. Then the timer is the ONLY pending thing, the event loop
@@ -2549,11 +3037,37 @@ function deadline(promise: Approval | Promise<Approval>, ms?: number): Promise<A
     // that surfaced as every later test in the file being CANCELLED rather than
     // failing, which is a far harder symptom to read than a held process.
     // `clearTimeout` in `finally` already buys what `unref` was reaching for.
-    timer = setTimeout(() => resolve({ timedOut: true }), ms);
+    timer = setTimeout(() => resolve(lapsed), ms);
   });
   return Promise.race([Promise.resolve(promise), lapse]).finally(() => {
     if (timer !== undefined) clearTimeout(timer);
   });
+}
+
+/**
+ * `promise`, or an unanswered question after `ms` -- **defaulting to 45
+ * seconds, unlike the approval deadline above, which defaults to forever.**
+ *
+ * The same timer, a different default, and the inversion is the whole point of
+ * this wrapper existing rather than the call site passing a number. Waiting
+ * forever on an approval is right because a lapse there DENIES a commit while
+ * somebody is still reading; waiting forever on a question is wrong twice over:
+ * a lapse denies nothing, and a question that outlives the relay's 60-second
+ * deadline turns "nobody answered" into the relay's `timeout`, which means
+ * nobody knows. Of the two errors, firing late is the expensive one here.
+ *
+ * The lapse value is `{ answered: false }` and not a `timedOut` shape of its
+ * own, because an agent has no use for the difference: a question nobody
+ * answered inside the deadline and a question the app reported unanswered are
+ * the same fact and the same repair. `AskAnswer` therefore has three values and
+ * not four. A non-positive `ms` waits forever, for the app that is only ever
+ * driven in-page.
+ */
+function askDeadline(
+  promise: AskAnswer | Promise<AskAnswer>,
+  ms?: number,
+): Promise<AskAnswer> {
+  return deadline<AskAnswer>(promise, { answered: false }, ms ?? DEFAULT_ASK_TIMEOUT_MS);
 }
 
 /**

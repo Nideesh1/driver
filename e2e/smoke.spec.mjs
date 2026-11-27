@@ -331,6 +331,53 @@ describe("a verb end to end", () => {
   );
 });
 
+describe("a real tab's own elapsed time, through the real relay", () => {
+  /** The id `connect()` minted in this tab, out of its own `sessionStorage`. */
+  const idOf = (p) => p.evaluate(() => sessionStorage.getItem("driverkit:tab:Northwind CRM"));
+
+  test("the figure on a /call answer is the tab's own and not the round trip", async () => {
+    // Everything else about this field is asserted in process against an
+    // injected clock, which cannot tell you that a real page reads a real
+    // `Date.now()` either side of a real `driver.call()` and that the number
+    // survives SSE, a POST, and a relay. This does.
+    //
+    // What makes it an assertion rather than a smoke test is the comparison:
+    // the round trip measured HERE brackets the network as well, so a relay
+    // that had quietly substituted its own figure would report something at
+    // least as large as the whole trip. A demo verb is sub-millisecond, so the
+    // two numbers are not close -- and a `tookMs` that was the round trip
+    // would be caught even on a fast loopback.
+    await go("#/contacts");
+    const tab = await idOf(page);
+    assert.ok(tab, "the page minted no tab id");
+
+    const started = Date.now();
+    const answer = await (
+      await fetch(`${demo.base}/dk/tabs/${encodeURIComponent(tab)}/call`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        // A `read` on the screen the test just navigated to: it is not gated,
+        // so nothing waits on a person and the figure is the app's own work
+        // with nothing to subtract from it.
+        body: JSON.stringify({ name: "search", args: { q: "Acme" }, screen: "contacts" }),
+      })
+    ).json();
+    const roundTrip = Date.now() - started;
+
+    assert.equal(answer.ok, true, `the call did not land: ${JSON.stringify(answer)}`);
+    assert.equal(typeof answer.tookMs, "number", "a real tab reported no duration");
+    assert.ok(answer.tookMs >= 0 && Number.isFinite(answer.tookMs));
+    assert.ok(
+      answer.tookMs <= roundTrip,
+      `the tab's own figure (${answer.tookMs}ms) exceeded the whole round trip (${roundTrip}ms)`,
+    );
+    // Nobody was asked anything, so there is no person to report. The key's
+    // absence is the claim; a `waitedMs: 0` on every call would be rent paid
+    // forever for a fact the absence already carries.
+    assert.equal("waitedMs" in answer, false);
+  });
+});
+
 /**
  * TWO REAL TABS IN ONE BROWSER, which is the only honest test of either of the
  * two multi-tab problems.

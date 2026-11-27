@@ -51,6 +51,24 @@ export interface ResultFrame {
   /** Echoed from the `call` frame. This is the only correlation there is. */
   id: string;
   result: Result;
+  /**
+   * How long the TAB's own work took, in whole milliseconds, with any person's
+   * time already taken out of it. Absent means the tab did not measure, which
+   * is UNKNOWN and not zero; see PROTOCOL.md.
+   *
+   * On the frame and NOT inside `result`, which is the one placement decision
+   * here that matters. `result` is what the APP returned, so a duration in
+   * there would be an app's claim about its own speed; this is the measurement
+   * the page-side harness takes around the single call it makes into the
+   * driver, which is the same bracket `drive` puts around `driver.call()` and
+   * is the only reason either number means anything. See `renderDuration`.
+   */
+  tookMs?: number;
+  /** How much of the wall clock was a PERSON, as the amount already subtracted
+   *  from `tookMs`. Here so the gap between an agent's round trip and `tookMs`
+   *  is accounted for rather than guessed at; never added back by a client.
+   *  See `DriveOptions.waited`, which is the same quantity in the in-page loop. */
+  waitedMs?: number;
   /** Not in PROTOCOL.md's frame listing; see the note in `relay.ts` about how
    *  the relay learns which tab a POST came from. */
   tab?: string;

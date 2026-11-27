@@ -227,7 +227,8 @@ nothing the manifest could have said.
 - **Never use a reserved slug** as a verb name or a refusal — `mount()` throws. The list (`RESERVED_REFUSALS`,
   exported by `driverkit`, is the authority) is all fifteen of: `stale`, `stale-plan`, `wrong-screen`,
   `unknown-verb`, `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`, `timeout`,
-  `declined-by-user`, `approval-pending`, `approval-timeout`, `budget-spent`, `changed-elsewhere`.
+  `declined-by-user`, `approval-pending`, `approval-timeout`, `budget-spent`, `changed-elsewhere`,
+  `ask-unanswered`, `nobody-to-ask`, `asks-spent`.
   `wrong-screen` is the one an app has most likely already invented for itself, and `stale-plan` is the one an
   author drafting a `consumes: "plan"` pair reaches for before reading this line.
 - Return `ctx.refuse("slug", "hint")` for an expected no, `{ count }` from a `describe`, and nothing otherwise.
@@ -299,6 +300,59 @@ Four questions that are **not yours to decide**. Ask them, and wait:
 
 Cut, in this order: anything purely cosmetic (theme, sidebar collapse), anything reachable another way, anything
 needing an id an agent has no honest way to learn, and every `select(id)`-per-row verb.
+
+### Let the agent ask, or it will guess
+
+`approve` is a **gate**: the person can stop the agent. `ask` is a **channel**: the agent can ask the person
+something. Until it existed, an agent that met an ambiguous instruction had two moves, guess or give up — and
+guessing is the expensive one even when it guesses right, because it did not know. It is the same argument
+`declined-by-user` rests on, one level up: a model that cannot tell "the person said no" from "your arguments
+were wrong" retries with different arguments, and **a model that cannot ask will guess.**
+
+Declare it and the core adds a reserved `ask` verb. Nothing else changes; an app that declares nothing gets the
+manifest, the fingerprint and the prompt it had before.
+
+```ts
+let panel: Widget;
+const driver = mount({
+  …,
+  // The ONE function the core cannot write: it has no panel and no idea whether anybody is looking.
+  ask: ({ question }) => panel.question({ question }),
+  // A ceiling on the person's patience. Absent means none, like `calls` and `commits`.
+  budget: { asks: 5 },
+});
+panel = mountWidget(driver, { think });
+```
+
+**It has to be declared at `mount()`.** The panel cannot adopt it the way it adopts the commit gate, and that is
+the one constraint that outranks everything else here: `system` and `tools` are byte-identical on every turn so
+the prompt prefix stays cached, so a verb that appeared when a panel mounted would be a tool list changing
+underneath a running conversation.
+
+**The answer is the call's own result.** The person's words come back as `ok — the person answered: "…"`, which is
+why it works identically through the relay and through the panel and why neither renderer needed a line for it.
+The core keeps **no copy** — which is also the whole of the next point.
+
+**An answer is not an approval.** A `commit` after an answered question still goes to `approve` and can still come
+back `declined-by-user`. There is no remembered yes for a later call to consult, so the separation is structural
+rather than a policy you could relax. Do not wire `ask` to anything that decides whether a commit runs.
+
+**Three ways there is no answer, and they are three facts** — `ask-unanswered` (put, and ignored),
+`nobody-to-ask` (there is no person on this run) and `asks-spent` (the allowance is gone). The repairs differ, so
+the slugs differ, exactly as `approval-timeout` differs from `declined-by-user`. Your hook returns the person's
+words, `{ answered: false }`, or `{ nobody: true }`; a hook that throws is an unanswered question and never a
+claim that nobody is there.
+
+**`askTimeout` defaults to 45 seconds, which is the opposite of `approvalTimeout`'s "wait forever".** A lapsed
+approval *denies* a commit somebody was still reading about; a lapsed question denies nothing. And 45 is chosen
+against the relay's 60: a question that outlived the transport's deadline would turn "nobody answered", which an
+agent can act on, into `timeout`, which means **nobody knows**. If you lower `RelayOptions.timeoutMs`, lower this
+with it.
+
+What the hook must be is honest about who is there. A mounted panel is a place a question can be seen, so
+`Widget.question` answers `{ answered: false }` on teardown and never `{ nobody: true }`; a cron run, a headless
+harness or a tab with no panel is the case for `{ nobody: true }`, and
+[`examples/contacts/evals/app.mjs`](examples/contacts/evals/app.mjs) is that case written down.
 
 ## 4. Import it once
 
@@ -455,7 +509,7 @@ The full contract — every `expect` field, diff mode, caching and the case-writ
 | a full draft over a messy app, verb by verb | [`references/worked-example.md`](skills/driverkit/references/worked-example.md) |
 | the snapshot contract | [`references/snapshot.md`](skills/driverkit/references/snapshot.md) |
 | more than one screen; `Manifest.flows` | [`references/screens.md`](skills/driverkit/references/screens.md) |
-| the panel, its options and its commit gate | [`references/widget.md`](skills/driverkit/references/widget.md) |
+| the panel, its options, its commit gate and its question box | [`references/widget.md`](skills/driverkit/references/widget.md) |
 | the relay and MCP; tab tokens for several users | [`references/relay-mcp.md`](skills/driverkit/references/relay-mcp.md), [`references/auth.md`](skills/driverkit/references/auth.md) |
 | the button nobody wrote a verb for | [`references/controls.md`](skills/driverkit/references/controls.md), [`CONTROLS.md`](packages/driverkit/CONTROLS.md) |
 | measuring the verb list | [`references/eval.md`](skills/driverkit/references/eval.md), [`packages/eval/README.md`](packages/eval/README.md) |

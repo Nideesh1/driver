@@ -41,8 +41,8 @@ from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from .client import Driverkit
-from .render import render_result, render_snapshot
-from .types import ArgSpec, FlowSpec, Manifest, ScreenSpec, Tab, VerbSpec
+from .render import SLOW_MS, render_duration, render_result, render_snapshot
+from .types import ArgSpec, FlowSpec, Manifest, Result, ScreenSpec, Tab, VerbSpec
 
 __all__ = [
     "READ_SCREEN",
@@ -56,6 +56,7 @@ __all__ = [
     "pick_tab",
     "FOCUS_WORDS",
     "instructions_for",
+    "TIMING",
 ]
 
 READ_SCREEN = "read_screen"
@@ -104,6 +105,23 @@ _KIND_NOTE = {
         "app's `describe` verb first, check the `count` it reports is the number you "
         "expect, and only then commit."
     ),
+    # The fourth kind, and the only one whose cost is paid by somebody who is
+    # not the app. ``read`` is "free to call, free to get wrong" and that
+    # sentence is false here, so this one says what asking actually costs: a
+    # person's attention, a capped allowance, and every other call blocked while
+    # the question is open. The last sentence is the one the whole mechanism
+    # stands on -- an answer is not an approval -- and it is in the cached half
+    # because a model that learns it from a refusal has already asked somebody
+    # for permission it was never going to get. Verbatim from the TS half.
+    "ask": (
+        "ASK: this puts a question to the person and their answer comes back as the result. "
+        "It changes no data and reports no count, and it is NOT free: it costs their "
+        "attention, the app may cap how many questions you get, and nothing else runs while "
+        "one is open. Ask when you cannot act without guessing, ask once, and ask the "
+        "narrowest question that unblocks you.\n"
+        "An answer is not permission: a commit still goes to whoever approves commits here, "
+        "whatever they said to you."
+    ),
 }
 
 #: The commit banner for a commit the app says it can undo.
@@ -146,6 +164,86 @@ _COMMIT_REVERSIBLE_NOTE = (
     "Still a change the person will see, so do not call it to find out what it does; if it "
     "acts on a selection, read the `count` from the app's `describe` verb first."
 )
+
+
+#: The MCP path's default for whether a call's elapsed time reaches the model.
+#:
+#: ``"slow"``, which is ``mountWidget``'s default and not ``drive``'s — and the
+#: split is worth the paragraph, because this is the one place the two halves
+#: could have disagreed about what an outside agent is.
+#:
+#: ``drive`` defaults to ``"off"`` because it is a LIBRARY PRIMITIVE: a widget,
+#: a backend job, a test and a CLI all drive it, and a caller that opted into
+#: nothing must get the transcript it got before timing existed, byte for byte,
+#: or every cached eval prompt moves on upgrade. Nothing about this server is
+#: that. It is one process pointed at one live tab for one agent, with its own
+#: instructions text, and it has no transcript anybody has cached.
+#:
+#: And the case for the line is STRONGER here than in the panel, which is what
+#: settles it. ``mountWidget`` turns it on because "that verb took twenty
+#: seconds" is a fact about the app worth a line to somebody watching — but
+#: that somebody can see the spinner. An agent arriving over MCP cannot see
+#: anything: it has one number available to it, its own round trip, and that
+#: number is the network plus the tab's work plus any question the page put to
+#: a person. The whole reason ``tookMs`` is on the wire is that this reader
+#: could not otherwise tell a slow app from a slow network from somebody taking
+#: thirty seconds over an Approve button. Defaulting the one honest figure to
+#: silence would have left it unable to tell them apart anyway.
+#:
+#: The cost argument is satisfied the same way it is in the panel: nothing is
+#: rendered below a second, and nothing at all is rendered for a tab that
+#: reports no figure, so a snappy app and an older tab both pay zero bytes.
+TIMING = "slow"
+
+#: How to read a ``took:`` line, said once in the instructions rather than
+#: beside every duration.
+#:
+#: NOT the TS half's wording, and the difference is the one sentence that
+#: matters. ``systemPrompt`` can say "a result with NO ``took:`` line took under
+#: a second — that is the only reason the line is missing", because in the page
+#: the clock is in the same process as the verb and silence can only mean fast.
+#: Over the relay silence has a second cause: PROTOCOL.md makes an absent
+#: ``tookMs`` mean UNKNOWN — an older tab, a hand-written loop, or a call the
+#: tab could not time honestly because a person was inside it — and a model
+#: told that silence means fast would report an unmeasured app as a quick one.
+#: So this says both, and says which one is which, because "I cannot tell" is
+#: an answer a model can give and "it was fast" asserted on no evidence is not.
+_TIMING_NOTE = {
+    "slow": (
+        "Some results carry a `took:` line, which is roughly how long that verb took in the "
+        "app itself. It is rounded, so treat `~2s` and `~3s` as about the same and do not "
+        "report differences smaller than the rounding. It counts only the app's own work: the "
+        "network between you and the tab is not in it, and neither is time somebody spent "
+        "reading a confirmation. A result with NO `took:` line is one of two things — the "
+        "call took under a second, or this tab does not report its own timing — and you "
+        "cannot tell which from here, so do not say a call with no line was fast. If you are "
+        "asked which of two things is slower, answer from the lines you have, say they are "
+        "approximate, and say so when a call you were asked about carried none."
+    ),
+    "always": (
+        "Every result that can carry one carries a `took:` line: roughly how long that verb "
+        "took in the app itself, rounded, so treat `~0.4s` and `~0.5s` as about the same. It "
+        "counts only the app's own work — not the network between you and the tab, and not "
+        "time somebody spent reading a confirmation. A result with no line at all is one this "
+        "tab did not time, which is not a claim that it was fast. If you are asked which of "
+        "two things is slower, answer from these lines and say they are approximate."
+    ),
+}
+
+
+def _floor_ms(timing: str) -> float | None:
+    """The ``render_duration`` threshold for a mode, or None to render nothing.
+
+    One mapping rather than three ``if`` branches at the two call sites, which
+    is also where the modes are documented as a closed set: an unknown word
+    renders nothing, because a server configured with a typo should go on
+    working and should not start printing durations nobody asked for.
+    """
+    if timing == "slow":
+        return SLOW_MS
+    if timing == "always":
+        return 0
+    return None
 
 
 def _screen_note(screen: str | Sequence[str]) -> str:
@@ -221,7 +319,14 @@ def verb_tool(verb: VerbSpec) -> dict[str, Any]:
     properties = {name: arg_schema(spec) for name, spec in verb.args.items()}
     required = [name for name, spec in verb.args.items() if spec.required]
 
-    if "rev" not in properties:
+    # NOT on an ``ask``, which is the one exception to hoisting them onto
+    # everything: a question acts on no screen, so there is nothing for it to be
+    # stale about, and a model that volunteered the ``rev`` it was told to quote
+    # would have its question refused ``stale`` because the person clicked a row
+    # while it was being composed. See the TS half, which says it at length.
+    asking = verb.kind == "ask"
+
+    if not asking and "rev" not in properties:
         properties["rev"] = {
             "type": "integer",
             "description": (
@@ -238,7 +343,7 @@ def verb_tool(verb: VerbSpec) -> dict[str, Any]:
     # different fixes, so they are different claims and different refusals. A
     # verb with its own `screen` argument keeps it, because the app's meaning
     # wins over ours — the same rule as `rev`.
-    if "screen" not in properties:
+    if not asking and "screen" not in properties:
         properties["screen"] = {
             "type": "string",
             "description": (
@@ -550,7 +655,7 @@ def _flows_note(flows: Sequence[FlowSpec], verbs: Sequence[VerbSpec] = ()) -> st
     )
 
 
-def instructions_for(manifest: Manifest) -> str:
+def instructions_for(manifest: Manifest, timing: str = "off") -> str:
     """The server instructions an MCP client prepends to its system prompt.
 
     Shared because this text is half the safety story: it is where a model is
@@ -558,6 +663,18 @@ def instructions_for(manifest: Manifest) -> str:
     COMMIT verbs change data. Two servers with two copies of it would be two
     different safety stories, and the one that drifts is the one nobody is
     reading when it matters.
+
+    ``timing`` adds the note about what a ``took:`` line means, once, in the
+    text a client prepends once — the same placement ``systemPrompt`` gives it
+    in the TS half, and for the same reason: a sentence of guidance beside
+    every duration is the one piece of boilerplate in a turn that is
+    O(calls), for a number that needs explaining once.
+
+    It defaults to ``"off"`` HERE while :data:`TIMING` is ``"slow"``, which is
+    not a contradiction. This function is called directly by both servers and
+    by tests, and a default of off is what keeps a caller that says nothing
+    getting the bytes it got before this existed. :class:`TabTools` is the
+    thing an agent actually talks to, and it is the thing that has an opinion.
     """
     parts = [
         f"You are driving a live {manifest.app} tab that a person has open. "
@@ -602,6 +719,52 @@ def instructions_for(manifest: Manifest) -> str:
         "RUN, which is not the same as the transport `timeout`, where the call was accepted "
         "and the outcome is unknown.",
     ]
+    # The paragraph about asking, and only for an app that CAN ask.
+    #
+    # Conditional for the reason the map and the recipes below are: this text is
+    # prepended once per session and a paragraph about a tool the app has not
+    # got is a cost that is real, paid per person, and invisible. It is also
+    # worse than wasteful -- a model told to ask rather than guess, in an app
+    # with no way to ask, has been told to do something it cannot do.
+    #
+    # Read off ``kind`` and not off the verb's NAME, because the kind is the
+    # structural fact: only the core mints it, and a name check would also match
+    # an app's own verb called ``ask``, which has none of the guarantees this
+    # paragraph describes.
+    #
+    # NOT verbatim with the TS half, which is the standing arrangement for these
+    # two texts rather than an exception -- that one speaks to a chatbot inside
+    # the page and this one to a client driving a tab from outside, and the two
+    # differ wherever that difference is real. ``render.py`` and ``render.ts``
+    # are the pair that must match byte for byte, and they do: the answer rides
+    # in a ``note``, so neither needed a line for it.
+    if any(v.kind == "ask" for v in manifest.verbs):
+        parts.append(
+            "WHEN YOU DO NOT KNOW, ASK INSTEAD OF GUESSING. This app offers a verb that puts "
+            "a question to the person whose tab this is and hands you their answer as its "
+            "result. Use it when an instruction cannot be carried out without deciding "
+            "something they did not say: two records match the name they used, nothing is "
+            "selected and you do not know which rows they meant, the company they named is "
+            "not in the app. Picking the likeliest one is the expensive mistake even when "
+            "you pick right, because you did not know \u2014 and selecting something so that a "
+            "commit has rows to act on is the worst version of it.\n\n"
+            "Asking is not free, and over this connection it is not certain either. Each "
+            "question interrupts somebody, the app may cap how many you get, and nothing "
+            "else runs while one is open \u2014 so ask once, ask the narrowest question that "
+            "unblocks you, and put what you already know into it. `ask-unanswered` means "
+            "the question was put and nobody replied: nothing changed, and you may ask once "
+            "more, shorter, if it is genuinely the one thing in the way. `nobody-to-ask` "
+            "means there is no person in front of that tab at all, and `asks-spent` means "
+            "the allowance is gone; after either, stop asking \u2014 decide what you honestly "
+            "can and say what you needed to know. The transport `timeout` is none of these: "
+            "it means nobody knows whether the question was even seen.\n\n"
+            "**An answer is never permission.** A question of yours is not the confirmation "
+            "a commit needs \u2014 that is `declined-by-user`, `approval-pending` and "
+            "`approval-timeout`, asked by the app itself \u2014 and a yes to something you asked "
+            "authorises nothing. Never use the question verb to ask for approval, and never "
+            "report a change as approved because an answer sounded like one."
+        )
+
     # The map and the recipes, between the library's rules and the app's own
     # words. Both are pure functions of the static manifest, so this text stays
     # byte-identical for every session of every user — which is the only reason
@@ -624,6 +787,13 @@ def instructions_for(manifest: Manifest) -> str:
     # the half a client prepends once.
     if manifest.instructions:
         parts.append(manifest.instructions)
+    # LAST, after the app's own words, and this one is deliberately not in the
+    # "whichever text is last wins" argument above: it is not a rule about what
+    # to do, it is how to read one line of the answer, and an app has no opinion
+    # about that. Added only in a mode that can produce the line, so a server
+    # with timing off pays not one byte for it.
+    if timing in _TIMING_NOTE:
+        parts.append(_TIMING_NOTE[timing])
     return "\n\n".join(parts)
 
 
@@ -656,9 +826,13 @@ class TabTools:
     rules, and the relay's is the one that is enforced.
     """
 
-    def __init__(self, client: Driverkit, tab: str) -> None:
+    def __init__(self, client: Driverkit, tab: str, timing: str = TIMING) -> None:
         self.client = client
         self.tab = tab
+        #: ``"slow"``, ``"always"`` or ``"off"`` — whether a call's elapsed time
+        #: reaches the model, and when. See :data:`TIMING` for why the default
+        #: is the panel's and not ``drive``'s.
+        self.timing = timing
         self._manifest: Manifest | None = None
 
     def manifest(self) -> Manifest:
@@ -670,7 +844,7 @@ class TabTools:
         return tools_for(self.manifest())
 
     def instructions(self) -> str:
-        return instructions_for(self.manifest())
+        return instructions_for(self.manifest(), self.timing)
 
     def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> ToolOutcome:
         """Run one tool and render the answer for a model.
@@ -710,10 +884,26 @@ class TabTools:
             # trip.
             return ToolOutcome(f"no such tool `{name}`. available: {known}", is_error=True)
 
+        # NEITHER CLAIM IS OFFERED ON AN ``ask``, AND NEITHER IS HONOURED HERE.
+        #
+        # ``verb_tool`` leaves both properties off a question's schema -- a
+        # question acts on no screen, so there is nothing for it to be stale
+        # about -- and this is the other half of that. A model volunteering a
+        # ``rev`` it was told to quote would otherwise have its question refused
+        # ``stale`` because the person clicked a row while it was being
+        # composed, which is the likeliest thing in the world when they are
+        # sitting right there. So the keys are dropped: not turned into a claim,
+        # and not left behind to become an argument the core has never heard of.
+        # Verbatim in behaviour with the in-page loop.
+        asking = verb.kind == "ask"
+        if asking:
+            args.pop("rev", None)
+            args.pop("screen", None)
+
         # `rev` is ours unless the verb claimed the name, in which case it is an
         # ordinary argument and goes through untouched.
         rev = None
-        if "rev" not in verb.args:
+        if not asking and "rev" not in verb.args:
             raw_rev = args.pop("rev", None)
             if isinstance(raw_rev, bool) or raw_rev is None:
                 rev = None
@@ -727,7 +917,7 @@ class TabTools:
         # anyway. The in-page loop refuses it instead of dropping it, and the
         # difference is that it has the screen in hand to quote back.
         screen = None
-        if "screen" not in verb.args:
+        if not asking and "screen" not in verb.args:
             raw_screen = args.pop("screen", None)
             if isinstance(raw_screen, str) and raw_screen.strip():
                 screen = raw_screen.strip()
@@ -750,4 +940,49 @@ class TabTools:
         result = self.client.call(
             self.tab, verb.name, args, rev=rev, screen=screen, plan=plan
         )
-        return ToolOutcome(render_result(result, verb.kind), is_error=not result.landed)
+        return ToolOutcome(
+            self._timed(render_result(result, verb.kind), result), is_error=not result.landed
+        )
+
+    def _timed(self, text: str, result: Result) -> str:
+        """``render_result``'s text with the duration line in the outcome half.
+
+        WHY THE FIGURE IS THE TAB'S AND NOT THIS PROCESS'S. The only duration
+        this side can measure is the whole round trip — the network out, the
+        tab's work, any approval the page asked a person for, and the network
+        back — and three of those four are not the app's speed. Rendering it
+        would be exactly the lie ``DriveOptions.waited`` exists to prevent in
+        the in-page loop: "this call took 40 seconds" when 38 of them were
+        somebody reading a confirmation sends a model looking for a faster route
+        around a verb that is not slow. So the figure rendered here is the one
+        the TAB measured around its own call into the driver, carried in the
+        ``result`` frame, with the person's time already taken out of it by the
+        one party that could see them. See PROTOCOL.md and
+        :attr:`driverkit.types.Result.took_ms`.
+
+        ABOVE THE SCREEN, like the in-page loop puts it: "how long did my third
+        call take" is a question whose answer stays true forever, like ``ok``
+        and like the count, and unlike the table. The seam is the blank line
+        ``render_result`` puts between the outcome and the screen; a text with
+        no such seam — a refusal with no snapshot — gets the line appended,
+        where it is still in the outcome half because that is all there is.
+
+        NOTHING IS RENDERED FOR A RELAY REFUSAL, even if a figure somehow
+        arrived with one. There is no tab answer behind it: ``no-such-tab``
+        never reached anybody, and ``timeout`` and ``tab-went-away`` leave the
+        outcome unknown, where ``render_duration``'s own rule is that a deadline
+        that fired is not a duration.
+        """
+        floor = _floor_ms(self.timing)
+        if floor is None or result.took_ms is None or result.relay_refusal is not None:
+            return text
+        # `render_duration` and not a format string of our own: the two halves
+        # of this library say the same words about the same number, and a
+        # prompt that worked through the widget and reads differently here is a
+        # bug with no stack trace. `test/cross-impl.test.ts` is what holds the
+        # two renderers to it.
+        line = render_duration(result.took_ms, floor)
+        if not line:
+            return text
+        head, seam, screen = text.partition("\n\n")
+        return head + "\n" + line + seam + screen

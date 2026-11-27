@@ -14,8 +14,17 @@ So there are two panels. **This one changes nothing about the other one: the
 vanilla widget's dependency count is still zero and its behaviour is
 untouched.** An app that imports neither pays for neither.
 
-Pre-release, like the rest of the library: nothing is published, and this entry
-point has never been rendered by a real React.
+Pre-release, like the rest of the library: nothing is published.
+
+This entry point **has** now been rendered by a real React — `react` and
+`react-dom` are dev dependencies of the workspace and
+`test/react-dom.test.ts` renders the panel into jsdom, clicks its buttons and
+watches where focus goes. That is new, and it mattered: the first render under
+`StrictMode` found a panel that rendered correctly and then ignored every
+instruction typed into it, and the first real `ref` found the receipt stealing
+focus on every phase change rather than once. Both are fixed and both are
+pinned. What is still unproven is written down in *What has not been rendered*
+at the bottom.
 
 ---
 
@@ -58,6 +67,17 @@ adopter cannot debug from inside their own app.
 
 The cost is real and it is one line. What is lost is `import { DriverPanel }
 from "driverkit/react"` in forty files instead of re-exporting it from one.
+
+That line also has to *typecheck*, which is a separate claim from compiling:
+the React API is described structurally in `src/react/runtime.ts`, and a
+structural description written against types nobody in this repository could
+resolve is a description that can simply be wrong. It was. `ReactRuntime`
+required a `useCallback` this area never calls, typed loosely enough that
+React's own `<T extends Function>` signature did not satisfy it — so
+`createDriverPanel(React)` was a type error in the adopter's own file, on the
+first line of this document. `test/react-dom.test.ts` now assigns React's
+module namespace to `ReactRuntime`, so `tsc` answers that question instead of
+this paragraph.
 
 ## Use it
 
@@ -163,7 +183,22 @@ a replacement card keeps the wording without re-deriving it from the phase.
 `stopped` and `lapsed` are kept apart from `denied` for the reason the core
 keeps `timed-out` apart from `declined`: a record that cannot tell "a person
 refused" from "nobody was there" is the record this whole mechanism exists to
-stop writing.
+stop writing. The two are a question of ordering as well as of vocabulary, and
+the store decides it deliberately: closing a panel with a question open lapses
+the question *before* it aborts the run, because the abort would otherwise
+answer it `stopped` and record the less true of the two available facts.
+
+**Where focus goes, and once.** The status line is also a focus target —
+`tabIndex={-1}`, so it can be focused programmatically and is not a tab stop —
+and focus moves to it the first time the phase leaves `asking`, so somebody who
+pressed a button lands on the answer rather than on whatever followed the
+buttons that have just gone. It moves **once**: a receipt that took focus again
+when the app's verdict arrived a moment later would pull somebody out of the
+message they had started typing. The region itself is therefore mounted once
+and stays, and only the line inside it is keyed on the phase. A replacement
+card that remounts the region per phase gets both halves wrong — the focus
+moves again, and the node holding focus leaves the document — which is not a
+guess: it is what this one did until it was rendered with React.
 
 ### Standing rules — off by default
 
@@ -268,6 +303,14 @@ already there:
 - walking the emitted imports from `dist/core/index.js` transitively never
   reaches `dist/react/`.
 
+**A test-time renderer is not a shipped dependency.** `react`, `react-dom` and
+`jsdom` are dev dependencies of the *workspace* — the repository root, not the
+package — so they are in this repository's lockfile and in nobody's install.
+All four assertions above are about `packages/driverkit/package.json` and the
+files under `dist/`, and all four still hold with React on disk; the one that
+would have noticed a slip is the probe that loads `dist/react/index.js` in a
+child `node` and checks it names no bare specifier at all.
+
 ## What is feature-equivalent, and what is deliberately not
 
 Equivalent, and tested:
@@ -321,7 +364,7 @@ Deliberately not:
 | "No" focused / reached first, "Yes" one key further | **kept** | a person pressing Enter on a card that appeared while they were typing must not thereby accept a thousand rows |
 | the step row appearing on `onBeforeCall`, before the pace wait | **kept** | the only way "you can see it coming and stop it" is true rather than aspirational |
 | named speeds rather than a free slider | **kept** | milliseconds are not a thing anybody has an opinion about, and four labelled radios are keyboard-reachable without anybody being careful forever |
-| `aria-live="polite"` on the whole transcript | **dropped as a bug** | at a 600ms pace the region is re-read as each step row lands, so the person hears a growing conversation from the top instead of what just changed. State is announced instead, in one-sentence `role="status"` regions keyed so each change re-announces |
+| `aria-live="polite"` on the whole transcript | **dropped as a bug** | at a 600ms pace the region is re-read as each step row lands, so the person hears a growing conversation from the top instead of what just changed. State is announced instead, in one-sentence `role="status"` regions that stay in the document, each with a keyed line inside it so a change replaces a node rather than editing one |
 | the approval row keeping its outcome line | **kept and extended** | the vanilla row survives and records that *you* answered; this also records what the *app* then did, which is the half that turns a decision into a record of a change |
 
 ## What a React adopter can get wrong that the vanilla widget made impossible
@@ -347,13 +390,69 @@ express.
   receipt inherit another entry's state mid-run.
 - **Calling `useDriver` twice for one driver.** Two stores means two gates, and
   the second one's `onBeforeCommit` is a second question about one commit. One
-  store per driver; lift it if two components need it.
+  store per driver; lift it if two components need it. (One hook rendered
+  twice under `StrictMode` is *not* this: that builds one store, and a test
+  pins it.)
 - **Expecting an options change to take effect.** The store is built once per
   `driver` and the options are read then. The things a person changes while
   watching a run — pace, step mode, confirmations — are state with setters for
   exactly that reason. Re-key the component if you genuinely need new options.
 - **Persisting grants.** If you add storage for `PanelSnapshot.grants`, you have
   changed what a standing approval means. See above.
+
+## StrictMode, and what the hook does about it
+
+Worth one section because it is the configuration every React app runs in
+development, and because this area got it wrong.
+
+`StrictMode` double-invokes a component's body and, since React 18, also runs
+each mount effect's **cleanup and then the effect again**. The second half is
+the one that bites a library holding a resource: the obvious
+`useEffect(() => () => store.destroy(), [store])` therefore destroys the store
+during mount, and `destroy` is final — it clears the listeners and latches the
+store closed, so `ask` returns immediately and the panel renders perfectly
+while doing nothing at all. That is what this hook did in `70ca8aa`, and no
+framework-free test could see it, because nothing in one runs an effect twice.
+
+What it does now:
+
+- **The store is built lazily in render and kept in a ref**, so the
+  double-invoked render finds the one it already made. `useMemo` would not do:
+  React may double-invoke a memo factory, and two stores for one driver means
+  two gates.
+- **Render tears nothing down.** A `driver` change no longer destroys the
+  outgoing store from inside render — a render may be discarded, and destroying
+  a live store speculatively would abort a run that is still on screen. The
+  effect owns every teardown.
+- **The teardown is a hold count, decided one microtask late.** The cleanup
+  gives up its hold; only a hold count still at zero on the next microtask is a
+  real unmount. StrictMode's remount re-takes the hold first, so the store
+  survives with its conversation intact.
+- **A mount onto a store somebody already destroyed builds a new one**, through
+  `PanelStore.destroyed`. That is the hidden-then-re-shown case — `<Activity>`
+  far enough apart that the microtask already ran — where nothing can revive
+  the store. The conversation is gone in that case; the panel is not.
+
+## What has not been rendered
+
+Honest list, since the top of this file now claims rather a lot more than it
+used to.
+
+- **jsdom is not a browser.** It lays nothing out and has no screen reader, so
+  "the status region is announced" is not asserted anywhere and cannot be. What
+  is asserted is the structure that makes it possible. The vanilla widget's
+  equivalent claims meet a real Chrome in `e2e/`; this panel's do not, because
+  the demo in `examples/` is the vanilla one.
+- **No concurrent-rendering stress.** `useSyncExternalStore` is what makes the
+  panel tear-free under a transition, and that is React's guarantee rather than
+  a tested one here. What was removed was the thing that would break it: render
+  no longer has side effects.
+- **One React.** The tests run against React 19. The peer range is `>=18`
+  because `useSyncExternalStore` is an 18 API; nothing here has been rendered by
+  an 18.
+- **No React Server Components.** `useDriver` is a client hook over a live
+  driver and a browser event stream; the panel has never been near an RSC
+  boundary, and `"use client"` is the host's to write.
 
 ## Reference
 

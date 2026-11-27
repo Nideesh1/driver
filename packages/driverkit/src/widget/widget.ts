@@ -34,7 +34,15 @@
  * `backendThink` for the thirty lines that make the realistic deployment work.
  */
 
-import type { Approval, ApprovalRequest, Driver, Snapshot } from "../core/index.ts";
+import { ASK } from "../core/index.ts";
+import type {
+  Approval,
+  ApprovalRequest,
+  AskAnswer,
+  AskQuestion,
+  Driver,
+  Snapshot,
+} from "../core/index.ts";
 // A value import, and the only one that crosses an entry point's boundary:
 // everything else between areas is `import type`, which
 // `verbatimModuleSyntax` erases outright. It used to be the one line that
@@ -434,6 +442,49 @@ export interface Widget {
    * itself a reason to say no.
    */
   approve: (req: ApprovalRequest) => Promise<Approval>;
+  /**
+   * The panel's question box, as a `MountOptions.ask` hook.
+   *
+   * The other half of `approve`, and deliberately not symmetrical with it in
+   * one way: **you do have to wire this one up.** A panel cannot adopt an ask
+   * hook the way it adopts the approval gate, and the reason is the constraint
+   * the whole library is priced on — `system` and `tools` are byte-identical on
+   * every turn so the prompt prefix stays cached, so the `ask` verb has to be
+   * in the manifest from `mount()` or not at all. A verb that appeared when a
+   * panel mounted would be a tool list changing underneath a running
+   * conversation. So:
+   *
+   * ```ts
+   * let panel: Widget;
+   * const driver = mount({ …, ask: (q) => panel.question(q) });
+   * panel = mountWidget(driver, { think });
+   * ```
+   *
+   * The same forward reference `approve` documents, for the same reason:
+   * `mount()` has to happen before the panel that will answer for it exists.
+   *
+   * Then an agent that cannot act without guessing asks, and the person types
+   * an answer into the transcript. It works on both paths for nothing extra:
+   * an agent arriving over the relay or MCP asks through the same hook and the
+   * question appears in the same panel, with the core holding its lock for the
+   * duration so that agent can call nothing else while the question is open.
+   *
+   * **NAMED `question` AND NOT `ask` BECAUSE `Widget.ask` IS TAKEN**, and by
+   * the opposite direction of the same conversation: `ask(text)` types a
+   * sentence into the panel as if the person had, which is the person asking
+   * the agent. This is the agent asking the person. Two methods called `ask`
+   * meaning opposite directions would be the worst possible naming in this
+   * file.
+   *
+   * It answers `{ answered: false }` when the panel is unmounted or the run is
+   * stopped with a question still on screen, and never a string: nobody spoke,
+   * and a panel that invented an answer would be putting words in a person's
+   * mouth. It never answers `{ nobody: true }` — a mounted panel is a place a
+   * question can be seen, so "there is nobody here" is not this panel's claim
+   * to make. An app that knows better (a cron run, a tab with no panel) says
+   * so from its own hook.
+   */
+  question: (q: AskQuestion) => Promise<AskAnswer>;
   /** Move the panel, as `WidgetOptions.position`. Persisted like a drag. */
   moveTo: (position: Position) => void;
   /** Where the panel is, as fractions of the free space in `[0, 1]`, or null
@@ -869,7 +920,16 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
    */
   const spend = driver.budget?.();
   const budgetRow =
-    spend && (spend.calls.limit !== undefined || spend.commits.limit !== undefined)
+    spend &&
+    (spend.calls.limit !== undefined ||
+      spend.commits.limit !== undefined ||
+      // The question ceiling belongs in this row and not in a switch of its
+      // own, which is the whole of why it is here: it is the app's number and
+      // not a viewer's comfort setting. A person who could raise their own
+      // allowance of questions does not have one -- and the number IS worth
+      // showing, because "it has asked me four of its five" is what makes the
+      // fifth question read as the last one rather than as an app going quiet.
+      spend.asks.limit !== undefined)
       ? setRow(
           "This session's limit",
           "Set by the app, not by this panel, so it cannot be changed from here. It counts " +
@@ -895,6 +955,9 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     }
     if (now.commits.limit !== undefined) {
       parts.push(`${now.commits.used} of ${now.commits.limit} changes to data used`);
+    }
+    if (now.asks.limit !== undefined) {
+      parts.push(`${now.asks.used} of ${now.asks.limit} questions asked`);
     }
     budgetText.textContent = parts.join(" · ");
   };
@@ -1682,6 +1745,189 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
   }
 
   /**
+   * Put the agent's question to the person, in the shape of
+   * `MountOptions.ask`.
+   *
+   * The twin of `approveRequest` and deliberately shorter, because almost
+   * everything that makes a question safe is the core's: the lock, the
+   * deadline, the allowance, the record, and the fact that nothing keeps the
+   * answer. What is left for a panel is the box and the honest teardown.
+   *
+   * THERE IS NO `shouldAsk` HERE, AND THAT IS THE DIFFERENCE WORTH NAMING. The
+   * approval dialog has thresholds — a small reversible commit goes through
+   * unasked — because it is a gate and a gate that stops you over a page-size
+   * change is one you learn to click through. A question is not a gate. The
+   * agent asked because it could not act without guessing, so a panel that
+   * answered on its behalf would be inventing the answer, which is the one
+   * thing neither this panel nor the core will do. Every question reaches the
+   * person; what bounds them is `Budget.asks`, which is the app's to set and
+   * not a viewer's comfort setting.
+   */
+  async function questionFor(q: AskQuestion): Promise<AskAnswer> {
+    // The run, when there is one, says "waiting for you" rather than
+    // "running" -- the same borrowing of `awaiting-approval` that
+    // `approveRequest` does, and for the same reason: the loop asked for a
+    // verb and has no idea a person is now being typed at. The state is named
+    // for approval and means "parked in front of somebody", which is true
+    // here; a fifth `RunState` for it would be a word a panel renders
+    // identically.
+    const was = runState;
+    if (active) show("awaiting-approval");
+    try {
+      // No `withLock`: the core takes its lock before it calls the ask hook,
+      // exactly as it does before an approver, and a second take would assert
+      // a thing that is already true.
+      //
+      // The run's signal when there is one, so stopping a run also closes a
+      // question asked during it. A question that arrived over the relay has no
+      // run and no signal: it stays open until somebody answers, the core's
+      // `askTimeout` lapses -- 45 seconds by default, unlike the approval,
+      // which waits forever -- or this panel is unmounted.
+      return await askAnswer(q, running?.signal);
+    } finally {
+      if (active) show(was);
+    }
+  }
+
+  /**
+   * Render the question and a box, and wait for what they type.
+   *
+   * EVERY EXIT THAT IS NOT SOMEBODY TYPING IS `{ answered: false }`, and there
+   * is deliberately no other answer in here. A stopped run, a torn-down panel,
+   * a person who presses "Not now": none of them is a person speaking, and the
+   * core keeps "asked and ignored" apart from "asked and answered" on the
+   * strength of that. A panel that answered "" or "no" on teardown would be
+   * putting a word in somebody's mouth and letting a model act on it.
+   *
+   * It also never answers `{ nobody: true }`. A mounted panel is a place a
+   * question can be seen, even if nobody is looking at it this minute; "there
+   * is nobody on this run" is a claim about the deployment and is the app's to
+   * make, from its own hook. See `AskAnswer`.
+   */
+  function askAnswer(
+    q: AskQuestion,
+    signal: { addEventListener?: (type: string, fn: () => void) => void } | undefined,
+  ): Promise<AskAnswer> {
+    // A question nobody can see is not a question -- the same first two lines
+    // as the approval dialog, and the same reason: they may have hit Escape
+    // while the model was thinking, or be reading the settings view.
+    setOpen(true);
+    setSettingsOpen(false);
+
+    // From here until somebody answers, the stored record says a question was
+    // open. `asked`, like the approval, and for a stronger version of the same
+    // reason: a question runs no verb at all, so a page that dies now provably
+    // changed nothing.
+    inFlight = { verb: ASK, phase: "asked" };
+    rememberNow();
+
+    // The clock on the human wait starts here and stops in `answer` below,
+    // whichever way it ends. The core times its own side for the audit record;
+    // this is the figure the MODEL's durations are measured against, so that a
+    // call that waited 30 seconds on a person is not reported to it as a slow
+    // app. See `waitedMs` and `DriveOptions.waited`.
+    const askedAt = Date.now();
+
+    const row = el("div", "dk-ask dk-q");
+    const question = el("div", "dk-ask-q");
+    // The agent's own words, verbatim. The core does not rewrite a question
+    // and neither does this: a question the panel paraphrased is a question the
+    // person answers and the model did not ask.
+    question.textContent = q.question;
+    const why = el("div", "dk-ask-why");
+    why.textContent =
+      `${app} is asking you, because it cannot do what you asked without guessing. ` +
+      "Whatever you type goes back to it as the answer. Nothing has changed yet, and " +
+      "answering is not approving: anything that changes data is still confirmed " +
+      "separately.";
+    const box = el("input", "dk-ask-box");
+    box.setAttribute("type", "text");
+    box.setAttribute("autocomplete", "off");
+    box.setAttribute("aria-label", q.question);
+    box.setAttribute("placeholder", "Your answer…");
+    const reply = el("button", "dk-yes");
+    reply.textContent = "Answer";
+    reply.setAttribute("type", "button");
+    const skip = el("button", "dk-no");
+    skip.textContent = "Not now";
+    skip.setAttribute("type", "button");
+
+    row.appendChild(question);
+    row.appendChild(why);
+    row.appendChild(box);
+    row.appendChild(skip);
+    row.appendChild(reply);
+    post(row);
+    // The BOX is focused and not the safe button, which is the opposite of the
+    // approval dialog, and the asymmetry is the point. There, Enter on a dialog
+    // that appeared while somebody was typing must not accept a thousand rows,
+    // so the safe answer has the focus. Here the only thing Enter can do is
+    // send what they typed, and an empty box sends nothing -- so focusing it
+    // costs nothing and saves a click on the one interaction in this panel
+    // where the person has to type.
+    box.focus?.();
+
+    return new Promise<AskAnswer>((resolve) => {
+      let answered = false;
+      const answer = (decision: AskAnswer, said: string): void => {
+        if (answered) return;
+        answered = true;
+        // Counted on EVERY exit, like the approval dialog's: a model told that
+        // a question "took 40 seconds" has learnt a false thing about the app's
+        // speed whether or not anybody answered it.
+        waitedMs += Math.max(0, Date.now() - askedAt);
+        if (inFlight?.phase === "asked" && inFlight.verb === ASK) inFlight = undefined;
+        openQuestions.delete(onTeardown);
+        // The controls go and the answer stays. Scrolling back and finding a
+        // live box beside a question that was answered twenty turns ago is
+        // worse than no record at all.
+        box.remove();
+        reply.remove();
+        skip.remove();
+        const outcome = el("div", "dk-ask-said");
+        outcome.textContent = said;
+        row.appendChild(outcome);
+        scroll();
+        rememberNow();
+        resolve(decision);
+      };
+
+      const send = (): void => {
+        const typed = String(box.value ?? "").trim();
+        // An empty box is not an answer and must not be sent as one. Nothing
+        // happens, the box keeps the focus, and the question stays open --
+        // which is the honest behaviour: they have not answered yet. "Not now"
+        // is how somebody declines to answer, and it says so.
+        if (typed === "") {
+          box.focus?.();
+          return;
+        }
+        answer(typed, `You answered: ${typed}`);
+      };
+
+      reply.addEventListener("click", send);
+      box.addEventListener("keydown", (event) => {
+        const key = (event as { key?: string }).key;
+        if (key !== "Enter") return;
+        (event as { preventDefault?: () => void }).preventDefault?.();
+        send();
+      });
+      skip.addEventListener("click", () =>
+        answer({ answered: false }, "You did not answer this."),
+      );
+      signal?.addEventListener?.("abort", () =>
+        answer({ answered: false }, "Stopped before this was answered."),
+      );
+      // Registered last, so the set only ever holds questions that are
+      // genuinely open.
+      openQuestions.add(onTeardown);
+      function onTeardown(): void {
+        answer({ answered: false }, "The panel was closed before this was answered.");
+      }
+    });
+  }
+
+  /**
    * Render the question in the transcript and wait for an answer.
    *
    * `signal` is the run's abort, when there is a run. Without it a stop or an
@@ -2197,6 +2443,7 @@ export function mountWidget(driver: Driver, options: WidgetOptions): Widget {
     // that wires this up by hand and an app that wires up nothing get the
     // identical dialog, the identical rules and the identical record.
     approve: approveRequest,
+    question: questionFor,
     moveTo: place.moveTo,
     position: place.chosen,
     unmount: () => {

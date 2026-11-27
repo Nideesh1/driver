@@ -52,7 +52,9 @@ const USAGE = `driverkit eval — does this app's verb list actually work?
   --endpoint URL         the Think endpoint (default http://127.0.0.1:$DK_PORT/api/chat)
   --model NAME           what to record as the model (default $DK_MODEL)
   --app FILE             the module exporting newDriver() (default <suite-dir>/app.mjs)
-  --ask-verb NAME        the verb that means "ask the person", once the app has one
+  --ask-verb NAME        the verb that means "ask the person". Only needed for an app
+                         that asks through a verb of its own: a kind:"ask" verb, which
+                         is what mount({ ask }) offers, is found without it
   --cache DIR            transcript cache (default <suite-dir>/.cache); --no-cache to skip
   --save FILE            write the result, for --diff later
   --baseline FILE        run, then diff against this saved result

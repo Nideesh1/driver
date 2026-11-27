@@ -56,7 +56,7 @@
  */
 
 import type { Manifest, Scalar } from "../core/index.ts";
-import { REDACTED } from "../core/index.ts";
+import { ASK, REDACTED } from "../core/index.ts";
 import type { ToolCall, Turn } from "../agent/types.ts";
 
 import type { StorageLike } from "./dom.ts";
@@ -291,9 +291,21 @@ export function closeDangling(turns: Turn[], inFlight?: ChatInFlight): Turn[] {
         callId: call.id,
         name: call.name,
         text: known
-          ? "not run: the person was being asked to confirm this and the page was reloaded " +
-            "before they answered, so the verb did not run and nothing changed. This is not " +
-            "an error. Ask them again if it is still what they want."
+          ? call.name === ASK
+            ? // A QUESTION, not a confirmation, and the two must not share a
+              // sentence. "The person was being asked to confirm this" is false
+              // of a question in a way that matters: a model told its question
+              // was a confirmation request may conclude the answer would have
+              // been a yes, which is the one inference this channel exists to
+              // make impossible. Nothing changed either way -- a question runs
+              // no verb at all, which is a stronger claim than the one below.
+              "not run: you were being asked this question and the page was reloaded before " +
+              "anybody answered. No answer was recorded, nothing in the app changed, and no " +
+              "verb ran. This is not an error and it is not a yes. Ask again if you still " +
+              "need to know."
+            : "not run: the person was being asked to confirm this and the page was reloaded " +
+              "before they answered, so the verb did not run and nothing changed. This is not " +
+              "an error. Ask them again if it is still what they want."
           : "the page was reloaded while this call was in flight, so no answer ever came back. " +
             "The outcome is UNKNOWN: it may well have run. DO NOT retry it. Read the screen " +
             "first and decide from what you see there, and say plainly that you cannot tell " +
@@ -323,6 +335,14 @@ export function restoredLines(record: SavedChat): string[] {
       `The page reloaded while \`${record.inFlight.verb}\` was running. This panel cannot ` +
         `tell whether it took effect — that answer was on the server, and the page waiting ` +
         `for it is gone. Check the app before doing anything else.`,
+    );
+  } else if (record.inFlight?.phase === "asked" && record.inFlight.verb === ASK) {
+    // A question, not a confirmation. "You were being asked to approve `ask`"
+    // is a sentence about something that did not happen, and the person reading
+    // it would go looking for the commit it named.
+    lines.push(
+      "The page reloaded while the agent was asking you a question. You never answered, so " +
+        "it was not told anything and nothing in the app changed.",
     );
   } else if (record.inFlight?.phase === "asked") {
     lines.push(

@@ -4,6 +4,25 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Northwind CRM</title>
+    <!-- The tab icon, inline.
+
+         A page that declares no icon is a page the browser asks for
+         `/favicon.ico` anyway, and this demo's server answers 404 — which is
+         a console error, which is a failing assertion in
+         `e2e/smoke.spec.mjs`'s "loads with no console errors". Bundled
+         chromium does not make that request and real Chrome does, so the
+         suite passed under Playwright's browser and failed under
+         `DK_CHANNEL=chrome`, which is the configuration closest to what
+         somebody actually runs.
+
+         A data URI rather than a file, because the demo is served by
+         `examples/contacts/server.mjs` from a short allow-list of paths and an
+         icon is not worth a route. It is the same rounded square and the same
+         `--accent` as the brand mark in the rail. -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f5eff'/%3E%3Ctext x='16' y='22' text-anchor='middle' font-family='system-ui,sans-serif' font-size='14' font-weight='700' fill='%23fff'%3ENW%3C/text%3E%3C/svg%3E"
+    />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>

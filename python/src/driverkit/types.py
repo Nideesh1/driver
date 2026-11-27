@@ -58,7 +58,12 @@ Scalar = str | int | float | bool | None
 #: irreversible. Mirrors ``VerbKind``, whose comment carries the argument for
 #: why navigation is a ``read`` and not a fourth kind.
 VerbKind = str
-VERB_KINDS = ("read", "describe", "commit")
+#: ``ask`` is the fourth, and only the core mints it: an app verb may not
+#: declare it. See ``VerbKind`` in the TypeScript half for why a question is not
+#: a ``read`` -- the three kinds are a ladder of what a wrong call costs you,
+#: and a wrong question costs a person's attention, which is the one currency
+#: the other three never spend.
+VERB_KINDS = ("read", "describe", "commit", "ask")
 
 #: Refusals that come from the relay rather than from an app's verb, as a
 #: closed set. A client has to be able to tell "your app said no", which means
@@ -112,6 +117,30 @@ def _drop_none(d: dict[str, Any]) -> dict[str, Any]:
     explicit nulls would make a round-tripped manifest stop matching itself.
     """
     return {k: v for k, v in d.items() if v is not None}
+
+
+def _duration(value: Any) -> int | None:
+    """A duration off the wire, or None for anything that is not one.
+
+    ``bool`` is excluded explicitly, as everywhere else in this file that reads
+    a number off JSON: ``True`` is an ``int`` in Python, and ``tookMs: true``
+    is not a measurement. A negative or non-finite figure is a broken clock
+    rather than a fast call, which is the judgement
+    :func:`driverkit.render.render_duration` already makes when it renders
+    silence for one, made here as well so the field never holds one. Whole
+    milliseconds, because a float survives JSON and nothing here wants tenths
+    of a millisecond.
+
+    Dropping rather than raising is the rule :meth:`Tab.from_dict` set for a
+    ``focus`` that is not a string: a client that refused to parse a result
+    because one optional field was junk would lose the screen as well, and the
+    screen is the half that matters.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")) or value < 0:
+        return None
+    return int(value)
 
 
 def _screens(value: Any) -> str | tuple[str, ...] | None:
@@ -729,6 +758,26 @@ class Result:
     plan: str | None = None  # ok=True only
     refused: str | None = None  # ok=False only
     hint: str | None = None  # ok=False only
+    #: How long the TAB's own work took, in whole milliseconds, with any
+    #: person's time already taken out of it — the figure the relay carried
+    #: from the ``result`` frame, measured in the page around its one call into
+    #: the driver.
+    #:
+    #: ``None`` IS UNKNOWN AND NOT ZERO, the rule :attr:`Tab.focus` already
+    #: has. A tab from before the field existed, a hand-written ``fetch`` loop,
+    #: and a tab that could not isolate a person's wait all say nothing — and a
+    #: client that read silence as zero would tell a model that every one of
+    #: those apps is instant. Render nothing for it; see
+    #: :func:`driverkit.render.render_duration`, which this is the one honest
+    #: input to over the relay.
+    took_ms: int | None = None  # wire name: tookMs
+    #: How much of the wall clock was a PERSON, as the amount already
+    #: subtracted from :attr:`took_ms`. Present only when somebody was actually
+    #: waited on, and never added back: it is here so the gap between this
+    #: client's own round trip and ``took_ms`` is accounted for rather than
+    #: guessed at, and a renderer that added the two would be reporting a
+    #: confirmation dialog as the app being slow.
+    waited_ms: int | None = None  # wire name: waitedMs
 
     @classmethod
     def from_dict(cls, d: Mapping[str, Any]) -> "Result":
@@ -736,6 +785,7 @@ class Result:
         ok = bool(d.get("ok"))
         count = d.get("count")
         plan = d.get("plan")
+        took_ms = _duration(d.get("tookMs"))
         return cls(
             ok=ok,
             snapshot=Snapshot.from_dict(snapshot) if isinstance(snapshot, Mapping) else None,
@@ -744,6 +794,11 @@ class Result:
             plan=str(plan) if ok and isinstance(plan, str) and plan else None,
             refused=None if ok else str(d.get("refused", "unknown")),
             hint=d.get("hint") if not ok else None,
+            took_ms=took_ms,
+            # Only beside a `took_ms`, never on its own: it is defined as the
+            # amount already subtracted from that figure, so without one it is a
+            # quantity relative to nothing and a reader might subtract it twice.
+            waited_ms=_duration(d.get("waitedMs")) if took_ms is not None else None,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -761,6 +816,14 @@ class Result:
                 out["hint"] = self.hint
         if self.snapshot is not None:
             out["snapshot"] = self.snapshot.to_dict()
+        # Written beside `ok` rather than inside anything, because that is where
+        # the relay puts them: they are the relay's copy of the tab's own
+        # measurement and are reserved on this body, never the app's to fill in.
+        # See PROTOCOL.md on the `result` frame.
+        if self.took_ms is not None:
+            out["tookMs"] = self.took_ms
+            if self.waited_ms is not None:
+                out["waitedMs"] = self.waited_ms
         return out
 
     @property

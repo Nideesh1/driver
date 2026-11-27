@@ -106,7 +106,8 @@ the rules are [`INTEGRATING.md`](../../INTEGRATING.md) §2–§3:
 - Never fill `Snapshot.selected` with every selected id — on-screen ids only, with `selectedCount` for the size.
 - A verb may not be named — or refuse with — a reserved slug. All fifteen: `stale`, `stale-plan`,
   `wrong-screen`, `unknown-verb`, `bad-argument`, `unmounted`, `threw`, `no-such-tab`, `tab-went-away`,
-  `timeout`, `declined-by-user`, `approval-pending`, `approval-timeout`, `budget-spent`, `changed-elsewhere`
+  `timeout`, `declined-by-user`, `approval-pending`, `approval-timeout`, `budget-spent`, `changed-elsewhere`,
+  `ask-unanswered`, `nobody-to-ask`, `asks-spent`
   (`RESERVED_REFUSALS`, exported by `driverkit`, is the authority). `mount()` throws on a reserved verb name or a
   reserved declared refusal. `wrong-screen` is the one an app is most likely to
   have invented for itself; `Verb.screen` replaces that guard — [screens.md](references/screens.md).

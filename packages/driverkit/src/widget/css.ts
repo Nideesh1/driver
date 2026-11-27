@@ -429,6 +429,25 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .dk-ask-q { flex: 1 0 100%; font-weight: 600; color: var(--dk-commit); }
 .dk-ask-why { flex: 1 0 100%; font-size: 12px; color: var(--dk-dim); }
 .dk-ask-said { flex: 1 0 100%; font-size: 12px; color: var(--dk-dim); }
+
+/* A QUESTION, which is not a confirmation and must not look like one.
+   .dk-ask is bordered and coloured in the commit colour because it is the one
+   place somebody is asked to allow something irreversible. A question changes
+   nothing, so it borrows the layout and gives back the alarm: the border and
+   the heading go to the ordinary line colour. Two dialogs that look alike are
+   one dialog as far as a person's attention is concerned, which is the argument
+   the reversible-commit wording is already built on. */
+.dk-q { border-color: var(--dk-line); }
+.dk-q .dk-ask-q { color: inherit; }
+.dk-ask-box {
+  flex: 1 1 100%;
+  border: 1px solid var(--dk-line);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font: inherit;
+  color: inherit;
+  background: var(--dk-you);
+}
 .dk-yes, .dk-no { border-radius: 8px; padding: 6px 12px; border: 1px solid var(--dk-line); background: var(--dk-you); }
 .dk-yes { border-color: var(--dk-commit); color: var(--dk-commit); font-weight: 600; }
 

@@ -17,6 +17,7 @@ import { mount } from "../src/core/registry.ts";
 import type { Driver, Snapshot } from "../src/core/types.ts";
 import type { Think, ThinkInput, Turn } from "../src/agent/types.ts";
 import { mountWidget } from "../src/widget/index.ts";
+import type { AskHook } from "../src/core/index.ts";
 import type { WidgetOptions } from "../src/widget/index.ts";
 import {
   CHAT_VERSION,
@@ -450,6 +451,65 @@ test("an approval that was open when the page died comes back saying it never ra
   assert.match(text, /You never answered, so it did not run and nothing changed\./);
   assert.equal(app.accepted(), 0, "a commit ran that nobody approved");
   assert.equal(back.s.seen.length, 0);
+});
+
+test("a reload with a QUESTION open says it was a question and never that it was a confirmation", async () => {
+  // The same mechanism one case over, and the wording is the whole test. A
+  // question and a confirmation are both `phase: "asked"` in the record,
+  // because both are "somebody was being asked something and nothing had run"
+  // -- but a restored panel that said "you were being asked to approve `ask`"
+  // would be describing a commit that never existed, and the person reading it
+  // would go looking for the rows it named.
+  //
+  // It matters to the MODEL more than to the person. The dangling tool turn is
+  // what the model reads on the next turn, and telling it that its question was
+  // a confirmation request invites exactly the inference this channel exists to
+  // make impossible: that the answer would have been a yes.
+  // The panel is the ask hook, through the forward reference the library
+  // documents: `mount()` happens before the panel that answers for it exists,
+  // and the `ask` verb has to be in the manifest from `mount()` because the
+  // tool list must not change when a panel appears.
+  let live: { question: AskHook } | undefined;
+  const app = contacts({ ask: (q) => live!.question(q) });
+  const session = new FakeStorage();
+  const first = load(
+    app.driver,
+    [{ calls: [{ id: "q", name: "ask", args: { question: "which Ada Duarte did you mean?" } }] }],
+    session,
+  );
+  live = first.widget;
+  await ask(first.host, "select Ada Duarte");
+  await settle();
+  await settle();
+
+  assert.match(first.host.one("dk-ask-q").textContent ?? "", /which Ada Duarte/);
+  assert.equal(stored(session).inFlight?.phase, "asked");
+  assert.equal(stored(session).inFlight?.verb, "ask");
+
+  const back = load(app.driver, [{ text: "idle" }], session);
+  live = back.widget;
+  const text = transcript(back.host);
+  assert.match(text, /the agent was asking you a question/);
+  assert.match(text, /it was not told anything and nothing in the app changed/);
+  assert.doesNotMatch(text, /asked to approve/);
+  assert.equal(back.s.seen.length, 0);
+
+  // And the dangling tool turn the MODEL would read on the next turn, which is
+  // the half that matters more and is not in the DOM. It has to say that no
+  // answer was recorded, because the alternative wording -- "the person was
+  // being asked to confirm this" -- invites the model to conclude the answer
+  // would have been a yes.
+  const closed = closeDangling(
+    [
+      { role: "user", text: "select Ada Duarte" },
+      { role: "assistant", calls: [{ id: "q", name: "ask", args: { question: "which one?" } }] },
+    ],
+    { verb: "ask", phase: "asked" },
+  );
+  const dangling = closed.find((t) => t.role === "tool")!;
+  assert.match(dangling.text, /No answer was recorded/);
+  assert.match(dangling.text, /not an error and it is not a yes/);
+  assert.doesNotMatch(dangling.text, /asked to confirm/);
 });
 
 test("a plan token does not survive a reload, and spending a dead one is a clean stale-plan", async () => {
